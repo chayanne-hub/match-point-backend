@@ -110,18 +110,20 @@ router.get('/live', async (req, res) => {
       liveScore: m.liveScore,
       liveClock: m.liveClock,
       picks: await Promise.all(
-        m.picks.map(async (p) => {
-          const unlocked = await userHasAccess(userId, p.id);
-          return {
-            id: p.id,
-            selection: unlocked ? p.selection : null,
-            confidence: unlocked ? p.confidence : null,
-            odds: p.odds,
-            price: p.price,
-            unlocked,
-          };
-        })
-      ),
+  m.picks.map(async (p) => {
+    const unlocked = await userHasAccess(userId, p.id);
+    return {
+      id: p.id,
+      selection: unlocked ? p.selection : null,
+      // Confidence is shown to everyone as a teaser — it's the hook that
+      // gets people to buy. Only the actual pick (who to bet on) is locked.
+      confidence: p.confidence,
+      odds: p.odds,
+      price: p.price,
+      unlocked,
+    };
+  })
+),
     }))
   );
 
