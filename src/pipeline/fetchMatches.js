@@ -22,13 +22,15 @@
 const fetch = require('node-fetch');
 
 const SPORT_KEYS = {
-  tennis: 'tennis_atp,tennis_wta',
-  basketball: 'basketball_nba,basketball_wnba',
-  soccer: 'soccer_epl,soccer_uefa_champs_league', // add more league keys as needed
-  baseball: 'baseball_mlb',
-  football: 'americanfootball_nfl',
+  tennis: ['tennis_atp', 'tennis_wta'],
+  basketball: ['basketball_nba', 'basketball_wnba'],
+  soccer: ['soccer_epl', 'soccer_uefa_champs_league'], // add more league keys as needed
+  baseball: ['baseball_mlb'],
+  football: ['americanfootball_nfl'],
 };
 
+// The Odds API only accepts one sport_key per request — this fetches each
+// key for a sport separately and merges the results.
 async function fetchFromProvider(sport) {
   const apiKey = process.env.ODDS_API_KEY;
   const baseUrl = process.env.ODDS_API_BASE_URL;
@@ -40,15 +42,23 @@ async function fetchFromProvider(sport) {
     );
   }
 
-  const sportKey = SPORT_KEYS[sport];
-  const url = `${baseUrl}/sports/${sportKey}/odds?apiKey=${apiKey}&regions=us&markets=h2h&oddsFormat=american&bookmakers=betmgm`;
+  const sportKeys = SPORT_KEYS[sport] || [];
+  let combined = [];
 
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`[fetchMatches] Provider request failed: ${response.status} ${response.statusText}`);
+  for (const sportKey of sportKeys) {
+    const url = `${baseUrl}/sports/${sportKey}/odds?apiKey=${apiKey}&regions=us&markets=h2h&oddsFormat=american&bookmakers=betmgm`;
+    const response = await fetch(url);
+    if (!response.ok) {
+      // Log and skip this one key rather than failing the whole sport —
+      // e.g. a league being out of season shouldn't kill tennis entirely.
+      console.error(`[fetchMatches] ${sportKey} request failed: ${response.status} ${response.statusText}`);
+      continue;
+    }
+    const data = await response.json();
+    combined = combined.concat(data);
   }
 
-  return response.json();
+  return combined;
 }
 
 // Normalizes one provider match object into the shape the rest of the

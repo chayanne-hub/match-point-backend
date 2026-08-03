@@ -90,6 +90,14 @@ async function runForSport(sportSlug) {
     });
 
     for (const p of picks) {
+      // Skip if the book didn't actually have a price for this side —
+      // odds is a required field, and a null/undefined value here means
+      // there's nothing real to attach to the pick.
+      if (p.odds === null || p.odds === undefined) {
+        console.warn(`[pipeline] skipping pick for ${m.competitorA} vs ${m.competitorB} — no odds available.`);
+        continue;
+      }
+
       // Avoid duplicate picks for the same match + type on repeated runs.
       const already = await db.pick.findFirst({
         where: { matchId: match.id, pickType: p.pickType },
@@ -98,7 +106,7 @@ async function runForSport(sportSlug) {
 
       await db.pick.create({
         data: {
-          matchId: match.id,
+          match: { connect: { id: match.id } },
           pickType: p.pickType,
           selection: p.selection,
           confidence: p.confidence,
