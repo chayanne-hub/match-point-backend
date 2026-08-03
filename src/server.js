@@ -6,6 +6,7 @@ const authRoutes = require('./routes/auth');
 const checkoutRoutes = require('./routes/checkout');
 const webhookRoutes = require('./routes/webhooks');
 const picksRoutes = require('./routes/picks');
+const { startScheduled, startLiveScheduled } = require('./pipeline/cron');
 
 const app = express();
 
@@ -32,3 +33,6 @@ const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`Match Point backend listening on port ${PORT}`);
 });
+
+startScheduled();
+startLiveScheduled();
