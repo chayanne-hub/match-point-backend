@@ -213,4 +213,92 @@ function startScheduled() {
   console.log('[pipeline] scheduled to run every 15 minutes.');
 }
 
+/**
+ * Fast loop: re-scores picks for matches that are currently live.
+ * Runs far more often than the main pipeline so the live picks board's
+ * confidence numbers actually move as the market re-prices the match
+ * during play. Unlike the main pick-creation loop, this UPDATES existing
+ * picks instead of skipping them once they exist.
+ */
+async function updateLivePicksForSport(sportSlug) {
+  let matches;
+  try {
+    matches = await fetchMatches(sportSlug);
+  } catch (err) {
+    console.error(`[live-pipeline] ${sportSlug} fetch failed:`, err.message);
+    return;
+  }
+
+  const liveMatches = matches.filter(m => m.status === 'in_progress' || m.status === 'live');
+  if (liveMatches.length === 0) return;
+
+  for (const m of liveMatches) {
+    const match = await db.match.findUnique({ where: { externalId: m.externalId } });
+    if (!match) continue; // main pipeline hasn't picked this one up yet
+
+    const factors = buildFactors(sportSlug, m.oddsA, m.oddsB);
+    const rationale = 'Model weighted the market-implied favorite from live odds; other qualitative factors not yet connected.';
+    const picks = buildPicks({
+      sport: sportSlug,
+      competitorA: m.competitorA,
+      competitorB: m.competitorB,
+      oddsA: m.oddsA,
+      oddsB: m.oddsB,
+      factors,
+      rationale,
+    });
+
+    for (const p of picks) {
+      if (p.odds === null || p.odds === undefined) continue;
+
+      const existing = await db.pick.findFirst({
+        where: { matchId: match.id, pickType: p.pickType },
+      });
+
+      if (existing) {
+        await db.pick.update({
+          where: { id: existing.id },
+          data: {
+            selection: p.selection,
+            confidence: p.confidence,
+            odds: p.odds,
+            rationale: p.rationale,
+          },
+        });
+      } else {
+        await db.pick.create({
+          data: {
+            match: { connect: { id: match.id } },
+            pickType: p.pickType,
+            selection: p.selection,
+            confidence: p.confidence,
+            odds: p.odds,
+            rationale: p.rationale,
+          },
+        });
+      }
+    }
+  }
+
+  console.log(`[live-pipeline] ${sportSlug}: refreshed ${liveMatches.length} live match(es).`);
+}
+
+async function updateLivePicks() {
+  for (const sport of SPORTS) {
+    await updateLivePicksForSport(sport);
+  }
+}
+
+/**
+ * Starts the fast live-picks loop. Uses setInterval rather than
+ * node-cron, since node-cron only guarantees minute-level granularity —
+ * we need real sub-minute control here.
+ */
+function startLiveScheduled() {
+  setInterval(() => {
+    updateLivePicks().catch(err => console.error('[live-pipeline] run failed:', err));
+  }, 45000); // every 45 seconds — real refresh, safe on API credits
+  console.log('[live-pipeline] scheduled to run every 45 seconds.');
+}
+
 module.exports = { runAll, startScheduled };
