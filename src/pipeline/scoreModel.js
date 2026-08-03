@@ -28,6 +28,47 @@ const WEIGHTS = {
   football: { efficiency: 0.35, injuryReport: 0.25, restTravel: 0.2, weather: 0.2 },
 };
 
+// Which weight slot gets filled by the market-implied signal below, per
+// sport — deliberately the "primary" ranking-style factor in each sport's
+// checklist, since that's the closest conceptual match to "which side does
+// the market think is stronger."
+const MARKET_FACTOR_KEY = {
+  tennis: 'eloRank',
+  basketball: 'efficiency',
+  soccer: 'handicapLine',
+  baseball: 'startingPitcher',
+  football: 'efficiency',
+};
+
+/**
+ * Converts American odds into an implied win probability (0-1). This
+ * includes the book's vig/margin, so it's not a "true" probability, but
+ * it's a real, honest signal of which side the market favors and by how
+ * much — not a fabricated number.
+ */
+function impliedProbability(americanOdds) {
+  if (americanOdds > 0) return 100 / (americanOdds + 100);
+  return -americanOdds / (-americanOdds + 100);
+}
+
+/**
+ * Computes a -1..+1 signal from the odds alone: how much more the market
+ * favors competitor A over competitor B. This is the one factor that's
+ * always computable with just an odds feed — no separate stats source
+ * needed — which is why it's used as a stand-in for the "primary" factor
+ * slot until real per-sport qualitative data is connected.
+ */
+function marketImpliedFactor(oddsA, oddsB) {
+  if (oddsA === null || oddsB === null || oddsA === undefined || oddsB === undefined) {
+    return null;
+  }
+  const probA = impliedProbability(oddsA);
+  const probB = impliedProbability(oddsB);
+  // probA + probB > 1 due to vig; the difference still meaningfully signals
+  // which side is favored and by roughly how much.
+  return Math.max(-1, Math.min(1, probA - probB));
+}
+
 /**
  * factors: an object whose keys match WEIGHTS[sport] and whose values are
  * signed scores from -1 (favors B) to +1 (favors A) for that factor.
@@ -107,4 +148,4 @@ function buildPicks({ sport, competitorA, competitorB, oddsA, oddsB, factors, ra
   return picks;
 }
 
-module.exports = { scoreMatch, buildPicks, WEIGHTS };
+module.exports = { scoreMatch, buildPicks, WEIGHTS, MARKET_FACTOR_KEY, marketImpliedFactor };

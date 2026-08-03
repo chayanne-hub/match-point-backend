@@ -32,14 +32,25 @@ async function ensureSportRows() {
   }
 }
 
-// STUB: replace with real qualitative inputs once each sport's data sources
-// (see nfl-model / coe-model / bloom-model / babe-ruth-model notes) are wired
-// up. Returns neutral (0) for every factor, which will keep confidence at a
-// flat 50 until real data replaces this.
-function getFactorsStub(sport) {
-  const weights = require('./scoreModel').WEIGHTS[sport];
+// Builds the factor set fed into scoreMatch(). The "primary" slot per sport
+// (see MARKET_FACTOR_KEY in scoreModel.js) is filled with a real signal
+// derived from the actual odds — how strongly the market favors one side.
+// Every other qualitative factor (surface fit, injuries, weather, etc.)
+// still needs its own real data source and is genuinely OMITTED (not set
+// to 0) until that's connected — scoreMatch() correctly excludes missing
+// factors from the weighted average, whereas setting them to 0 would count
+// as a confirmed "no edge" data point and wrongly dilute the one real
+// signal we do have. See the per-sport model notes for what's still needed.
+function buildFactors(sport, oddsA, oddsB) {
+  const { MARKET_FACTOR_KEY, marketImpliedFactor } = require('./scoreModel');
   const factors = {};
-  for (const key of Object.keys(weights)) factors[key] = 0;
+
+  const marketKey = MARKET_FACTOR_KEY[sport];
+  const marketSignal = marketImpliedFactor(oddsA, oddsB);
+  if (marketKey && marketSignal !== null) {
+    factors[marketKey] = marketSignal;
+  }
+
   return factors;
 }
 
@@ -74,10 +85,11 @@ async function runForSport(sportSlug) {
       },
     });
 
-    // TODO: replace getFactorsStub with real per-sport factor computation
-    // once qualitative data sources are connected (see fetchMatches.js notes).
-    const factors = getFactorsStub(sportSlug);
-    const rationale = 'Model ran on odds data only — qualitative factors not yet connected.';
+    // Other qualitative factors (surface fit, injuries, weather, etc.) still
+    // need their own data sources per sport — see the per-sport model notes.
+    // The market-implied factor below IS real, derived from the actual odds.
+    const factors = buildFactors(sportSlug, m.oddsA, m.oddsB);
+    const rationale = 'Model weighted the market-implied favorite from live odds; other qualitative factors not yet connected.';
 
     const picks = buildPicks({
       sport: sportSlug,
