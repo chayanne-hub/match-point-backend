@@ -17,7 +17,7 @@
 require('dotenv').config();
 const cron = require('node-cron');
 const db = require('../lib/db');
-const { fetchMatches } = require('./fetchMatches');
+const { fetchMatches, fetchScores } = require('./fetchMatches');
 const { buildPicks } = require('./scoreModel');
 
 const SPORTS = ['tennis', 'basketball', 'soccer', 'baseball', 'football'];
@@ -118,6 +118,57 @@ async function runForSport(sportSlug) {
   }
 
   console.log(`[pipeline] ${sportSlug}: processed ${matches.length} matches.`);
+
+  await updateLiveScores(sportSlug, sportRow.id);
+}
+
+/**
+ * Pulls current scores for a sport, updates any in-progress or just-finished
+ * matches, and flags their picks as "live" once a match actually starts —
+ * that's what makes them show up on the live picks board.
+ */
+async function updateLiveScores(sportSlug, sportId) {
+  let scores;
+  try {
+    scores = await fetchScores(sportSlug);
+  } catch (err) {
+    console.error(`[pipeline] ${sportSlug} scores fetch failed:`, err.message);
+    return;
+  }
+
+  for (const s of scores) {
+    const match = await db.match.findUnique({ where: { externalId: s.externalId } });
+    if (!match) continue; // haven't seen this match in the odds pull yet
+
+    if (s.completed) {
+      await db.match.update({ where: { id: match.id }, data: { status: 'final' } });
+      continue;
+    }
+
+    // scores are null until the game actually kicks off
+    const hasStarted = s.homeScore !== null && s.awayScore !== null;
+    if (!hasStarted) continue;
+
+    await db.match.update({
+      where: { id: match.id },
+      data: {
+        status: 'live',
+        liveScore: `${s.homeScore} - ${s.awayScore}`,
+        // liveClock intentionally left alone — The Odds API doesn't provide
+        // period/quarter/clock data, so we don't fabricate one.
+      },
+    });
+
+    // Flag this match's picks as live so they show up on the live board.
+    await db.pick.updateMany({
+      where: { matchId: match.id },
+      data: { isLive: true },
+    });
+  }
+
+  if (scores.length > 0) {
+    console.log(`[pipeline] ${sportSlug}: checked ${scores.length} score(s).`);
+  }
 }
 
 async function runAll() {

@@ -50,6 +50,19 @@ async function discoverSportKeys(prefix, baseUrl, apiKey) {
   return sports.filter((s) => s.key.startsWith(prefix)).map((s) => s.key);
 }
 
+// Shared by both the odds fetch and the scores fetch — resolves which
+// sport_key(s) to query for a given sport.
+async function resolveSportKeys(sport, baseUrl, apiKey) {
+  let sportKeys = SPORT_KEYS[sport];
+  if (!sportKeys && DYNAMIC_PREFIXES[sport]) {
+    sportKeys = await discoverSportKeys(DYNAMIC_PREFIXES[sport], baseUrl, apiKey);
+    if (sportKeys.length === 0) {
+      console.warn(`[fetchMatches] No in-season ${sport} tournaments found right now.`);
+    }
+  }
+  return sportKeys || [];
+}
+
 // The Odds API only accepts one sport_key per request — this fetches each
 // key for a sport separately and merges the results.
 async function fetchFromProvider(sport) {
@@ -63,15 +76,7 @@ async function fetchFromProvider(sport) {
     );
   }
 
-  let sportKeys = SPORT_KEYS[sport];
-  if (!sportKeys && DYNAMIC_PREFIXES[sport]) {
-    sportKeys = await discoverSportKeys(DYNAMIC_PREFIXES[sport], baseUrl, apiKey);
-    if (sportKeys.length === 0) {
-      console.warn(`[fetchMatches] No in-season ${sport} tournaments found right now.`);
-    }
-  }
-  sportKeys = sportKeys || [];
-
+  const sportKeys = await resolveSportKeys(sport, baseUrl, apiKey);
   let combined = [];
 
   for (const sportKey of sportKeys) {
@@ -85,6 +90,46 @@ async function fetchFromProvider(sport) {
     }
     const data = await response.json();
     combined = combined.concat(data);
+  }
+
+  return combined;
+}
+
+/**
+ * Fetches live/recent scores for a sport. The Odds API's /scores endpoint
+ * gives final and in-progress scores, but NOT a game clock or period/quarter
+ * — that level of detail isn't available from this provider. liveClock is
+ * intentionally left for the caller to leave blank rather than fabricate.
+ */
+async function fetchScores(sport) {
+  const apiKey = process.env.ODDS_API_KEY;
+  const baseUrl = process.env.ODDS_API_BASE_URL;
+  if (!apiKey || apiKey === 'your-provider-api-key-here') return [];
+
+  const sportKeys = await resolveSportKeys(sport, baseUrl, apiKey);
+  let combined = [];
+
+  for (const sportKey of sportKeys) {
+    // daysFrom=1 includes games from the last day, which covers anything
+    // currently in progress or just finished.
+    const url = `${baseUrl}/sports/${sportKey}/scores?apiKey=${apiKey}&daysFrom=1`;
+    const response = await fetch(url);
+    if (!response.ok) {
+      console.error(`[fetchMatches] ${sportKey} scores request failed: ${response.status} ${response.statusText}`);
+      continue;
+    }
+    const data = await response.json();
+    combined = combined.concat(
+      data.map((g) => ({
+        externalId: g.id,
+        completed: !!g.completed,
+        homeTeam: g.home_team,
+        awayTeam: g.away_team,
+        // scores is null until the game actually starts
+        homeScore: g.scores?.find((s) => s.name === g.home_team)?.score ?? null,
+        awayScore: g.scores?.find((s) => s.name === g.away_team)?.score ?? null,
+      }))
+    );
   }
 
   return combined;
@@ -119,4 +164,4 @@ async function fetchMatches(sport) {
   return raw.map((m) => normalizeMatch(sport, m));
 }
 
-module.exports = { fetchMatches };
+module.exports = { fetchMatches, fetchScores };
