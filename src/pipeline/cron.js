@@ -301,4 +301,4 @@ function startLiveScheduled() {
   console.log('[live-pipeline] scheduled to run every 45 seconds.');
 }
 
-module.exports = { runAll, startScheduled };
+module.exports = { runAll, startScheduled, startLiveScheduled };
