@@ -22,12 +22,33 @@
 const fetch = require('node-fetch');
 
 const SPORT_KEYS = {
-  tennis: ['tennis_atp', 'tennis_wta'],
   basketball: ['basketball_nba', 'basketball_wnba'],
   soccer: ['soccer_epl', 'soccer_uefa_champs_league'], // add more league keys as needed
   baseball: ['baseball_mlb'],
   football: ['americanfootball_nfl'],
 };
+
+// Tennis is the one sport where The Odds API keys change constantly — it's
+// tracked per-tournament (tennis_atp_wimbledon, tennis_atp_us_open, etc.),
+// not as one stable ATP/WTA-wide key, and a key only exists while that
+// tournament is actually running. So instead of a hardcoded key, ask the
+// API which tennis tournaments are live right now.
+const DYNAMIC_PREFIXES = {
+  tennis: 'tennis_',
+};
+
+// The /sports endpoint is free (doesn't cost quota) and lists every
+// currently in-season sport key.
+async function discoverSportKeys(prefix, baseUrl, apiKey) {
+  const url = `${baseUrl}/sports?apiKey=${apiKey}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    console.error(`[fetchMatches] /sports discovery failed: ${res.status} ${res.statusText}`);
+    return [];
+  }
+  const sports = await res.json();
+  return sports.filter((s) => s.key.startsWith(prefix)).map((s) => s.key);
+}
 
 // The Odds API only accepts one sport_key per request — this fetches each
 // key for a sport separately and merges the results.
@@ -42,7 +63,15 @@ async function fetchFromProvider(sport) {
     );
   }
 
-  const sportKeys = SPORT_KEYS[sport] || [];
+  let sportKeys = SPORT_KEYS[sport];
+  if (!sportKeys && DYNAMIC_PREFIXES[sport]) {
+    sportKeys = await discoverSportKeys(DYNAMIC_PREFIXES[sport], baseUrl, apiKey);
+    if (sportKeys.length === 0) {
+      console.warn(`[fetchMatches] No in-season ${sport} tournaments found right now.`);
+    }
+  }
+  sportKeys = sportKeys || [];
+
   let combined = [];
 
   for (const sportKey of sportKeys) {
