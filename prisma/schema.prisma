@@ -1,0 +1,119 @@
+// Match Point — Database Schema
+// Run: npx prisma migrate dev --name init
+// Requires DATABASE_URL in .env (Postgres recommended)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Accounts & billing
+// ---------------------------------------------------------------------------
+
+model User {
+  id               String    @id @default(uuid())
+  email            String    @unique
+  passwordHash     String
+  createdAt        DateTime  @default(now())
+  stripeCustomerId String?   @unique
+
+  subscription     Subscription?
+  purchases        PurchasedPick[]
+}
+
+// One active plan per user at a time. Single-pick buys don't create a row here —
+// they go straight into PurchasedPick. This table is for Daily/Weekly Bundle and
+// Monthly/Season Membership plans, which are recurring Stripe subscriptions.
+model Subscription {
+  id                   String   @id @default(uuid())
+  userId               String   @unique
+  user                 User     @relation(fields: [userId], references: [id])
+  stripeSubscriptionId String   @unique
+  plan                 String   // "daily_bundle" | "monthly_membership" | "weekly_bundle" | "season_membership"
+  status               String   // "active" | "past_due" | "canceled" | "incomplete"
+  currentPeriodEnd     DateTime
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+}
+
+// A single-pick purchase, or a record of a pick a subscriber is entitled to view.
+model PurchasedPick {
+  id         String   @id @default(uuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id])
+  pickId     String
+  pick       Pick     @relation(fields: [pickId], references: [id])
+  pricePaid  Int      // cents
+  purchasedAt DateTime @default(now())
+
+  @@unique([userId, pickId])
+}
+
+// ---------------------------------------------------------------------------
+// Sports data
+// ---------------------------------------------------------------------------
+
+model Sport {
+  id      String  @id @default(uuid())
+  slug    String  @unique // "tennis" | "basketball" | "soccer" | "baseball" | "football"
+  name    String
+  matches Match[]
+}
+
+model Match {
+  id           String   @id @default(uuid())
+  sportId      String
+  sport        Sport    @relation(fields: [sportId], references: [id])
+  externalId   String   @unique // ID from the odds/data provider, for de-duping on each pull
+  league       String   // "ATP" | "NBA" | "EPL" | "MLB" | "NFL" etc.
+  competitorA  String
+  competitorB  String
+  startTime    DateTime
+  status       String   // "scheduled" | "live" | "final" | "postponed"
+  surface      String?  // tennis only
+  venue        String?
+  liveScore    String?  // free-text live score snapshot, updated by the live poller
+  liveClock    String?  // "Q3 8:42", "62'", "Top 6th", "Set 2", etc.
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  picks        Pick[]
+
+  @@index([sportId, startTime])
+}
+
+// ---------------------------------------------------------------------------
+// Model output
+// ---------------------------------------------------------------------------
+
+model Pick {
+  id           String   @id @default(uuid())
+  matchId      String
+  match        Match    @relation(fields: [matchId], references: [id])
+  pickType     String   // "model" (has a real edge) | "winner" (a call on every match)
+  selection    String   // "Alvarez ML", "Home -4.5", "Over 8.5 Runs" etc.
+  confidence   Int      // 0-100
+  odds         Int      // American odds at time of pick
+  rationale    String   // one-line qualitative note
+  isLive       Boolean  @default(false)
+  price        Int      @default(900) // cents, $9.00 default
+  createdAt    DateTime @default(now())
+
+  result       Result?
+  purchases    PurchasedPick[]
+
+  @@index([matchId])
+}
+
+model Result {
+  id         String   @id @default(uuid())
+  pickId     String   @unique
+  pick       Pick     @relation(fields: [pickId], references: [id])
+  outcome    String   // "win" | "loss" | "push"
+  settledAt  DateTime @default(now())
+}
