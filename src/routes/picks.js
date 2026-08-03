@@ -18,6 +18,21 @@ async function userHasAccess(userId, pickId) {
   return !!sub && sub.status === 'active';
 }
 
+// Resolves the requester from an optional Authorization header without
+// requiring one — used on public endpoints that still want to show unlocked
+// detail to logged-in, entitled users.
+function resolveOptionalUser(req) {
+  const header = req.headers.authorization || '';
+  if (!header.startsWith('Bearer ')) return null;
+  try {
+    const jwt = require('jsonwebtoken');
+    const payload = jwt.verify(header.slice(7), process.env.JWT_SECRET || 'dev-secret');
+    return payload.userId;
+  } catch (_) {
+    return null; // invalid/expired token — treat as anonymous
+  }
+}
+
 // GET /api/picks/today?sport=tennis
 // Public: returns picks with confidence/selection redacted unless the
 // requester is authenticated and entitled. Attach Authorization header to
@@ -43,18 +58,7 @@ router.get('/today', async (req, res) => {
   });
 
   // Try to resolve the requester, but don't require auth for this endpoint.
-  let userId = null;
-  const header = req.headers.authorization || '';
-  if (header.startsWith('Bearer ')) {
-    try {
-      const { requireAuth: _ } = require('../lib/auth'); // eslint-disable-line
-      const jwt = require('jsonwebtoken');
-      const payload = jwt.verify(header.slice(7), process.env.JWT_SECRET || 'dev-secret');
-      userId = payload.userId;
-    } catch (_) {
-      // invalid/missing token — treat as anonymous
-    }
-  }
+  const userId = resolveOptionalUser(req);
 
   const shaped = await Promise.all(
     picks.map(async (p) => {
@@ -81,6 +85,8 @@ router.get('/today', async (req, res) => {
 });
 
 // GET /api/picks/live?sport=all
+// Same redaction rule as /today: the pick and confidence are hidden unless
+// the requester has purchased that pick or holds an active subscription.
 router.get('/live', async (req, res) => {
   const { sport } = req.query;
   const where = {
@@ -93,23 +99,33 @@ router.get('/live', async (req, res) => {
     include: { sport: true, picks: { where: { isLive: true } } },
   });
 
-  res.json({
-    matches: matches.map((m) => ({
+  const userId = resolveOptionalUser(req);
+
+  const shaped = await Promise.all(
+    matches.map(async (m) => ({
       id: m.id,
       sport: m.sport.slug,
       league: m.league,
       matchup: `${m.competitorA} vs ${m.competitorB}`,
       liveScore: m.liveScore,
       liveClock: m.liveClock,
-      picks: m.picks.map((p) => ({
-        id: p.id,
-        selection: p.selection,
-        confidence: p.confidence,
-        odds: p.odds,
-        price: p.price,
-      })),
-    })),
-  });
+      picks: await Promise.all(
+        m.picks.map(async (p) => {
+          const unlocked = await userHasAccess(userId, p.id);
+          return {
+            id: p.id,
+            selection: unlocked ? p.selection : null,
+            confidence: unlocked ? p.confidence : null,
+            odds: p.odds,
+            price: p.price,
+            unlocked,
+          };
+        })
+      ),
+    }))
+  );
+
+  res.json({ matches: shaped });
 });
 
 // GET /api/picks/:id — full detail, requires purchase or active subscription
