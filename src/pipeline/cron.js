@@ -18,10 +18,11 @@ require('dotenv').config();
 const cron = require('node-cron');
 const db = require('../lib/db');
 const { fetchMatches, fetchScores } = require('./fetchMatches');
-const { buildPicks } = require('./scoreModel');
+const { buildPicks, MARKET_FACTOR_KEY } = require('./scoreModel');
 const { fetchEspnLiveScores, matchEspnEvent } = require('./fetchEspn');
 const { computeInjuryFactor, fetchEspnTeams } = require('./fetchEspnInjuries');
 const { computeRestDaysFactor, computeHomeAwayFormFactor } = require('./qualitativeFactors');
+const { describeFactors, generateAiRationale } = require('./generateRationale');
 
 const SPORTS = ['tennis', 'basketball', 'soccer', 'baseball', 'football'];
 
@@ -173,6 +174,9 @@ async function runForSport(sportSlug) {
       rationale,
     });
 
+    let aiRationale = null;
+    let aiRationaleGenerated = false;
+
     for (const p of picks) {
       // Skip if the book didn't actually have a price for this side —
       // odds is a required field, and a null/undefined value here means
@@ -188,6 +192,27 @@ async function runForSport(sportSlug) {
       });
       if (already) continue;
 
+      // Generate the AI rationale once per match (not once per pick
+      // type — "model" and "winner" picks on the same match share the
+      // same underlying facts) and only for picks we're actually about
+      // to create, never re-run on ones that already exist.
+      if (!aiRationaleGenerated) {
+        const marketKey = MARKET_FACTOR_KEY[sportSlug];
+        const facts = describeFactors(
+          sportSlug, factors, m.competitorA, m.competitorB,
+          marketKey, REST_DAYS_KEY[sportSlug], HOME_AWAY_FORM_KEY[sportSlug]
+        );
+        aiRationale = await generateAiRationale({
+          sport: sportSlug,
+          competitorA: m.competitorA,
+          competitorB: m.competitorB,
+          selection: p.selection,
+          facts,
+        });
+        aiRationaleGenerated = true;
+      }
+      const finalRationale = aiRationale || p.rationale; // fall back to the template if AI generation returned null
+
       await db.pick.create({
         data: {
           match: { connect: { id: match.id } },
@@ -195,7 +220,7 @@ async function runForSport(sportSlug) {
           selection: p.selection,
           confidence: p.confidence,
           odds: p.odds,
-          rationale: p.rationale,
+          rationale: finalRationale,
         },
       });
     }
@@ -358,6 +383,9 @@ async function updateLivePicksForSport(sportSlug) {
       rationale,
     });
 
+    let aiRationale = null;
+    let aiRationaleGenerated = false;
+
     for (const p of picks) {
       if (p.odds === null || p.odds === undefined) continue;
 
@@ -366,16 +394,34 @@ async function updateLivePicksForSport(sportSlug) {
       });
 
       if (existing) {
+        // Numeric fields refresh every cycle; rationale is deliberately
+        // left untouched — it was already written (AI-generated or
+        // template) at creation time, and regenerating it every 45
+        // seconds would multiply the AI API cost for no real benefit.
         await db.pick.update({
           where: { id: existing.id },
           data: {
             selection: p.selection,
             confidence: p.confidence,
             odds: p.odds,
-            rationale: p.rationale,
           },
         });
       } else {
+        if (!aiRationaleGenerated) {
+          const marketKey = MARKET_FACTOR_KEY[sportSlug];
+          const facts = describeFactors(
+            sportSlug, factors, m.competitorA, m.competitorB,
+            marketKey, REST_DAYS_KEY[sportSlug], HOME_AWAY_FORM_KEY[sportSlug]
+          );
+          aiRationale = await generateAiRationale({
+            sport: sportSlug,
+            competitorA: m.competitorA,
+            competitorB: m.competitorB,
+            selection: p.selection,
+            facts,
+          });
+          aiRationaleGenerated = true;
+        }
         await db.pick.create({
           data: {
             match: { connect: { id: match.id } },
@@ -383,7 +429,7 @@ async function updateLivePicksForSport(sportSlug) {
             selection: p.selection,
             confidence: p.confidence,
             odds: p.odds,
-            rationale: p.rationale,
+            rationale: aiRationale || p.rationale,
           },
         });
       }
