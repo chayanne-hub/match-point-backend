@@ -79,6 +79,8 @@ model Match {
   venue        String?
   liveScore    String?  // free-text live score snapshot, updated by the live poller
   liveClock    String?  // "Q3 8:42", "62'", "Top 6th", "Set 2", etc.
+  homeScore    Int?     // structured final/current score for competitorA — needed to
+  awayScore    Int?     // compute recent-form factors once matches complete
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
