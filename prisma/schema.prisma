@@ -101,13 +101,14 @@ model Pick {
   id           String   @id @default(uuid())
   matchId      String
   match        Match    @relation(fields: [matchId], references: [id])
-  pickType     String   // "model" (has a real edge) | "winner" (a call on every match)
-  selection    String   // "Alvarez ML", "Home -4.5", "Over 8.5 Runs" etc.
-  confidence   Int      // 0-100
-  odds         Int      // American odds at time of pick
-  rationale    String   // one-line qualitative note
+  pickType     String
+  selection    String
+  confidence   Int
+  odds         Int
+  rationale    String
+  factsUsed    String?  // JSON array of {label, tag, body} — the real facts behind this pick, for the detail page's factor breakdown
   isLive       Boolean  @default(false)
-  price        Int      @default(900) // cents, $9.00 default
+  price        Int      @default(900)
   createdAt    DateTime @default(now())
 
   result       Result?
