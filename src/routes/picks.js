@@ -172,6 +172,93 @@ router.get('/live', async (req, res) => {
   res.json({ matches: shaped });
 });
 
+// GET /api/picks/stats?sport=tennis — Track Record numbers: win rate, ROI,
+// ROI vs. BetMGM's closing line, and matches analyzed/day, over a rolling
+// 30-day window. Public — this is marketing-facing proof, not account data.
+//
+// NOTE ON EMPTY RESULTS: until matches actually finish and get graded (see
+// gradeFinishedMatches() in cron.js), this will legitimately return nulls —
+// that's not a bug, it's just no settled history existing yet.
+router.get('/stats', async (req, res) => {
+  const { sport } = req.query;
+  const windowStart = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+
+  const results = await db.result.findMany({
+    where: {
+      settledAt: { gte: windowStart },
+      ...(sport ? { pick: { match: { sport: { slug: sport } } } } : {}),
+    },
+    include: { pick: { include: { match: true } } },
+  });
+
+  const decided = results.filter((r) => r.outcome !== 'push');
+  const wins = decided.filter((r) => r.outcome === 'win').length;
+  const losses = decided.filter((r) => r.outcome === 'loss').length;
+  const winRate = decided.length > 0 ? Math.round((wins / decided.length) * 1000) / 10 : null;
+
+  // Flat $100-stake profit for one American-odds outcome.
+  function profitFor(americanOdds, won) {
+    if (!won) return -100;
+    return americanOdds > 0 ? americanOdds : (10000 / Math.abs(americanOdds));
+  }
+
+  let roi = null;
+  if (decided.length > 0) {
+    const totalProfit = decided.reduce(
+      (sum, r) => sum + profitFor(r.pick.odds, r.outcome === 'win'),
+      0
+    );
+    roi = Math.round((totalProfit / (decided.length * 100)) * 1000) / 10;
+  }
+
+  // ROI vs. close: for picks where we captured a closing line, compare
+  // actual ROI (at the odds when the pick was made) against what ROI
+  // would have been at the closing line instead. Positive means the
+  // pick's early number beat where the market ended up — the standard
+  // "beating the closing line" edge metric.
+  const withClosing = decided.filter((r) => {
+    const m = r.pick.match;
+    return m.closingOddsA !== null && m.closingOddsB !== null;
+  });
+
+  let roiVsClose = null;
+  if (withClosing.length > 0) {
+    let entryTotal = 0;
+    let closeTotal = 0;
+    for (const r of withClosing) {
+      const m = r.pick.match;
+      const won = r.outcome === 'win';
+      entryTotal += profitFor(r.pick.odds, won);
+
+      const pickedName = r.pick.selection.replace(/\s*ML$/, '').trim();
+      const closingOdds = pickedName === m.competitorA ? m.closingOddsA : m.closingOddsB;
+      closeTotal += profitFor(closingOdds, won);
+    }
+    const entryRoi = entryTotal / (withClosing.length * 100);
+    const closeRoi = closeTotal / (withClosing.length * 100);
+    roiVsClose = Math.round((entryRoi - closeRoi) * 1000) / 10;
+  }
+
+  const distinctMatches = await db.pick.findMany({
+    where: {
+      createdAt: { gte: windowStart },
+      ...(sport ? { match: { sport: { slug: sport } } } : {}),
+    },
+    distinct: ['matchId'],
+    select: { matchId: true },
+  });
+  const daysElapsed = Math.max(1, Math.ceil((Date.now() - windowStart.getTime()) / (24 * 60 * 60 * 1000)));
+  const matchesPerDay = Math.round(distinctMatches.length / daysElapsed);
+
+  res.json({
+    winRate,
+    roi,
+    roiVsClose,
+    matchesPerDay,
+    sampleSize: decided.length,
+  });
+});
+
 // GET /api/picks/:id — full detail, requires purchase or active subscription
 router.get('/:id', requireAuth, async (req, res) => {
   const pick = await db.pick.findUnique({
