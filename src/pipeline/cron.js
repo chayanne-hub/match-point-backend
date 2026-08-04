@@ -152,19 +152,36 @@ async function updateLiveScores(sportSlug, sportId) {
     const match = await db.match.findUnique({ where: { externalId: s.externalId } });
     if (!match) continue; // haven't seen this match in the odds pull yet
 
+    // scores are null until the game actually kicks off
+    const hasStarted = s.homeScore !== null && s.awayScore !== null;
+
     if (s.completed) {
-      await db.match.update({ where: { id: match.id }, data: { status: 'final' } });
+      // Persist the FINAL score before marking it final — this is what
+      // recent-form/rest-day/park-factor style qualitative factors will
+      // later query against. Previously this just flipped status and
+      // discarded the result entirely.
+      await db.match.update({
+        where: { id: match.id },
+        data: {
+          status: 'final',
+          ...(hasStarted && {
+            homeScore: Number(s.homeScore),
+            awayScore: Number(s.awayScore),
+            liveScore: `${s.homeScore} - ${s.awayScore}`,
+          }),
+        },
+      });
       continue;
     }
 
-    // scores are null until the game actually kicks off
-    const hasStarted = s.homeScore !== null && s.awayScore !== null;
     if (!hasStarted) continue;
 
     await db.match.update({
       where: { id: match.id },
       data: {
         status: 'live',
+        homeScore: Number(s.homeScore),
+        awayScore: Number(s.awayScore),
         liveScore: `${s.homeScore} - ${s.awayScore}`,
         // liveClock intentionally left alone — The Odds API doesn't provide
         // period/quarter/clock data, so we don't fabricate one.
