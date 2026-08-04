@@ -20,6 +20,7 @@ const db = require('../lib/db');
 const { fetchMatches, fetchScores } = require('./fetchMatches');
 const { buildPicks } = require('./scoreModel');
 const { fetchEspnLiveScores, matchEspnEvent } = require('./fetchEspn');
+const { computeInjuryFactor, fetchEspnTeams } = require('./fetchEspnInjuries');
 
 const SPORTS = ['tennis', 'basketball', 'soccer', 'baseball', 'football'];
 
@@ -42,7 +43,11 @@ async function ensureSportRows() {
 // factors from the weighted average, whereas setting them to 0 would count
 // as a confirmed "no edge" data point and wrongly dilute the one real
 // signal we do have. See the per-sport model notes for what's still needed.
-function buildFactors(sport, oddsA, oddsB) {
+// Which sports have an injuries factor slot in WEIGHTS (see scoreModel.js)
+// that ESPN's per-team injury report can actually fill.
+const INJURY_SPORTS = new Set(['basketball', 'football', 'baseball']);
+
+async function buildFactors(sport, competitorA, competitorB, oddsA, oddsB, espnTeamsCache = null) {
   const { MARKET_FACTOR_KEY, marketImpliedFactor } = require('./scoreModel');
   const factors = {};
 
@@ -50,6 +55,18 @@ function buildFactors(sport, oddsA, oddsB) {
   const marketSignal = marketImpliedFactor(oddsA, oddsB);
   if (marketKey && marketSignal !== null) {
     factors[marketKey] = marketSignal;
+  }
+
+  if (INJURY_SPORTS.has(sport)) {
+    try {
+      const injurySignal = await computeInjuryFactor(sport, competitorA, competitorB, espnTeamsCache);
+      if (injurySignal !== null) {
+        factors.injuries = injurySignal;
+      }
+    } catch (err) {
+      console.error(`[factors] ${sport} injury lookup failed for ${competitorA} vs ${competitorB}:`, err.message);
+      // Omit the factor on failure — never fabricate a neutral value.
+    }
   }
 
   return factors;
@@ -67,6 +84,10 @@ async function runForSport(sportSlug) {
   }
 
   const sportRow = await db.sport.findUnique({ where: { slug: sportSlug } });
+
+  // Fetch once per run, not once per match — buildFactors reuses this for
+  // every match's injury lookup instead of re-fetching the full team list.
+  const espnTeamsCache = INJURY_SPORTS.has(sportSlug) ? await fetchEspnTeams(sportSlug) : null;
 
   for (const m of matches) {
     const match = await db.match.upsert({
@@ -86,11 +107,13 @@ async function runForSport(sportSlug) {
       },
     });
 
-    // Other qualitative factors (surface fit, injuries, weather, etc.) still
-    // need their own data sources per sport — see the per-sport model notes.
-    // The market-implied factor below IS real, derived from the actual odds.
-    const factors = buildFactors(sportSlug, m.oddsA, m.oddsB);
-    const rationale = 'Model weighted the market-implied favorite from live odds; other qualitative factors not yet connected.';
+    // Other qualitative factors beyond the market signal and (for
+    // basketball/football/baseball) ESPN injuries still need their own
+    // data sources per sport — see the per-sport model notes.
+    const factors = await buildFactors(sportSlug, m.competitorA, m.competitorB, m.oddsA, m.oddsB, espnTeamsCache);
+    const rationale = factors.injuries !== undefined
+      ? 'Model weighted the market-implied favorite and each team\'s reported injuries; other qualitative factors not yet connected.'
+      : 'Model weighted the market-implied favorite from live odds; other qualitative factors not yet connected.';
 
     const picks = buildPicks({
       sport: sportSlug,
@@ -267,12 +290,18 @@ async function updateLivePicksForSport(sportSlug) {
   const liveMatches = matches.filter(m => m.status === 'in_progress' || m.status === 'live');
   if (liveMatches.length === 0) return;
 
+  // Same per-run caching as the main pipeline — fetch once, reuse for
+  // every live match in this call rather than per-match.
+  const espnTeamsCache = INJURY_SPORTS.has(sportSlug) ? await fetchEspnTeams(sportSlug) : null;
+
   for (const m of liveMatches) {
     const match = await db.match.findUnique({ where: { externalId: m.externalId } });
     if (!match) continue; // main pipeline hasn't picked this one up yet
 
-    const factors = buildFactors(sportSlug, m.oddsA, m.oddsB);
-    const rationale = 'Model weighted the market-implied favorite from live odds; other qualitative factors not yet connected.';
+    const factors = await buildFactors(sportSlug, m.competitorA, m.competitorB, m.oddsA, m.oddsB, espnTeamsCache);
+    const rationale = factors.injuries !== undefined
+      ? 'Model weighted the market-implied favorite and each team\'s reported injuries; other qualitative factors not yet connected.'
+      : 'Model weighted the market-implied favorite from live odds; other qualitative factors not yet connected.';
     const picks = buildPicks({
       sport: sportSlug,
       competitorA: m.competitorA,
