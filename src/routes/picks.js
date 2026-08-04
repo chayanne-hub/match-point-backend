@@ -349,6 +349,13 @@ router.get('/:id', requireAuth, async (req, res) => {
     return res.status(402).json({ error: 'This pick has not been purchased or unlocked by a subscription.' });
   }
 
+  let factsUsed = [];
+  try {
+    factsUsed = pick.factsUsed ? JSON.parse(pick.factsUsed) : [];
+  } catch (e) {
+    factsUsed = []; // malformed/legacy row — degrade gracefully rather than error the whole request
+  }
+
   res.json({
     id: pick.id,
     sport: pick.match.sport.slug,
@@ -360,6 +367,7 @@ router.get('/:id', requireAuth, async (req, res) => {
     confidence: pick.confidence,
     odds: pick.odds,
     rationale: pick.rationale,
+    factsUsed,
     result: pick.result ? pick.result.outcome : null,
   });
 });

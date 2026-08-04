@@ -37,52 +37,94 @@ const ANTHROPIC_MODEL = 'claude-haiku-4-5-20251001'; // cheap/fast — this is s
  * implied odds, not real Elo data). Mislabeling here would make Claude
  * write something factually wrong even while "only using given facts."
  */
+/**
+ * Converts the factors object into an array of {label, tag, body} rows —
+ * one per factor that actually contributed — given which competitor is
+ * which and which sport-specific WEIGHTS key maps to which computation
+ * (passed in by cron.js, which already tracks this precisely — see
+ * REST_DAYS_KEY / HOME_AWAY_FORM_KEY there).
+ *
+ * "label" is a plain, honest name for the SOURCE of the signal — e.g.
+ * "Betting Market" rather than a sport-specific WEIGHTS key name like
+ * tennis's internal "eloRank", which is a historical label that doesn't
+ * accurately describe what's actually being measured (market-implied
+ * odds, not real Elo data). Mislabeling here would make the detail page
+ * display something factually wrong even while showing real numbers.
+ *
+ * "tag" is "Favors <competitor>" or "Neutral", derived from the factor's
+ * sign — matches the visual pattern of a labeled factor breakdown, but
+ * every row here is grounded in something actually computed, never
+ * fabricated to fill out a fixed set of categories.
+ */
 function describeFactors(sport, factors, competitorA, competitorB, marketKey, restKey, formKey) {
-  const facts = [];
+  const rows = [];
 
   if (marketKey && factors[marketKey] !== undefined) {
     const val = factors[marketKey];
-    const favored = val > 0 ? competitorA : competitorB;
+    const tag = Math.abs(val) < 0.05 ? 'Neutral' : `Favors ${val > 0 ? competitorA : competitorB}`;
     const strength = Math.abs(val) > 0.5 ? 'strongly' : 'slightly';
-    facts.push(`Current betting odds ${strength} favor ${favored}.`);
+    rows.push({
+      label: 'Betting Market',
+      tag,
+      body: tag === 'Neutral'
+        ? 'Current betting odds imply a roughly even matchup.'
+        : `Current betting odds ${strength} favor ${val > 0 ? competitorA : competitorB}.`,
+    });
   }
 
   if (factors.injuries !== undefined) {
     const val = factors.injuries;
-    if (Math.abs(val) > 0.05) {
-      const healthier = val > 0 ? competitorA : competitorB;
-      const bangedUp = val > 0 ? competitorB : competitorA;
-      facts.push(`ESPN's injury report lists more players out for ${bangedUp} than for ${healthier}.`);
-    }
+    const tag = Math.abs(val) < 0.05 ? 'Neutral' : `Favors ${val > 0 ? competitorA : competitorB}`;
+    rows.push({
+      label: 'Injuries',
+      tag,
+      body: tag === 'Neutral'
+        ? "Both sides' injury reports are comparable — no material edge here."
+        : `ESPN's injury report lists more players out for ${val > 0 ? competitorB : competitorA} than for ${val > 0 ? competitorA : competitorB}.`,
+    });
   }
 
   if (restKey && factors[restKey] !== undefined) {
     const val = factors[restKey];
-    if (Math.abs(val) > 0.1) {
-      const restedTeam = val > 0 ? competitorA : competitorB;
-      facts.push(`${restedTeam} has had more days of rest since their last match.`);
-    }
+    const tag = Math.abs(val) < 0.1 ? 'Neutral' : `Favors ${val > 0 ? competitorA : competitorB}`;
+    rows.push({
+      label: 'Rest Days',
+      tag,
+      body: tag === 'Neutral'
+        ? 'Both teams are on comparable rest since their last match.'
+        : `${val > 0 ? competitorA : competitorB} has had more days of rest since their last match.`,
+    });
   }
 
   if (formKey && factors[formKey] !== undefined) {
     const val = factors[formKey];
-    if (Math.abs(val) > 0.1) {
-      const strongerSide = val > 0 ? `${competitorA}'s home` : `${competitorB}'s away`;
-      facts.push(`${strongerSide} record has been stronger recently than the other side's corresponding record.`);
-    }
+    const tag = Math.abs(val) < 0.1 ? 'Neutral' : `Favors ${val > 0 ? competitorA : competitorB}`;
+    rows.push({
+      label: 'Home/Away Form',
+      tag,
+      body: tag === 'Neutral'
+        ? "Recent home and away form is comparable between the two sides."
+        : val > 0
+          ? `${competitorA}'s recent home record has been stronger than ${competitorB}'s recent away record.`
+          : `${competitorB}'s recent away record has been stronger than ${competitorA}'s recent home record.`,
+    });
   }
 
-  return facts;
+  return rows;
 }
 
 /**
- * Asks Claude to write a short rationale from the given facts only.
- * Returns null (never throws) on any failure — callers should fall back
- * to the template rationale.
+ * Asks Claude to write a short rationale from the given fact rows only.
+ * Neutral rows are excluded from the prompt — they don't add reasoning
+ * value to written analysis, even though they still display on the
+ * detail page for transparency. Returns null (never throws) on any
+ * failure — callers should fall back to the template rationale.
  */
-async function generateAiRationale({ sport, competitorA, competitorB, selection, facts }) {
+async function generateAiRationale({ sport, competitorA, competitorB, selection, factRows }) {
   if (!process.env.ANTHROPIC_API_KEY) return null;
-  if (facts.length === 0) return null; // nothing grounded to write from
+
+  const usableFacts = factRows.filter((r) => r.tag !== 'Neutral').map((r) => r.body);
+  if (usableFacts.length === 0) return null; // nothing grounded to write from
 
   const prompt = `You write short, factual betting-analysis notes for a sports picks website called Match Point.
 
@@ -90,7 +132,7 @@ Match: ${competitorA} vs ${competitorB} (${sport})
 Model's pick: ${selection}
 
 Known facts behind this pick (these are the ONLY facts you may reference — do not add any statistic, injury, name, or detail not listed here):
-${facts.map((f) => `- ${f}`).join('\n')}
+${usableFacts.map((f) => `- ${f}`).join('\n')}
 
 Write exactly one or two sentences explaining the edge, using only the facts above. Plain, direct tone — no hype, no exclamation points, no mention of a confidence percentage. Do not restate the pick itself, just the reasoning behind it.`;
 

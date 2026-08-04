@@ -176,6 +176,7 @@ async function runForSport(sportSlug) {
 
     let aiRationale = null;
     let aiRationaleGenerated = false;
+    let factRows = [];
 
     for (const p of picks) {
       // Skip if the book didn't actually have a price for this side —
@@ -192,13 +193,13 @@ async function runForSport(sportSlug) {
       });
       if (already) continue;
 
-      // Generate the AI rationale once per match (not once per pick
-      // type — "model" and "winner" picks on the same match share the
-      // same underlying facts) and only for picks we're actually about
-      // to create, never re-run on ones that already exist.
+      // Compute + generate once per match (not once per pick type —
+      // "model" and "winner" picks on the same match share the same
+      // underlying facts) and only for picks we're actually about to
+      // create, never re-run on ones that already exist.
       if (!aiRationaleGenerated) {
         const marketKey = MARKET_FACTOR_KEY[sportSlug];
-        const facts = describeFactors(
+        factRows = describeFactors(
           sportSlug, factors, m.competitorA, m.competitorB,
           marketKey, REST_DAYS_KEY[sportSlug], HOME_AWAY_FORM_KEY[sportSlug]
         );
@@ -207,7 +208,7 @@ async function runForSport(sportSlug) {
           competitorA: m.competitorA,
           competitorB: m.competitorB,
           selection: p.selection,
-          facts,
+          factRows,
         });
         aiRationaleGenerated = true;
       }
@@ -221,6 +222,7 @@ async function runForSport(sportSlug) {
           confidence: p.confidence,
           odds: p.odds,
           rationale: finalRationale,
+          factsUsed: JSON.stringify(factRows),
         },
       });
     }
@@ -385,6 +387,7 @@ async function updateLivePicksForSport(sportSlug) {
 
     let aiRationale = null;
     let aiRationaleGenerated = false;
+    let factRows = [];
 
     for (const p of picks) {
       if (p.odds === null || p.odds === undefined) continue;
@@ -409,7 +412,7 @@ async function updateLivePicksForSport(sportSlug) {
       } else {
         if (!aiRationaleGenerated) {
           const marketKey = MARKET_FACTOR_KEY[sportSlug];
-          const facts = describeFactors(
+          factRows = describeFactors(
             sportSlug, factors, m.competitorA, m.competitorB,
             marketKey, REST_DAYS_KEY[sportSlug], HOME_AWAY_FORM_KEY[sportSlug]
           );
@@ -418,7 +421,7 @@ async function updateLivePicksForSport(sportSlug) {
             competitorA: m.competitorA,
             competitorB: m.competitorB,
             selection: p.selection,
-            facts,
+            factRows,
           });
           aiRationaleGenerated = true;
         }
@@ -430,6 +433,7 @@ async function updateLivePicksForSport(sportSlug) {
             confidence: p.confidence,
             odds: p.odds,
             rationale: aiRationale || p.rationale,
+            factsUsed: JSON.stringify(factRows),
           },
         });
       }
