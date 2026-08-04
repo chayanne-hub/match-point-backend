@@ -4,6 +4,52 @@ const { requireAuth } = require('../lib/auth');
 
 const router = express.Router();
 
+// Computes the UTC instant corresponding to midnight in a given IANA
+// timezone, for a given reference date. Used to make "today's picks" roll
+// over at midnight Pacific Time rather than server-local time (Railway
+// runs in UTC, which would otherwise flip the slate ~4-5pm PT, showing
+// tomorrow's matches while it's still evening on the West Coast).
+// This correctly handles Daylight Saving Time since the offset is derived
+// from the actual date via Intl, not hardcoded.
+function getTimezoneDayBounds(timeZone, referenceDate = new Date()) {
+  const dtf = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hourCycle: 'h23',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+  const parts = dtf.formatToParts(referenceDate).reduce((acc, p) => {
+    acc[p.type] = p.value;
+    return acc;
+  }, {});
+
+  // What UTC instant would produce this wall-clock time in the target zone.
+  const asIfUTC = Date.UTC(
+    parts.year,
+    parts.month - 1,
+    parts.day,
+    parts.hour,
+    parts.minute,
+    parts.second
+  );
+  const offsetMs = asIfUTC - referenceDate.getTime();
+
+  // Shift "now" by that offset to get the target zone's current wall-clock
+  // date, then find real-UTC midnight for that date by reversing the shift.
+  const shifted = new Date(referenceDate.getTime() + offsetMs);
+  const y = shifted.getUTCFullYear();
+  const m = shifted.getUTCMonth();
+  const d = shifted.getUTCDate();
+  const startOfDay = new Date(Date.UTC(y, m, d, 0, 0, 0, 0) - offsetMs);
+  const endOfDay = new Date(startOfDay.getTime() + 24 * 60 * 60 * 1000 - 1);
+
+  return { startOfDay, endOfDay };
+}
+
 // Whether a user is entitled to see the full detail of a given pick —
 // either they bought it individually, or they have an active subscription.
 async function userHasAccess(userId, pickId) {
@@ -36,13 +82,10 @@ function resolveOptionalUser(req) {
 // GET /api/picks/today?sport=tennis
 // Public: returns picks with confidence/selection redacted unless the
 // requester is authenticated and entitled. Attach Authorization header to
-// unlock full detail.
+// unlock full detail. "Today" rolls over at midnight Pacific Time.
 router.get('/today', async (req, res) => {
   const { sport } = req.query;
-  const startOfDay = new Date();
-  startOfDay.setHours(0, 0, 0, 0);
-  const endOfDay = new Date();
-  endOfDay.setHours(23, 59, 59, 999);
+  const { startOfDay, endOfDay } = getTimezoneDayBounds('America/Los_Angeles');
 
   const where = {
     match: {
