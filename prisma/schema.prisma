@@ -82,6 +82,8 @@ model Match {
   homeScore    Int?     // structured final/current score for competitorA — needed to
   awayScore    Int?     // compute recent-form factors once matches complete
   setScore     String?  // tennis only — set-by-set games score, e.g. "6-4, 3-2"
+  closingOddsA Int?     // last odds seen for competitorA right as the match went live —
+  closingOddsB Int?     // an approximation of the "closing line," used for CLV/ROI tracking
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -119,4 +121,5 @@ model Result {
   pick       Pick     @relation(fields: [pickId], references: [id])
   outcome    String   // "win" | "loss" | "push"
   settledAt  DateTime @default(now())
+  gradedFrom String?  // "espn" | "odds_api" — which score source triggered grading
 }
