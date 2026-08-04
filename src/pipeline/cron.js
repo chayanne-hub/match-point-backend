@@ -254,6 +254,16 @@ async function updateLivePicksForSport(sportSlug) {
     const match = await db.match.findUnique({ where: { externalId: m.externalId } });
     if (!match) continue; // main pipeline hasn't picked this one up yet
 
+    // Snapshot odds the FIRST time we see this match live — this is our
+    // approximation of the "closing line," used later to measure whether
+    // the pick's original odds beat where the market ended up (CLV/ROI).
+    if (match.closingOddsA === null && m.oddsA !== null && m.oddsB !== null) {
+      await db.match.update({
+        where: { id: match.id },
+        data: { closingOddsA: m.oddsA, closingOddsB: m.oddsB },
+      });
+    }
+
     const factors = buildFactors(sportSlug, m.oddsA, m.oddsB);
     const rationale = 'Model weighted the market-implied favorite from live odds; other qualitative factors not yet connected.';
     const picks = buildPicks({
@@ -390,6 +400,64 @@ async function updateEspnScores() {
 }
 
 /**
+ * Grading — Track Record support.
+ *
+ * Determines win/loss/push for one pick against its now-finished match.
+ * Only supports the "X ML" moneyline-style selections buildPicks() actually
+ * produces today — if the selection format changes (spreads, totals) this
+ * will need a matching parser added alongside it.
+ *
+ * A tied final score (soccer draws being the realistic case, since ML has
+ * no draw option in the model) is graded as a push rather than forced into
+ * a win/loss — nobody actually won that match outright.
+ */
+function gradePick(match, pick) {
+  if (match.homeScore === null || match.awayScore === null) return null;
+
+  const pickedName = pick.selection.replace(/\s*ML$/, '').trim();
+  let pickedSide = null;
+  if (pickedName === match.competitorA) pickedSide = 'A';
+  else if (pickedName === match.competitorB) pickedSide = 'B';
+  if (!pickedSide) return null; // unrecognized selection format — skip, don't guess
+
+  if (match.homeScore === match.awayScore) return 'push';
+
+  const actualWinnerSide = match.homeScore > match.awayScore ? 'A' : 'B';
+  return pickedSide === actualWinnerSide ? 'win' : 'loss';
+}
+
+/**
+ * Scans for picks on finished matches that don't have a Result yet, grades
+ * them, and writes the outcome. This is what actually populates Track
+ * Record — without this, homeScore/awayScore can be perfectly correct and
+ * the stats would still show placeholders forever.
+ */
+async function gradeFinishedMatches() {
+  const ungraded = await db.pick.findMany({
+    where: {
+      result: null,
+      match: { status: 'final' },
+    },
+    include: { match: true },
+  });
+
+  let graded = 0;
+  for (const pick of ungraded) {
+    const outcome = gradePick(pick.match, pick);
+    if (!outcome) continue;
+
+    await db.result.create({
+      data: { pickId: pick.id, outcome },
+    });
+    graded++;
+  }
+
+  if (graded > 0) {
+    console.log(`[grading] graded ${graded} pick(s).`);
+  }
+}
+
+/**
  * Starts the fast ESPN score loop at 15-second intervals. This is the
  * primary source of live score freshness — the Odds-API-based
  * updateLiveScores() still runs every 15 minutes as part of the main
@@ -397,7 +465,9 @@ async function updateEspnScores() {
  */
 function startEspnScheduled() {
   setInterval(() => {
-    updateEspnScores().catch(err => console.error('[espn-pipeline] run failed:', err));
+    updateEspnScores()
+      .then(() => gradeFinishedMatches())
+      .catch(err => console.error('[espn-pipeline] run failed:', err));
   }, 15000); // every 15 seconds
   console.log('[espn-pipeline] scheduled to run every 15 seconds.');
 }
