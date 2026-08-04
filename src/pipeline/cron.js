@@ -247,22 +247,29 @@ async function updateLivePicksForSport(sportSlug) {
     return;
   }
 
+  // Continuously track the most recent pre-match odds for matches that
+  // haven't gone live yet. Whatever this holds right before the match
+  // actually starts becomes our closing-line snapshot. This runs over
+  // ALL fetched matches (not just live ones) because odds providers
+  // commonly stop returning pre-match odds the moment a game goes
+  // in-play — waiting to snapshot at "live" would frequently catch
+  // nothing, since the match may already be missing odds by then.
+  for (const m of matches) {
+    if (m.oddsA === null || m.oddsB === null) continue;
+    const dbMatch = await db.match.findUnique({ where: { externalId: m.externalId } });
+    if (!dbMatch || dbMatch.status !== 'scheduled') continue; // already live/final — line is closed
+    await db.match.update({
+      where: { id: dbMatch.id },
+      data: { closingOddsA: m.oddsA, closingOddsB: m.oddsB },
+    });
+  }
+
   const liveMatches = matches.filter(m => m.status === 'in_progress' || m.status === 'live');
   if (liveMatches.length === 0) return;
 
   for (const m of liveMatches) {
     const match = await db.match.findUnique({ where: { externalId: m.externalId } });
     if (!match) continue; // main pipeline hasn't picked this one up yet
-
-    // Snapshot odds the FIRST time we see this match live — this is our
-    // approximation of the "closing line," used later to measure whether
-    // the pick's original odds beat where the market ended up (CLV/ROI).
-    if (match.closingOddsA === null && m.oddsA !== null && m.oddsB !== null) {
-      await db.match.update({
-        where: { id: match.id },
-        data: { closingOddsA: m.oddsA, closingOddsB: m.oddsB },
-      });
-    }
 
     const factors = buildFactors(sportSlug, m.oddsA, m.oddsB);
     const rationale = 'Model weighted the market-implied favorite from live odds; other qualitative factors not yet connected.';
