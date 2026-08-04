@@ -6,7 +6,7 @@ const authRoutes = require('./routes/auth');
 const checkoutRoutes = require('./routes/checkout');
 const webhookRoutes = require('./routes/webhooks');
 const picksRoutes = require('./routes/picks');
-const { startScheduled, startLiveScheduled } = require('./pipeline/cron');
+const { startScheduled, startLiveScheduled, startEspnScheduled } = require('./pipeline/cron');
 
 const app = express();
 
@@ -36,3 +36,4 @@ app.listen(PORT, () => {
 
 startScheduled();
 startLiveScheduled();
+startEspnScheduled();
