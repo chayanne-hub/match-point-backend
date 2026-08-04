@@ -55,6 +55,11 @@ function getTimezoneDayBounds(timeZone, referenceDate = new Date()) {
 async function userHasAccess(userId, pickId) {
   if (!userId) return false;
 
+  // Admin accounts see everything unlocked — for internal QA/testing the
+  // full site without having to actually purchase every pick.
+  const user = await db.user.findUnique({ where: { id: userId }, select: { isAdmin: true } });
+  if (user?.isAdmin) return true;
+
   const purchased = await db.purchasedPick.findUnique({
     where: { userId_pickId: { userId, pickId } },
   });
