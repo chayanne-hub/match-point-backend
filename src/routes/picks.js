@@ -173,19 +173,24 @@ router.get('/live', async (req, res) => {
 });
 
 // GET /api/picks/stats?sport=tennis — Track Record numbers: win rate, ROI,
-// ROI vs. BetMGM's closing line, and matches analyzed/day, over a rolling
-// 30-day window. Public — this is marketing-facing proof, not account data.
+// ROI vs. BetMGM's closing line, and matches analyzed/day, ALL-TIME. Public
+// — this is marketing-facing proof, not account data.
+//
+// All-time rather than a rolling window on purpose: with a young, growing
+// sample, a 30-day window actually SHRINKS your effective sample as picks
+// age out of it, which is backwards — bigger sample size should only make
+// the number more trustworthy over time, not less. Pick-selling services
+// that publish a real track record report it since inception for the same
+// reason.
 //
 // NOTE ON EMPTY RESULTS: until matches actually finish and get graded (see
 // gradeFinishedMatches() in cron.js), this will legitimately return nulls —
 // that's not a bug, it's just no settled history existing yet.
 router.get('/stats', async (req, res) => {
   const { sport } = req.query;
-  const windowStart = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
 
   const results = await db.result.findMany({
     where: {
-      settledAt: { gte: windowStart },
       ...(sport ? { pick: { match: { sport: { slug: sport } } } } : {}),
     },
     include: { pick: { include: { match: true } } },
@@ -239,16 +244,22 @@ router.get('/stats', async (req, res) => {
     roiVsClose = Math.round((entryRoi - closeRoi) * 1000) / 10;
   }
 
-  const distinctMatches = await db.pick.findMany({
-    where: {
-      createdAt: { gte: windowStart },
-      ...(sport ? { match: { sport: { slug: sport } } } : {}),
-    },
+  // matches/day: distinct matches with a pick, averaged over the time
+  // since the FIRST pick was created — a genuine all-time daily pace,
+  // not diluted by a fixed window.
+  const allPicks = await db.pick.findMany({
+    where: sport ? { match: { sport: { slug: sport } } } : {},
     distinct: ['matchId'],
-    select: { matchId: true },
+    select: { matchId: true, createdAt: true },
+    orderBy: { createdAt: 'asc' },
   });
-  const daysElapsed = Math.max(1, Math.ceil((Date.now() - windowStart.getTime()) / (24 * 60 * 60 * 1000)));
-  const matchesPerDay = Math.round(distinctMatches.length / daysElapsed);
+
+  let matchesPerDay = null;
+  if (allPicks.length > 0) {
+    const earliestCreatedAt = allPicks[0].createdAt;
+    const daysElapsed = Math.max(1, Math.ceil((Date.now() - earliestCreatedAt.getTime()) / (24 * 60 * 60 * 1000)));
+    matchesPerDay = Math.round(allPicks.length / daysElapsed);
+  }
 
   res.json({
     winRate,
