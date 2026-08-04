@@ -81,6 +81,7 @@ model Match {
   liveClock    String?  // "Q3 8:42", "62'", "Top 6th", "Set 2", etc.
   homeScore    Int?     // structured final/current score for competitorA — needed to
   awayScore    Int?     // compute recent-form factors once matches complete
+  setScore     String?  // tennis only — set-by-set games score, e.g. "6-4, 3-2"
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
