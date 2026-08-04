@@ -275,6 +275,67 @@ router.get('/stats', async (req, res) => {
   });
 });
 
+// GET /api/picks/matches-today?sport=tennis — full slate with both sides'
+// odds, for the "All Matches" board. Uses closingOddsA/closingOddsB as the
+// "current" odds for each side — that field is continuously updated by the
+// live-picks loop for every scheduled match (see cron.js), so it's the
+// closest thing we have to a live both-sides odds snapshot pre-kickoff.
+// The picked side is only ever revealed when the pick is actually unlocked
+// — showing which side the model picked for free (even via a highlight
+// box with no text) would leak the selection the paywall exists to gate.
+router.get('/matches-today', async (req, res) => {
+  const { sport } = req.query;
+  const { startOfDay, endOfDay } = getTimezoneDayBounds('America/Los_Angeles');
+
+  const matches = await db.match.findMany({
+    where: {
+      startTime: { gte: startOfDay, lte: endOfDay },
+      ...(sport ? { sport: { slug: sport } } : {}),
+    },
+    include: { sport: true, picks: true },
+    orderBy: { startTime: 'asc' },
+  });
+
+  const userId = resolveOptionalUser(req);
+
+  const shaped = await Promise.all(
+    matches.map(async (m) => {
+      const pick = m.picks.find((p) => p.pickType === 'model') || m.picks.find((p) => p.pickType === 'winner') || null;
+      const unlocked = pick ? await userHasAccess(userId, pick.id) : false;
+
+      let pickedSide = null;
+      if (pick && unlocked) {
+        const pickedName = pick.selection.replace(/\s*ML$/, '').trim();
+        if (pickedName === m.competitorA) pickedSide = 'A';
+        else if (pickedName === m.competitorB) pickedSide = 'B';
+      }
+
+      return {
+        id: m.id,
+        sport: m.sport.slug,
+        league: m.league,
+        competitorA: m.competitorA,
+        competitorB: m.competitorB,
+        startTime: m.startTime,
+        surface: m.surface,
+        oddsA: m.closingOddsA,
+        oddsB: m.closingOddsB,
+        pick: pick
+          ? {
+              id: pick.id,
+              pickType: pick.pickType,
+              price: pick.price,
+              unlocked,
+              pickedSide, // 'A' | 'B' | null — null whenever locked or no pick exists
+            }
+          : null,
+      };
+    })
+  );
+
+  res.json({ matches: shaped });
+});
+
 // GET /api/picks/:id — full detail, requires purchase or active subscription
 router.get('/:id', requireAuth, async (req, res) => {
   const pick = await db.pick.findUnique({
