@@ -19,6 +19,7 @@ const cron = require('node-cron');
 const db = require('../lib/db');
 const { fetchMatches, fetchScores } = require('./fetchMatches');
 const { buildPicks } = require('./scoreModel');
+const { fetchEspnLiveScores, matchEspnEvent } = require('./fetchEspn');
 
 const SPORTS = ['tennis', 'basketball', 'soccer', 'baseball', 'football'];
 
@@ -318,4 +319,87 @@ function startLiveScheduled() {
   console.log('[live-pipeline] scheduled to run every 45 seconds.');
 }
 
-module.exports = { runAll, startScheduled, startLiveScheduled };
+/**
+ * Fast ESPN-sourced score loop. Free and unauthenticated, so this can run
+ * much more often than the Odds-API-based updateLiveScores() above without
+ * worrying about API credits. Only updates scores (homeScore/awayScore/
+ * liveScore/setScore/status) — odds and picks are untouched, since ESPN
+ * doesn't provide betting odds. Matches ESPN events to DB rows by
+ * normalized name + same day (see fetchEspn.js) since the two providers
+ * don't share an ID.
+ */
+async function updateEspnScoresForSport(sportSlug) {
+  const sportRow = await db.sport.findUnique({ where: { slug: sportSlug } });
+  if (!sportRow) return;
+
+  // Only bother matching against matches that are still relevant —
+  // scheduled for today or already live. Finished matches don't need
+  // further score updates from this loop.
+  const candidateMatches = await db.match.findMany({
+    where: {
+      sportId: sportRow.id,
+      status: { in: ['scheduled', 'live'] },
+    },
+  });
+  if (candidateMatches.length === 0) return;
+
+  let espnEvents;
+  try {
+    espnEvents = await fetchEspnLiveScores(sportSlug);
+  } catch (err) {
+    console.error(`[espn-pipeline] ${sportSlug} fetch failed:`, err.message);
+    return;
+  }
+
+  let updated = 0;
+  for (const event of espnEvents) {
+    const match = matchEspnEvent(event, candidateMatches);
+    if (!match) continue;
+
+    const newStatus = event.completed ? 'final' : event.inProgress ? 'live' : match.status;
+
+    await db.match.update({
+      where: { id: match.id },
+      data: {
+        status: newStatus,
+        homeScore: event.homeScore,
+        awayScore: event.awayScore,
+        liveScore: `${event.homeScore} - ${event.awayScore}`,
+        ...(event.setScore && { setScore: event.setScore }),
+      },
+    });
+
+    if (newStatus === 'live') {
+      await db.pick.updateMany({
+        where: { matchId: match.id },
+        data: { isLive: true },
+      });
+    }
+    updated++;
+  }
+
+  if (updated > 0) {
+    console.log(`[espn-pipeline] ${sportSlug}: updated ${updated} match(es) from ESPN.`);
+  }
+}
+
+async function updateEspnScores() {
+  for (const sport of SPORTS) {
+    await updateEspnScoresForSport(sport);
+  }
+}
+
+/**
+ * Starts the fast ESPN score loop at 15-second intervals. This is the
+ * primary source of live score freshness — the Odds-API-based
+ * updateLiveScores() still runs every 15 minutes as part of the main
+ * pipeline as a fallback, but ESPN being free lets us poll much faster.
+ */
+function startEspnScheduled() {
+  setInterval(() => {
+    updateEspnScores().catch(err => console.error('[espn-pipeline] run failed:', err));
+  }, 15000); // every 15 seconds
+  console.log('[espn-pipeline] scheduled to run every 15 seconds.');
+}
+
+module.exports = { runAll, startScheduled, startLiveScheduled, startEspnScheduled };
