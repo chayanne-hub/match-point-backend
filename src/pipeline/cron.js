@@ -287,11 +287,11 @@ async function updateLiveScores(sportSlug, sportId) {
       },
     });
 
-    // Flag this match's picks as live so they show up on the live board.
-    await db.pick.updateMany({
-      where: { matchId: match.id },
-      data: { isLive: true },
-    });
+    // NOTE: we no longer flag the match's pre-match "model"/"winner"
+    // picks as isLive here. That flag now belongs exclusively to the
+    // dedicated pickType:'live' record created by updateLivePicksForSport
+    // — the original picks must stay untouched once created, since they're
+    // the frozen prediction Today's Picks/the archive/stats grade against.
   }
 
   if (scores.length > 0) {
@@ -385,58 +385,61 @@ async function updateLivePicksForSport(sportSlug) {
       rationale,
     });
 
-    let aiRationale = null;
-    let aiRationaleGenerated = false;
-    let factRows = [];
+    // The live board tracks exactly ONE evolving pick per match, kept
+    // entirely separate from the pre-match "model"/"winner" picks — those
+    // are the frozen prediction that Today's Picks, the archive, and all
+    // stats read from, and must NEVER be touched once a match goes live.
+    // Mutating them mid-game would mean grading a "prediction" that was
+    // actually adjusted based on how the game was already going, which
+    // defeats the point of a track record. picks[0] is always the
+    // unconditional "winner" call from buildPicks() (the second, higher-
+    // bar "model" entry is only present above a confidence threshold),
+    // so it's the one guaranteed to exist every cycle.
+    const livePick = picks[0];
+    if (!livePick || livePick.odds === null || livePick.odds === undefined) continue;
 
-    for (const p of picks) {
-      if (p.odds === null || p.odds === undefined) continue;
+    const existingLive = await db.pick.findFirst({
+      where: { matchId: match.id, pickType: 'live' },
+    });
 
-      const existing = await db.pick.findFirst({
-        where: { matchId: match.id, pickType: p.pickType },
+    if (existingLive) {
+      // Numeric fields refresh every cycle; rationale is deliberately
+      // left untouched — it was already written (AI-generated or
+      // template) at creation time, and regenerating it every 45
+      // seconds would multiply the AI API cost for no real benefit.
+      await db.pick.update({
+        where: { id: existingLive.id },
+        data: {
+          selection: livePick.selection,
+          confidence: livePick.confidence,
+          odds: livePick.odds,
+        },
       });
-
-      if (existing) {
-        // Numeric fields refresh every cycle; rationale is deliberately
-        // left untouched — it was already written (AI-generated or
-        // template) at creation time, and regenerating it every 45
-        // seconds would multiply the AI API cost for no real benefit.
-        await db.pick.update({
-          where: { id: existing.id },
-          data: {
-            selection: p.selection,
-            confidence: p.confidence,
-            odds: p.odds,
-          },
-        });
-      } else {
-        if (!aiRationaleGenerated) {
-          const marketKey = MARKET_FACTOR_KEY[sportSlug];
-          factRows = describeFactors(
-            sportSlug, factors, m.competitorA, m.competitorB,
-            marketKey, REST_DAYS_KEY[sportSlug], HOME_AWAY_FORM_KEY[sportSlug]
-          );
-          aiRationale = await generateAiRationale({
-            sport: sportSlug,
-            competitorA: m.competitorA,
-            competitorB: m.competitorB,
-            selection: p.selection,
-            factRows,
-          });
-          aiRationaleGenerated = true;
-        }
-        await db.pick.create({
-          data: {
-            match: { connect: { id: match.id } },
-            pickType: p.pickType,
-            selection: p.selection,
-            confidence: p.confidence,
-            odds: p.odds,
-            rationale: aiRationale || p.rationale,
-            factsUsed: JSON.stringify(factRows),
-          },
-        });
-      }
+    } else {
+      const marketKey = MARKET_FACTOR_KEY[sportSlug];
+      const factRows = describeFactors(
+        sportSlug, factors, m.competitorA, m.competitorB,
+        marketKey, REST_DAYS_KEY[sportSlug], HOME_AWAY_FORM_KEY[sportSlug]
+      );
+      const aiRationale = await generateAiRationale({
+        sport: sportSlug,
+        competitorA: m.competitorA,
+        competitorB: m.competitorB,
+        selection: livePick.selection,
+        factRows,
+      });
+      await db.pick.create({
+        data: {
+          match: { connect: { id: match.id } },
+          pickType: 'live',
+          isLive: true,
+          selection: livePick.selection,
+          confidence: livePick.confidence,
+          odds: livePick.odds,
+          rationale: aiRationale || livePick.rationale,
+          factsUsed: JSON.stringify(factRows),
+        },
+      });
     }
   }
 
@@ -511,12 +514,10 @@ async function updateEspnScoresForSport(sportSlug) {
       },
     });
 
-    if (newStatus === 'live') {
-      await db.pick.updateMany({
-        where: { matchId: match.id },
-        data: { isLive: true },
-      });
-    }
+    // NOTE: no longer flagging the match's pre-match picks as isLive here
+    // — see the matching note in updateLiveScores(). The dedicated
+    // pickType:'live' record (created separately by
+    // updateLivePicksForSport) is what actually powers the live board now.
     updated++;
   }
 
@@ -569,6 +570,12 @@ async function gradeFinishedMatches() {
     where: {
       result: null,
       match: { status: 'final' },
+      // Only the frozen pre-match "model"/"winner" picks get graded into
+      // the permanent track record. The pickType:'live' record is a
+      // different product (evolves during play) — grading it the same
+      // way would mean judging a call that kept changing as the outcome
+      // became apparent, which isn't a real prediction.
+      pickType: { in: ['model', 'winner'] },
     },
     include: { match: true },
   });

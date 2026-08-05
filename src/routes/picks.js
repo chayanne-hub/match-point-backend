@@ -93,6 +93,9 @@ router.get('/today', async (req, res) => {
   const { startOfDay, endOfDay } = getTimezoneDayBounds('America/Los_Angeles');
 
   const where = {
+    // Today's Picks is the frozen pre-match prediction — never the
+    // separate, deliberately-evolving pickType:'live' record.
+    pickType: { in: ['model', 'winner'] },
     match: {
       startTime: { gte: startOfDay, lte: endOfDay },
       ...(sport ? { sport: { slug: sport } } : {}),
@@ -145,7 +148,7 @@ router.get('/live', async (req, res) => {
 
   const matches = await db.match.findMany({
     where,
-    include: { sport: true, picks: { where: { isLive: true } } },
+    include: { sport: true, picks: { where: { pickType: 'live' } } },
   });
 
   const userId = resolveOptionalUser(req);
