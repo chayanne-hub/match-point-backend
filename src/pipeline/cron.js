@@ -326,12 +326,21 @@ async function updateLivePicks() {
  * Starts the fast live-picks loop. Uses setInterval rather than
  * node-cron, since node-cron only guarantees minute-level granularity —
  * we need real sub-minute control here.
+ *
+ * 3 minutes, not 45 seconds: the previous 45-second interval called
+ * fetchMatches() for all 5 sports on every tick regardless of whether
+ * anything was actually live — roughly 9,600+ Odds API calls/day, enough
+ * to burn a 20,000-credit monthly plan in about 2 days. A picks website
+ * doesn't need trading-terminal-speed polling; 3 minutes still feels live
+ * to a visitor while cutting API usage by roughly 4x. Tune via
+ * LIVE_PIPELINE_INTERVAL_MS if you want a different tradeoff.
  */
 function startLiveScheduled() {
+  const intervalMs = Number(process.env.LIVE_PIPELINE_INTERVAL_MS) || 180000; // 3 minutes
   setInterval(() => {
     updateLivePicks().catch(err => console.error('[live-pipeline] run failed:', err));
-  }, 45000); // every 45 seconds — real refresh, safe on API credits
-  console.log('[live-pipeline] scheduled to run every 45 seconds.');
+  }, intervalMs);
+  console.log(`[live-pipeline] scheduled to run every ${Math.round(intervalMs / 1000)} seconds.`);
 }
 
 /**
