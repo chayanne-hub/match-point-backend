@@ -16,7 +16,7 @@ const cron = require('node-cron');
 const db = require('../lib/db');
 const { fetchMatches, fetchScores } = require('./fetchMatches');
 const { fetchEspnLiveScores, matchEspnEvent } = require('./fetchEspn');
-const { analyzeMatch } = require('./matchAnalyst');
+const { analyzeMatch, reassessLiveMatch } = require('./matchAnalyst');
 
 // Confidence bar a pick needs to clear to also be sold as a "model" pick
 // (a genuine-edge call) on top of the always-present "winner" pick (a
@@ -272,20 +272,46 @@ async function updateLivePicksForSport(sportSlug) {
     });
 
     if (existingLive) {
-      // Only the DISPLAYED PRICE refreshes each cycle — a legitimate
-      // "here's the current line" number, not a judgment call. Selection
-      // and confidence are deliberately frozen at whatever the initial
-      // research concluded: re-running a full web-search analysis every
-      // 45 seconds would be far too slow/expensive, but silently
-      // re-deriving confidence from live market movement instead would
-      // just reintroduce the exact "confidence comes from the odds, not
-      // real analysis" problem this whole architecture change was meant
-      // to fix.
-      const currentOdds = existingLive.selection === `${m.competitorA} ML` ? m.oddsA : m.oddsB;
-      await db.pick.update({
-        where: { id: existingLive.id },
-        data: { odds: currentOdds },
+      // Genuinely re-evaluate each cycle — weighing the live score and
+      // the players' known skill/history (via the original pre-match
+      // analysis as context) alongside the current odds. Odds are real
+      // signal here (fast market movement can reflect something real —
+      // an injury, momentum), but reassessLiveMatch() is explicitly told
+      // not to let them be the ONLY driver, since odds alone can move
+      // fast and don't always reflect the full picture.
+      const reassessment = await reassessLiveMatch({
+        sport: sportSlug,
+        competitorA: m.competitorA,
+        competitorB: m.competitorB,
+        liveScore: match.liveScore,
+        oddsA: m.oddsA,
+        oddsB: m.oddsB,
+        priorAnalysis: existingLive.rationale,
       });
+
+      if (reassessment) {
+        const updatedOdds = reassessment.selection === `${m.competitorA} ML` ? m.oddsA : m.oddsB;
+        await db.pick.update({
+          where: { id: existingLive.id },
+          data: {
+            selection: reassessment.selection,
+            confidence: reassessment.confidence,
+            odds: updatedOdds,
+            rationale: reassessment.analysis,
+            factsUsed: JSON.stringify(reassessment.factors),
+          },
+        });
+      } else {
+        // Reassessment failed this cycle (timeout, bad response, etc.) —
+        // still refresh the displayed price so it doesn't go stale, but
+        // leave the judgment (selection/confidence/rationale) untouched
+        // rather than guess.
+        const currentOdds = existingLive.selection === `${m.competitorA} ML` ? m.oddsA : m.oddsB;
+        await db.pick.update({
+          where: { id: existingLive.id },
+          data: { odds: currentOdds },
+        });
+      }
     } else {
       const analysis = await analyzeMatch({
         sport: sportSlug,

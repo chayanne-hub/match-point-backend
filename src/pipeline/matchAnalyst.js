@@ -299,4 +299,140 @@ this exact shape:
   }
 }
 
-module.exports = { analyzeMatch };
+/**
+ * Periodically re-evaluates a LIVE match given how it's actually playing
+ * out. Deliberately different from analyzeMatch(): no web search tool
+ * (this runs repeatedly for every live match, so it needs to be fast and
+ * cheap — a full research call every cycle would be neither), and it's
+ * explicitly told to weigh the live score and the players' known
+ * skill/history alongside the current odds, never let odds alone drive
+ * the number. Current odds ARE included as real signal (fast market
+ * movement can reflect real information — an injury visible on court,
+ * fatigue, momentum) — the instruction is against over-relying on them,
+ * not against using them at all.
+ *
+ * Returns the same shape as analyzeMatch(): { selection, confidence,
+ * analysis, factors }. Returns null (never throws) on failure.
+ */
+async function reassessLiveMatch({ sport, competitorA, competitorB, liveScore, oddsA, oddsB, priorAnalysis }) {
+  if (!process.env.ANTHROPIC_API_KEY) {
+    console.error('[match-analyst] ANTHROPIC_API_KEY not set — cannot reassess live match.');
+    return null;
+  }
+
+  const oddsContext = (oddsA !== null && oddsB !== null)
+    ? `Current live moneyline price: ${competitorA} ${oddsA > 0 ? '+' + oddsA : oddsA}, ${competitorB} ${oddsB > 0 ? '+' + oddsB : oddsB} (BetMGM).`
+    : 'Current live moneyline price: not available.';
+
+  const jsonInstruction = `
+Do not narrate your process. Your final message must contain ONLY the JSON
+object below and nothing else.
+
+The "selection" field MUST be exactly one of these two strings, verbatim:
+"${competitorA} ML" or "${competitorB} ML".
+
+The "factors" field is an array of the specific things that actually
+informed this updated read. Each entry needs "label" (short category, e.g.
+"Live Score", "Momentum", "Current Odds", "Pre-Match Scouting"), "tag"
+(exactly "Favors ${competitorA}", "Favors ${competitorB}", or "Neutral"),
+and "body" (one sentence).
+
+Respond with ONLY a raw JSON object, in this exact shape:
+{
+  "selection": "${competitorA} ML" or "${competitorB} ML",
+  "confidence": <integer 0-100>,
+  "analysis": "1-3 sentence updated read given how the match is actually going",
+  "factors": [ { "label": "...", "tag": "...", "body": "..." }, ... ]
+}
+`.trim();
+
+  const prompt = `
+You are re-evaluating a match that's currently IN PROGRESS, given both your
+original pre-match scouting and how the match has actually unfolded so far.
+
+Match: ${competitorA} vs ${competitorB} (${sport})
+Current score: ${liveScore || 'not available'}
+${oddsContext}
+
+Your original pre-match analysis:
+${priorAnalysis || '(not available)'}
+
+Give an updated read on who wins from here. Weigh the live score and each
+player's known skill/tendencies/history (from your original scouting)
+together with the current odds — the odds ARE real signal (fast market
+movement can reflect something real happening, like an injury or a
+momentum shift), but do not let them be the ONLY thing driving your
+number. Odds alone can move quickly and don't always reflect the full
+picture. Commit to a real, differentiated confidence number based on your
+actual judgment of the match state.
+
+${jsonInstruction}
+`.trim();
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 45000); // shorter than analyzeMatch()'s 90s — no search tool, should resolve faster
+
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: ANTHROPIC_MODEL,
+        max_tokens: 800,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+    });
+    clearTimeout(timeoutId);
+
+    if (!res.ok) {
+      console.error(`[match-analyst] live reassessment API returned ${res.status} for ${competitorA} vs ${competitorB}`);
+      return null;
+    }
+
+    const data = await res.json();
+    const textBlocks = (data.content || []).filter((b) => b.type === 'text');
+    if (!textBlocks.length) return null;
+    const finalText = textBlocks[textBlocks.length - 1].text;
+
+    const withoutFences = finalText.replace(/```json|```/g, '').trim();
+    const jsonMatch = withoutFences.match(/\{[\s\S]*\}/);
+    const cleaned = jsonMatch ? jsonMatch[0] : withoutFences;
+
+    let parsed;
+    try {
+      parsed = JSON.parse(cleaned);
+    } catch (err) {
+      console.error(`[match-analyst] failed to parse live reassessment JSON for ${competitorA} vs ${competitorB}: ${err.message}`);
+      return null;
+    }
+
+    const validSelections = [`${competitorA} ML`, `${competitorB} ML`];
+    if (
+      !validSelections.includes(parsed.selection) ||
+      typeof parsed.confidence !== 'number' ||
+      typeof parsed.analysis !== 'string' ||
+      !Array.isArray(parsed.factors)
+    ) {
+      console.error(`[match-analyst] live reassessment missing/invalid fields for ${competitorA} vs ${competitorB}: ${cleaned}`);
+      return null;
+    }
+
+    parsed.confidence = Math.max(0, Math.min(100, Math.round(parsed.confidence)));
+    return parsed;
+  } catch (err) {
+    clearTimeout(timeoutId);
+    if (err.name === 'AbortError') {
+      console.error(`[match-analyst] live reassessment timed out for ${competitorA} vs ${competitorB} — skipping this cycle.`);
+    } else {
+      console.error(`[match-analyst] live reassessment failed for ${competitorA} vs ${competitorB}:`, err.message);
+    }
+    return null;
+  }
+}
+
+module.exports = { analyzeMatch, reassessLiveMatch };
