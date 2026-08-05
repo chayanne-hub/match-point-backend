@@ -37,6 +37,19 @@ const DYNAMIC_PREFIXES = {
   tennis: 'tennis_',
 };
 
+// American odds outside this range are treated as implausible and rejected
+// rather than used. Sportsbooks commonly post an extreme placeholder price
+// (e.g. -10000) for a few seconds right as a market transitions to
+// in-play, before real trading opens — that placeholder isn't a real
+// quote, and using it corrupts confidence/pick odds with garbage. No
+// legitimate market price in the sports this pipeline covers gets
+// anywhere near this bound, so anything beyond it is assumed suspended.
+const MAX_PLAUSIBLE_ODDS = 2000;
+
+function isPlausibleOdds(price) {
+  return typeof price === 'number' && Math.abs(price) <= MAX_PLAUSIBLE_ODDS;
+}
+
 // The /sports endpoint is free (doesn't cost quota) and lists every
 // currently in-season sport key.
 async function discoverSportKeys(prefix, baseUrl, apiKey) {
@@ -142,6 +155,25 @@ function normalizeMatch(sport, raw) {
   const h2h = bookOdds?.markets?.find((m) => m.key === 'h2h');
   const outcomes = h2h?.outcomes || [];
 
+  let oddsA = outcomes.find((o) => o.name === raw.home_team)?.price ?? null;
+  let oddsB = outcomes.find((o) => o.name === raw.away_team)?.price ?? null;
+
+  // Reject the whole quote (both sides) if either price looks like a
+  // suspended-market placeholder rather than a real number — a market
+  // that's actually two-sided doesn't have one legitimate price and one
+  // garbage one, so if either side fails the sanity check, neither side
+  // can be trusted. Downstream code already treats null odds as "no
+  // price available" and safely skips picks/updates rather than using it.
+  if (oddsA !== null && !isPlausibleOdds(oddsA)) {
+    console.warn(`[fetchMatches] rejecting implausible odds for ${raw.home_team} vs ${raw.away_team}: ${oddsA} / ${oddsB} — likely a suspended-market placeholder.`);
+    oddsA = null;
+    oddsB = null;
+  } else if (oddsB !== null && !isPlausibleOdds(oddsB)) {
+    console.warn(`[fetchMatches] rejecting implausible odds for ${raw.home_team} vs ${raw.away_team}: ${oddsA} / ${oddsB} — likely a suspended-market placeholder.`);
+    oddsA = null;
+    oddsB = null;
+  }
+
   return {
     externalId: raw.id,
     sport,
@@ -149,8 +181,8 @@ function normalizeMatch(sport, raw) {
     competitorA: raw.home_team,
     competitorB: raw.away_team,
     startTime: new Date(raw.commence_time),
-    oddsA: outcomes.find((o) => o.name === raw.home_team)?.price ?? null,
-    oddsB: outcomes.find((o) => o.name === raw.away_team)?.price ?? null,
+    oddsA,
+    oddsB,
     status: new Date(raw.commence_time) <= new Date() ? 'live' : 'scheduled',
   };
 }
