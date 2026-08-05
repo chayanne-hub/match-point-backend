@@ -261,7 +261,12 @@ async function updateLivePicksForSport(sportSlug) {
     const match = await db.match.findUnique({ where: { externalId: m.externalId } });
     if (!match) continue; // main pipeline hasn't picked this one up yet
 
-    if (m.oddsA === null || m.oddsB === null) continue;
+    // Live odds are helpful context, not a requirement — plenty of books
+    // don't offer an in-play market for every match/sport at all (not a
+    // brief suspension, a genuine absence for that match's whole live
+    // duration). The judgment itself is driven by score + scouting, so a
+    // missing live price should never block the pick from existing.
+    const hasLiveOdds = m.oddsA !== null && m.oddsB !== null;
 
     // The live board tracks exactly ONE evolving pick per match, kept
     // entirely separate from the pre-match "model"/"winner" picks — those
@@ -274,34 +279,37 @@ async function updateLivePicksForSport(sportSlug) {
     if (existingLive) {
       // Genuinely re-evaluate each cycle — weighing the live score and
       // the players' known skill/history (via the original pre-match
-      // analysis as context) alongside the current odds. Odds are real
-      // signal here (fast market movement can reflect something real —
-      // an injury, momentum), but reassessLiveMatch() is explicitly told
-      // not to let them be the ONLY driver, since odds alone can move
-      // fast and don't always reflect the full picture.
+      // analysis as context) alongside the current odds when available.
+      // Odds are real signal (fast market movement can reflect something
+      // real — an injury, momentum), but reassessLiveMatch() is
+      // explicitly told not to let them be the ONLY driver, and it
+      // handles "not available" gracefully when there's no live market.
       const reassessment = await reassessLiveMatch({
         sport: sportSlug,
         competitorA: m.competitorA,
         competitorB: m.competitorB,
         liveScore: match.liveScore,
-        oddsA: m.oddsA,
-        oddsB: m.oddsB,
+        oddsA: hasLiveOdds ? m.oddsA : null,
+        oddsB: hasLiveOdds ? m.oddsB : null,
         priorAnalysis: existingLive.rationale,
       });
 
       if (reassessment) {
-        const updatedOdds = reassessment.selection === `${m.competitorA} ML` ? m.oddsA : m.oddsB;
-        await db.pick.update({
-          where: { id: existingLive.id },
-          data: {
-            selection: reassessment.selection,
-            confidence: reassessment.confidence,
-            odds: updatedOdds,
-            rationale: reassessment.analysis,
-            factsUsed: JSON.stringify(reassessment.factors),
-          },
-        });
-      } else {
+        // Only touch the displayed price if we actually have a fresh
+        // one this cycle — otherwise leave whatever was last stored
+        // (real closing/live odds) rather than guessing or nulling it
+        // out, since odds is a required field on Pick.
+        const updateData = {
+          selection: reassessment.selection,
+          confidence: reassessment.confidence,
+          rationale: reassessment.analysis,
+          factsUsed: JSON.stringify(reassessment.factors),
+        };
+        if (hasLiveOdds) {
+          updateData.odds = reassessment.selection === `${m.competitorA} ML` ? m.oddsA : m.oddsB;
+        }
+        await db.pick.update({ where: { id: existingLive.id }, data: updateData });
+      } else if (hasLiveOdds) {
         // Reassessment failed this cycle (timeout, bad response, etc.) —
         // still refresh the displayed price so it doesn't go stale, but
         // leave the judgment (selection/confidence/rationale) untouched
@@ -317,13 +325,25 @@ async function updateLivePicksForSport(sportSlug) {
         sport: sportSlug,
         competitorA: m.competitorA,
         competitorB: m.competitorB,
-        oddsA: m.oddsA,
-        oddsB: m.oddsB,
+        oddsA: hasLiveOdds ? m.oddsA : null,
+        oddsB: hasLiveOdds ? m.oddsB : null,
         startTime: m.startTime,
       });
       if (!analysis) continue; // try again next cycle
 
-      const pickedOdds = analysis.selection === `${m.competitorA} ML` ? m.oddsA : m.oddsB;
+      // odds is a required field on Pick — if there's no live in-play
+      // price, fall back to the closing line captured just before
+      // kickoff (a real, genuine market price) rather than blocking
+      // pick creation entirely just because no in-play market exists.
+      let pickedOdds;
+      if (hasLiveOdds) {
+        pickedOdds = analysis.selection === `${m.competitorA} ML` ? m.oddsA : m.oddsB;
+      } else if (match.closingOddsA !== null && match.closingOddsB !== null) {
+        pickedOdds = analysis.selection === `${m.competitorA} ML` ? match.closingOddsA : match.closingOddsB;
+      } else {
+        continue; // no live odds AND no closing odds on record — genuinely nothing to store, try again next cycle
+      }
+
       await db.pick.create({
         data: {
           match: { connect: { id: match.id } },
