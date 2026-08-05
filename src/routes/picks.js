@@ -266,12 +266,19 @@ router.get('/stats', async (req, res) => {
     matchesPerDay = Math.round(allPicks.length / daysElapsed);
   }
 
+  const winRows = decided.filter((r) => r.outcome === 'win');
+  const avgConfidenceWins = winRows.length > 0
+    ? Math.round(winRows.reduce((sum, r) => sum + r.pick.confidence, 0) / winRows.length)
+    : null;
+
   res.json({
     winRate,
     roi,
     roiVsClose,
     matchesPerDay,
     sampleSize: decided.length,
+    picksLogged: decided.length,
+    avgConfidenceWins,
   });
 });
 
@@ -390,8 +397,11 @@ router.get('/archive/results', async (req, res) => {
       date: r.settledAt,
       matchup: `${r.pick.match.competitorA} vs ${r.pick.match.competitorB}`,
       sport: r.pick.match.sport.slug,
+      league: r.pick.match.league,
+      pickType: r.pick.pickType,
       selection: r.pick.selection,
       confidence: r.pick.confidence,
+      odds: r.pick.odds,
       outcome: r.outcome,
     })),
   });
