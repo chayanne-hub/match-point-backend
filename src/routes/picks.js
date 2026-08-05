@@ -194,9 +194,19 @@ router.get('/live', async (req, res) => {
 router.get('/stats', async (req, res) => {
   const { sport } = req.query;
 
+  // Excludes picks whose recorded odds fall outside a plausible range —
+  // these are corrupted rows from before the suspended-market-placeholder
+  // fix in fetchMatches.js (e.g. -10000 odds captured during a book's
+  // brief in-play market suspension, not a real price). The pick and its
+  // result stay in the database untouched; they're just excluded from
+  // these public-facing win-rate/ROI calculations so one bad price snapshot
+  // doesn't distort the whole track record.
   const results = await db.result.findMany({
     where: {
-      ...(sport ? { pick: { match: { sport: { slug: sport } } } } : {}),
+      pick: {
+        odds: { gte: -2000, lte: 2000 },
+        ...(sport ? { match: { sport: { slug: sport } } } : {}),
+      },
     },
     include: { pick: { include: { match: true } } },
   });
@@ -383,10 +393,16 @@ router.get('/:id', requireAuth, async (req, res) => {
 router.get('/archive/results', async (req, res) => {
   const { sport } = req.query;
 
+  // Same exclusion as /stats — see the comment there. Keeps corrupted
+  // -10000-style placeholder-odds rows out of the public archive without
+  // deleting the underlying data.
   const results = await db.result.findMany({
-    where: sport
-      ? { pick: { match: { sport: { slug: sport } } } }
-      : {},
+    where: {
+      pick: {
+        odds: { gte: -2000, lte: 2000 },
+        ...(sport ? { match: { sport: { slug: sport } } } : {}),
+      },
+    },
     include: { pick: { include: { match: { include: { sport: true } } } } },
     orderBy: { settledAt: 'desc' },
     take: 100,
