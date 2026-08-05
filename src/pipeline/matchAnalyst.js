@@ -218,9 +218,18 @@ this exact shape:
 
   const matchDescription = `${competitorA} vs ${competitorB} (${sport}), ${new Date(startTime).toISOString()}. ${oddsContext}`;
 
+  // Real research with web search can legitimately take a while, but a
+  // single hung request must never be allowed to block the entire
+  // sequential pipeline run indefinitely — every match after it would
+  // wait forever too. 90s is generous for a multi-search-round-trip
+  // research call while still guaranteeing forward progress.
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 90000);
+
   try {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
+      signal: controller.signal,
       headers: {
         'x-api-key': process.env.ANTHROPIC_API_KEY,
         'anthropic-version': '2023-06-01',
@@ -234,6 +243,7 @@ this exact shape:
         messages: [{ role: 'user', content: `Analyze this match:\n\n${matchDescription}` }],
       }),
     });
+    clearTimeout(timeoutId);
 
     if (!res.ok) {
       console.error(`[match-analyst] Anthropic API returned ${res.status} for ${competitorA} vs ${competitorB}`);
@@ -279,7 +289,12 @@ this exact shape:
     parsed.confidence = Math.max(0, Math.min(100, Math.round(parsed.confidence)));
     return parsed;
   } catch (err) {
-    console.error(`[match-analyst] request failed for ${competitorA} vs ${competitorB}:`, err.message);
+    clearTimeout(timeoutId);
+    if (err.name === 'AbortError') {
+      console.error(`[match-analyst] request timed out after 90s for ${competitorA} vs ${competitorB} — skipping this cycle.`);
+    } else {
+      console.error(`[match-analyst] request failed for ${competitorA} vs ${competitorB}:`, err.message);
+    }
     return null;
   }
 }
