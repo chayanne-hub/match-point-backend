@@ -5,24 +5,23 @@
  * (Railway cron, a Render cron job, GitHub Actions on a schedule, etc.)
  * instead of a long-running node-cron process — either works.
  *
- * What this does NOT do yet: pull the qualitative factor inputs (surface fit,
- * injury reports, weather, etc.) that scoreModel.js expects. Those need their
- * own data sources per sport (see the notes in fetchMatches.js) and their own
- * normalization into the -1..+1 factor scores scoreModel.js consumes. Right
- * now this pipeline only wires up the odds-based skeleton — matches get
- * fetched and stored, but factor scoring is stubbed with neutral placeholders
- * until real qualitative inputs are connected per sport.
+ * Pick creation runs on real independent research via matchAnalyst.js —
+ * Claude does its own web-search-backed handicapping per match, per sport,
+ * rather than confidence being derived mathematically from the betting
+ * odds. See matchAnalyst.js for the full explanation of that change.
  */
 
 require('dotenv').config();
 const cron = require('node-cron');
 const db = require('../lib/db');
 const { fetchMatches, fetchScores } = require('./fetchMatches');
-const { buildPicks, MARKET_FACTOR_KEY } = require('./scoreModel');
 const { fetchEspnLiveScores, matchEspnEvent } = require('./fetchEspn');
-const { computeInjuryFactor, fetchEspnTeams } = require('./fetchEspnInjuries');
-const { computeRestDaysFactor, computeHomeAwayFormFactor } = require('./qualitativeFactors');
-const { describeFactors, generateAiRationale } = require('./generateRationale');
+const { analyzeMatch } = require('./matchAnalyst');
+
+// Confidence bar a pick needs to clear to also be sold as a "model" pick
+// (a genuine-edge call) on top of the always-present "winner" pick (a
+// straight who-wins call on every match, regardless of edge size).
+const MODEL_PICK_THRESHOLD = 65;
 
 const SPORTS = ['tennis', 'basketball', 'soccer', 'baseball', 'football'];
 
@@ -34,93 +33,6 @@ async function ensureSportRows() {
       create: { slug, name: slug[0].toUpperCase() + slug.slice(1) },
     });
   }
-}
-
-// Builds the factor set fed into scoreMatch(). The "primary" slot per sport
-// (see MARKET_FACTOR_KEY in scoreModel.js) is filled with a real signal
-// derived from the actual odds — how strongly the market favors one side.
-// Every other qualitative factor (surface fit, injuries, weather, etc.)
-// still needs its own real data source and is genuinely OMITTED (not set
-// to 0) until that's connected — scoreMatch() correctly excludes missing
-// factors from the weighted average, whereas setting them to 0 would count
-// as a confirmed "no edge" data point and wrongly dilute the one real
-// signal we do have. See the per-sport model notes for what's still needed.
-// Which sports have an injuries factor slot in WEIGHTS (see scoreModel.js)
-// that ESPN's per-team injury report can actually fill.
-const INJURY_SPORTS = new Set(['basketball', 'football', 'baseball']);
-
-// Maps each sport to which of its WEIGHTS keys (see scoreModel.js) the
-// free/derivable factors below actually fill. Baseball has no matching
-// slot for either — its four factors (startingPitcher, bullpenFatigue,
-// parkFactors, lineMovement) don't correspond to rest or home/away form,
-// so it's intentionally absent from both maps rather than forced in.
-const REST_DAYS_KEY = { basketball: 'rest', football: 'restTravel' };
-const HOME_AWAY_FORM_KEY = { basketball: 'homeRoad', soccer: 'homeAwayForm' };
-
-async function buildFactors(sport, competitorA, competitorB, oddsA, oddsB, matchStartTime, espnTeamsCache = null) {
-  const { MARKET_FACTOR_KEY, marketImpliedFactor } = require('./scoreModel');
-  const factors = {};
-
-  const marketKey = MARKET_FACTOR_KEY[sport];
-  const marketSignal = marketImpliedFactor(oddsA, oddsB);
-  if (marketKey && marketSignal !== null) {
-    factors[marketKey] = marketSignal;
-  }
-
-  if (INJURY_SPORTS.has(sport)) {
-    try {
-      const injurySignal = await computeInjuryFactor(sport, competitorA, competitorB, espnTeamsCache);
-      if (injurySignal !== null) {
-        factors.injuries = injurySignal;
-      }
-    } catch (err) {
-      console.error(`[factors] ${sport} injury lookup failed for ${competitorA} vs ${competitorB}:`, err.message);
-      // Omit the factor on failure — never fabricate a neutral value.
-    }
-  }
-
-  const restKey = REST_DAYS_KEY[sport];
-  if (restKey) {
-    try {
-      const restSignal = await computeRestDaysFactor(sport, competitorA, competitorB, matchStartTime);
-      if (restSignal !== null) {
-        factors[restKey] = restSignal;
-      }
-    } catch (err) {
-      console.error(`[factors] ${sport} rest-days lookup failed for ${competitorA} vs ${competitorB}:`, err.message);
-    }
-  }
-
-  const formKey = HOME_AWAY_FORM_KEY[sport];
-  if (formKey) {
-    try {
-      const formSignal = await computeHomeAwayFormFactor(sport, competitorA, competitorB, matchStartTime);
-      if (formSignal !== null) {
-        factors[formKey] = formSignal;
-      }
-    } catch (err) {
-      console.error(`[factors] ${sport} home/away form lookup failed for ${competitorA} vs ${competitorB}:`, err.message);
-    }
-  }
-
-  return factors;
-}
-
-/**
- * Builds an honest, factor-accurate rationale string — only mentions the
- * signals that actually contributed to THIS pick, never a generic claim
- * about the full model. Still a template, not real prose — that's the
- * next piece (Claude-generated analysis) to build on top of this.
- */
-function buildRationale(sport, factors) {
-  const parts = ['the market-implied favorite from live odds'];
-  if (factors.injuries !== undefined) parts.push("each team's reported injuries");
-  if (factors[REST_DAYS_KEY[sport]] !== undefined) parts.push('rest days since each team\'s last match');
-  if (factors[HOME_AWAY_FORM_KEY[sport]] !== undefined) parts.push('recent home/away form');
-
-  const connected = parts.length > 1 ? parts.join(', ') : parts[0];
-  const stillMissing = 'other qualitative factors not yet connected.';
-  return `Model weighted ${connected}; ${stillMissing}`;
 }
 
 async function runForSport(sportSlug) {
@@ -135,10 +47,6 @@ async function runForSport(sportSlug) {
   }
 
   const sportRow = await db.sport.findUnique({ where: { slug: sportSlug } });
-
-  // Fetch once per run, not once per match — buildFactors reuses this for
-  // every match's injury lookup instead of re-fetching the full team list.
-  const espnTeamsCache = INJURY_SPORTS.has(sportSlug) ? await fetchEspnTeams(sportSlug) : null;
 
   for (const m of matches) {
     const match = await db.match.upsert({
@@ -158,71 +66,55 @@ async function runForSport(sportSlug) {
       },
     });
 
-    // Other qualitative factors beyond the market signal and (for
-    // basketball/football/baseball) ESPN injuries still need their own
-    // data sources per sport — see the per-sport model notes.
-    const factors = await buildFactors(sportSlug, m.competitorA, m.competitorB, m.oddsA, m.oddsB, m.startTime, espnTeamsCache);
-    const rationale = buildRationale(sportSlug, factors);
+    // Skip entirely if picks already exist for this match — analyzeMatch()
+    // is a real research call (web search + reasoning), not a cheap
+    // formula, so it only ever runs once per match, at creation.
+    const alreadyHasPicks = await db.pick.findFirst({
+      where: { matchId: match.id, pickType: { in: ['model', 'winner'] } },
+    });
+    if (alreadyHasPicks) continue;
 
-    const picks = buildPicks({
+    if (m.oddsA === null || m.oddsB === null) {
+      console.warn(`[pipeline] skipping analysis for ${m.competitorA} vs ${m.competitorB} — no odds available.`);
+      continue;
+    }
+
+    const analysis = await analyzeMatch({
       sport: sportSlug,
       competitorA: m.competitorA,
       competitorB: m.competitorB,
       oddsA: m.oddsA,
       oddsB: m.oddsB,
-      factors,
-      rationale,
+      startTime: m.startTime,
     });
+    if (!analysis) {
+      console.warn(`[pipeline] no analysis returned for ${m.competitorA} vs ${m.competitorB} — skipping pick creation this cycle.`);
+      continue;
+    }
 
-    let aiRationale = null;
-    let aiRationaleGenerated = false;
-    let factRows = [];
+    // The pick's own odds are whichever side Claude actually picked —
+    // not always oddsA.
+    const pickedOdds = analysis.selection === `${m.competitorA} ML` ? m.oddsA : m.oddsB;
+    const factsUsedJson = JSON.stringify(analysis.factors);
 
-    for (const p of picks) {
-      // Skip if the book didn't actually have a price for this side —
-      // odds is a required field, and a null/undefined value here means
-      // there's nothing real to attach to the pick.
-      if (p.odds === null || p.odds === undefined) {
-        console.warn(`[pipeline] skipping pick for ${m.competitorA} vs ${m.competitorB} — no odds available.`);
-        continue;
-      }
+    // Every match gets a "winner" pick — a straight who-wins call. Only
+    // picks clearing MODEL_PICK_THRESHOLD also get sold as a "model"
+    // pick (a genuine-edge call), same selection/confidence/analysis,
+    // just a second sellable product on top.
+    const pickTypesToCreate = analysis.confidence >= MODEL_PICK_THRESHOLD
+      ? ['winner', 'model']
+      : ['winner'];
 
-      // Avoid duplicate picks for the same match + type on repeated runs.
-      const already = await db.pick.findFirst({
-        where: { matchId: match.id, pickType: p.pickType },
-      });
-      if (already) continue;
-
-      // Compute + generate once per match (not once per pick type —
-      // "model" and "winner" picks on the same match share the same
-      // underlying facts) and only for picks we're actually about to
-      // create, never re-run on ones that already exist.
-      if (!aiRationaleGenerated) {
-        const marketKey = MARKET_FACTOR_KEY[sportSlug];
-        factRows = describeFactors(
-          sportSlug, factors, m.competitorA, m.competitorB,
-          marketKey, REST_DAYS_KEY[sportSlug], HOME_AWAY_FORM_KEY[sportSlug]
-        );
-        aiRationale = await generateAiRationale({
-          sport: sportSlug,
-          competitorA: m.competitorA,
-          competitorB: m.competitorB,
-          selection: p.selection,
-          factRows,
-        });
-        aiRationaleGenerated = true;
-      }
-      const finalRationale = aiRationale || p.rationale; // fall back to the template if AI generation returned null
-
+    for (const pickType of pickTypesToCreate) {
       await db.pick.create({
         data: {
           match: { connect: { id: match.id } },
-          pickType: p.pickType,
-          selection: p.selection,
-          confidence: p.confidence,
-          odds: p.odds,
-          rationale: finalRationale,
-          factsUsed: JSON.stringify(factRows),
+          pickType,
+          selection: analysis.selection,
+          confidence: analysis.confidence,
+          odds: pickedOdds,
+          rationale: analysis.analysis,
+          factsUsed: factsUsedJson,
         },
       });
     }
@@ -365,79 +257,57 @@ async function updateLivePicksForSport(sportSlug) {
   const liveMatches = matches.filter(m => m.status === 'in_progress' || m.status === 'live');
   if (liveMatches.length === 0) return;
 
-  // Same per-run caching as the main pipeline — fetch once, reuse for
-  // every live match in this call rather than per-match.
-  const espnTeamsCache = INJURY_SPORTS.has(sportSlug) ? await fetchEspnTeams(sportSlug) : null;
-
   for (const m of liveMatches) {
     const match = await db.match.findUnique({ where: { externalId: m.externalId } });
     if (!match) continue; // main pipeline hasn't picked this one up yet
 
-    const factors = await buildFactors(sportSlug, m.competitorA, m.competitorB, m.oddsA, m.oddsB, m.startTime, espnTeamsCache);
-    const rationale = buildRationale(sportSlug, factors);
-    const picks = buildPicks({
-      sport: sportSlug,
-      competitorA: m.competitorA,
-      competitorB: m.competitorB,
-      oddsA: m.oddsA,
-      oddsB: m.oddsB,
-      factors,
-      rationale,
-    });
+    if (m.oddsA === null || m.oddsB === null) continue;
 
     // The live board tracks exactly ONE evolving pick per match, kept
     // entirely separate from the pre-match "model"/"winner" picks — those
     // are the frozen prediction that Today's Picks, the archive, and all
     // stats read from, and must NEVER be touched once a match goes live.
-    // Mutating them mid-game would mean grading a "prediction" that was
-    // actually adjusted based on how the game was already going, which
-    // defeats the point of a track record. picks[0] is always the
-    // unconditional "winner" call from buildPicks() (the second, higher-
-    // bar "model" entry is only present above a confidence threshold),
-    // so it's the one guaranteed to exist every cycle.
-    const livePick = picks[0];
-    if (!livePick || livePick.odds === null || livePick.odds === undefined) continue;
-
     const existingLive = await db.pick.findFirst({
       where: { matchId: match.id, pickType: 'live' },
     });
 
     if (existingLive) {
-      // Numeric fields refresh every cycle; rationale is deliberately
-      // left untouched — it was already written (AI-generated or
-      // template) at creation time, and regenerating it every 45
-      // seconds would multiply the AI API cost for no real benefit.
+      // Only the DISPLAYED PRICE refreshes each cycle — a legitimate
+      // "here's the current line" number, not a judgment call. Selection
+      // and confidence are deliberately frozen at whatever the initial
+      // research concluded: re-running a full web-search analysis every
+      // 45 seconds would be far too slow/expensive, but silently
+      // re-deriving confidence from live market movement instead would
+      // just reintroduce the exact "confidence comes from the odds, not
+      // real analysis" problem this whole architecture change was meant
+      // to fix.
+      const currentOdds = existingLive.selection === `${m.competitorA} ML` ? m.oddsA : m.oddsB;
       await db.pick.update({
         where: { id: existingLive.id },
-        data: {
-          selection: livePick.selection,
-          confidence: livePick.confidence,
-          odds: livePick.odds,
-        },
+        data: { odds: currentOdds },
       });
     } else {
-      const marketKey = MARKET_FACTOR_KEY[sportSlug];
-      const factRows = describeFactors(
-        sportSlug, factors, m.competitorA, m.competitorB,
-        marketKey, REST_DAYS_KEY[sportSlug], HOME_AWAY_FORM_KEY[sportSlug]
-      );
-      const aiRationale = await generateAiRationale({
+      const analysis = await analyzeMatch({
         sport: sportSlug,
         competitorA: m.competitorA,
         competitorB: m.competitorB,
-        selection: livePick.selection,
-        factRows,
+        oddsA: m.oddsA,
+        oddsB: m.oddsB,
+        startTime: m.startTime,
       });
+      if (!analysis) continue; // try again next cycle
+
+      const pickedOdds = analysis.selection === `${m.competitorA} ML` ? m.oddsA : m.oddsB;
       await db.pick.create({
         data: {
           match: { connect: { id: match.id } },
           pickType: 'live',
           isLive: true,
-          selection: livePick.selection,
-          confidence: livePick.confidence,
-          odds: livePick.odds,
-          rationale: aiRationale || livePick.rationale,
-          factsUsed: JSON.stringify(factRows),
+          selection: analysis.selection,
+          confidence: analysis.confidence,
+          odds: pickedOdds,
+          rationale: analysis.analysis,
+          factsUsed: JSON.stringify(analysis.factors),
         },
       });
     }
@@ -536,9 +406,9 @@ async function updateEspnScores() {
  * Grading — Track Record support.
  *
  * Determines win/loss/push for one pick against its now-finished match.
- * Only supports the "X ML" moneyline-style selections buildPicks() actually
- * produces today — if the selection format changes (spreads, totals) this
- * will need a matching parser added alongside it.
+ * Only supports the "X ML" moneyline-style selections analyzeMatch() is
+ * constrained to produce today — if the selection format ever changes
+ * (spreads, totals) this will need a matching parser added alongside it.
  *
  * A tied final score (soccer draws being the realistic case, since ML has
  * no draw option in the model) is graded as a push rather than forced into
