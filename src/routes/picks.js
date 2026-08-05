@@ -357,14 +357,22 @@ router.get('/matches-today', async (req, res) => {
 });
 
 // GET /api/picks/:id — full detail, requires purchase or active subscription
-router.get('/:id', requireAuth, async (req, res) => {
+router.get('/:id', async (req, res) => {
   const pick = await db.pick.findUnique({
     where: { id: req.params.id },
     include: { match: { include: { sport: true } }, result: true },
   });
   if (!pick) return res.status(404).json({ error: 'Pick not found.' });
 
-  const unlocked = await userHasAccess(req.userId, pick.id);
+  // Once a pick is settled (the match is over and it's been graded),
+  // there's no competitive value left to protect by hiding it — the
+  // whole point of a public results archive is to prove the track record,
+  // which doesn't work if clicking into a past result just hits a
+  // paywall. Only still-upcoming picks require a purchase/subscription.
+  const isSettled = pick.result !== null;
+  const userId = resolveOptionalUser(req);
+  const unlocked = isSettled || (await userHasAccess(userId, pick.id));
+
   if (!unlocked) {
     return res.status(402).json({ error: 'This pick has not been purchased or unlocked by a subscription.' });
   }
@@ -413,6 +421,7 @@ router.get('/archive/results', async (req, res) => {
 
   res.json({
     results: results.map((r) => ({
+      id: r.pick.id,
       date: r.settledAt,
       matchup: `${r.pick.match.competitorA} vs ${r.pick.match.competitorB}`,
       sport: r.pick.match.sport.slug,
