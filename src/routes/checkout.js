@@ -1,54 +1,71 @@
 const express = require('express');
-const stripe = require('../lib/stripe');
+const { createCharge } = require('../lib/coinbaseCommerce');
 const db = require('../lib/db');
 const { requireAuth } = require('../lib/auth');
 
 const router = express.Router();
 
-const PRICE_IDS = {
-  single_pick: process.env.STRIPE_PRICE_SINGLE_PICK,
-  daily_bundle: process.env.STRIPE_PRICE_DAILY_BUNDLE,
-  monthly_membership: process.env.STRIPE_PRICE_MONTHLY_MEMBERSHIP,
+// Fixed prices for plans that aren't tied to one specific pick. Single-pick
+// purchases use that individual pick's own `price` field instead (set per
+// pick on the Pick model, defaults to 900 = $9).
+const PLAN_PRICES_CENTS = {
+  daily_bundle: 2500,
+  weekly_bundle: 2500,
+  monthly_membership: 9900,
+  season_membership: 60000,
 };
 
-// POST /checkout/session  { plan: "single_pick" | "daily_bundle" | "monthly_membership", pickId?: string }
+const PLAN_LABELS = {
+  single_pick: 'Single Pick',
+  daily_bundle: 'Daily Bundle',
+  weekly_bundle: 'Weekly Bundle',
+  monthly_membership: 'Monthly Membership',
+  season_membership: 'Season Membership',
+};
+
+// POST /checkout/session  { plan, pickId?, sport? }
 // Requires auth so we know which user to attach the purchase/subscription to.
 router.post('/session', requireAuth, async (req, res) => {
-  const { plan, pickId } = req.body || {};
+  const { plan, pickId, sport } = req.body || {};
 
-  const priceId = PRICE_IDS[plan];
-  if (!priceId) {
-    return res.status(400).json({ error: `Unknown or unconfigured plan: ${plan}` });
+  if (!PLAN_LABELS[plan]) {
+    return res.status(400).json({ error: `Unknown plan: ${plan}` });
   }
 
   const user = await db.user.findUnique({ where: { id: req.userId } });
   if (!user) return res.status(404).json({ error: 'User not found.' });
 
-  // Make sure this user has a Stripe customer record, so recurring plans and
-  // one-off purchases both land under the same customer.
-  let stripeCustomerId = user.stripeCustomerId;
-  if (!stripeCustomerId) {
-    const customer = await stripe.customers.create({ email: user.email });
-    stripeCustomerId = customer.id;
-    await db.user.update({ where: { id: user.id }, data: { stripeCustomerId } });
+  let amountCents;
+  if (plan === 'single_pick') {
+    if (!pickId) return res.status(400).json({ error: 'pickId is required for single_pick.' });
+    const pick = await db.pick.findUnique({ where: { id: pickId } });
+    if (!pick) return res.status(404).json({ error: 'Pick not found.' });
+    amountCents = pick.price;
+  } else {
+    amountCents = PLAN_PRICES_CENTS[plan];
+    if (!amountCents) return res.status(400).json({ error: `No price configured for plan: ${plan}` });
   }
 
-  const isSubscription = plan !== 'single_pick';
+  let charge;
+  try {
+    charge = await createCharge({
+      name: `Match Point — ${PLAN_LABELS[plan]}`,
+      description: sport ? `${PLAN_LABELS[plan]} (${sport})` : PLAN_LABELS[plan],
+      amountCents,
+      metadata: {
+        userId: user.id,
+        plan,
+        pickId: pickId || '',
+      },
+      redirectUrl: process.env.CHECKOUT_SUCCESS_URL,
+      cancelUrl: process.env.CHECKOUT_CANCEL_URL,
+    });
+  } catch (err) {
+    console.error('[checkout] Coinbase Commerce charge creation failed:', err.message);
+    return res.status(502).json({ error: 'Could not start checkout — please try again.' });
+  }
 
-  const session = await stripe.checkout.sessions.create({
-    customer: stripeCustomerId,
-    mode: isSubscription ? 'subscription' : 'payment',
-    line_items: [{ price: priceId, quantity: 1 }],
-    success_url: process.env.CHECKOUT_SUCCESS_URL,
-    cancel_url: process.env.CHECKOUT_CANCEL_URL,
-    metadata: {
-      userId: user.id,
-      plan,
-      pickId: pickId || '',
-    },
-  });
-
-  res.json({ url: session.url });
+  res.json({ url: charge.hosted_url });
 });
 
 module.exports = router;

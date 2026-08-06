@@ -66,7 +66,11 @@ async function userHasAccess(userId, pickId) {
   if (purchased) return true;
 
   const sub = await db.subscription.findUnique({ where: { userId } });
-  return !!sub && sub.status === 'active';
+  // Must check expiration explicitly — Coinbase Commerce has no
+  // subscription lifecycle events (unlike Stripe's customer.subscription.*
+  // webhooks), so nothing ever flips status away from 'active' on its own.
+  // Without this check, one payment would grant access forever.
+  return !!sub && sub.status === 'active' && sub.currentPeriodEnd > new Date();
 }
 
 // Resolves the requester from an optional Authorization header without
