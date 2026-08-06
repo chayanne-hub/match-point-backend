@@ -23,7 +23,15 @@ const fetch = require('node-fetch');
 
 const SPORT_KEYS = {
   basketball: ['basketball_nba', 'basketball_wnba'],
-  soccer: ['soccer_epl', 'soccer_uefa_champs_league'], // add more league keys as needed
+  // MLS added alongside EPL/Champions League specifically because both of
+  // those are between seasons for weeks at a time (EPL doesn't start until
+  // late August, Champions League's league phase not until September) —
+  // MLS runs through October, so it keeps soccer picks flowing when the
+  // European leagues are dark. Exact key confirmed against The Odds API's
+  // naming convention, not directly verified in their docs — check the
+  // [fetchMatches] logs after deploy; a wrong key logs a clear per-key
+  // error without breaking the other soccer leagues.
+  soccer: ['soccer_epl', 'soccer_uefa_champs_league', 'soccer_usa_mls'],
   baseball: ['baseball_mlb'],
   football: ['americanfootball_nfl'],
 };
