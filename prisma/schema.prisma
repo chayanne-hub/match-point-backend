@@ -16,36 +16,33 @@ datasource db {
 // ---------------------------------------------------------------------------
 
 model User {
-  id                String    @id @default(uuid())
-  email             String    @unique
-  passwordHash      String
-  createdAt         DateTime  @default(now())
-  confirmoCustomerId String?  @unique // Confirmo subscriber/profile id, once a membership subscription exists
-  isAdmin           Boolean   @default(false)
+  id          String    @id @default(uuid())
+  email       String    @unique
+  passwordHash String
+  createdAt   DateTime  @default(now())
+  isAdmin     Boolean   @default(false)
 
-  subscription      Subscription?
-  purchases         PurchasedPick[]
+  subscription Subscription?
+  purchases    PurchasedPick[]
 }
 
 // One active plan per user at a time. Single-pick buys don't create a row here —
 // they go straight into PurchasedPick. This table is for Daily/Weekly Bundle and
-// Monthly/Season Membership plans, billed via Confirmo Subscribe (recurring
-// stablecoin billing — see src/lib/confirmo.js for the honest state of this
-// integration; Confirmo's Subscribe product is new enough that its exact API
-// isn't in their main docs yet, so this schema/webhook handling is scaffolded
-// against their confirmed general patterns, not a fully verified integration).
+// Monthly/Season Membership plans. Coinbase Commerce has no native subscription
+// concept — "active" here just means the most recent renewal charge was paid
+// and currentPeriodEnd hasn't passed yet. Renewal is a fresh charge each period
+// (see the renewal-reminder scheduler), not automatic billing.
 model Subscription {
-  id                     String   @id @default(uuid())
-  userId                 String   @unique
-  user                   User     @relation(fields: [userId], references: [id])
-  confirmoSubscriptionId String   @unique
-  plan                   String   // "daily_bundle" | "monthly_membership" | "weekly_bundle" | "season_membership"
-  status                 String   // "active" | "past_due" | "canceled" | "incomplete"
-  currentPeriodEnd       DateTime
-  createdAt              DateTime @default(now())
-  updatedAt              DateTime @updatedAt
+  id                String   @id @default(uuid())
+  userId            String   @unique
+  user              User     @relation(fields: [userId], references: [id])
+  lastChargeCode    String   @unique // Coinbase Commerce charge code that most recently renewed this membership
+  plan              String   // "daily_bundle" | "monthly_membership" | "weekly_bundle" | "season_membership"
+  status             String   // "active" | "past_due" | "canceled" | "incomplete"
+  currentPeriodEnd   DateTime
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
 }
-
 // A single-pick purchase, or a record of a pick a subscriber is entitled to view.
 model PurchasedPick {
   id         String   @id @default(uuid())
