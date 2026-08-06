@@ -204,9 +204,18 @@ router.get('/stats', async (req, res) => {
   // result stay in the database untouched; they're just excluded from
   // these public-facing win-rate/ROI calculations so one bad price snapshot
   // doesn't distort the whole track record.
+  //
+  // Also restricted to pickType: 'model' — every match that clears the
+  // confidence threshold gets BOTH a "model" and a "winner" pick (same
+  // selection/confidence/outcome, two separate sellable products). Counting
+  // both here would double-count every one of those matches. "Model" is
+  // the genuine high-conviction product; "winner" exists for every match
+  // regardless of edge, so including it would pad the sample with picks
+  // that were never claimed to have real value.
   const results = await db.result.findMany({
     where: {
       pick: {
+        pickType: 'model',
         odds: { gte: -2000, lte: 2000 },
         ...(sport ? { match: { sport: { slug: sport } } } : {}),
       },
@@ -410,12 +419,15 @@ router.get('/:id', async (req, res) => {
 router.get('/archive/results', async (req, res) => {
   const { sport } = req.query;
 
-  // Same exclusion as /stats — see the comment there. Keeps corrupted
+  // Same exclusions as /stats — see the comment there. Keeps corrupted
   // -10000-style placeholder-odds rows out of the public archive without
-  // deleting the underlying data.
+  // deleting the underlying data, and restricts to pickType: 'model' so
+  // matches that clear the confidence threshold (and therefore get both a
+  // "model" and a "winner" pick) don't show up twice in the archive.
   const results = await db.result.findMany({
     where: {
       pick: {
+        pickType: 'model',
         odds: { gte: -2000, lte: 2000 },
         ...(sport ? { match: { sport: { slug: sport } } } : {}),
       },
