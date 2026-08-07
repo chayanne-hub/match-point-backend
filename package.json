@@ -1,7 +1,7 @@
 {
   "name": "match-point-backend",
   "version": "1.0.0",
-  "description": "Backend for Match Point — auth, Stripe billing, and the sports data/model pipeline",
+  "description": "Backend for Match Point — auth, Coinbase Commerce billing, and the sports data/model pipeline",
   "main": "src/server.js",
   "type": "commonjs",
   "scripts": {
@@ -21,9 +21,6 @@
     "jsonwebtoken": "^9.0.2",
     "node-cron": "^3.0.3",
     "node-fetch": "^2.7.0",
-    "stripe": "^16.8.0"
-  },
-  "devDependencies": {
     "prisma": "^5.19.0"
   }
 }
