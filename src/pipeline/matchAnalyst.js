@@ -246,7 +246,8 @@ this exact shape:
     clearTimeout(timeoutId);
 
     if (!res.ok) {
-      console.error(`[match-analyst] Anthropic API returned ${res.status} for ${competitorA} vs ${competitorB}`);
+      const errBody = await res.text().catch(() => '(could not read response body)');
+      console.error(`[match-analyst] Anthropic API returned ${res.status} for ${competitorA} vs ${competitorB}: ${errBody}`);
       return null;
     }
 
@@ -390,7 +391,8 @@ ${jsonInstruction}
     clearTimeout(timeoutId);
 
     if (!res.ok) {
-      console.error(`[match-analyst] live reassessment API returned ${res.status} for ${competitorA} vs ${competitorB}`);
+      const errBody = await res.text().catch(() => '(could not read response body)');
+      console.error(`[match-analyst] live reassessment API returned ${res.status} for ${competitorA} vs ${competitorB}: ${errBody}`);
       return null;
     }
 
