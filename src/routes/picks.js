@@ -157,6 +157,7 @@ router.get('/today', async (req, res) => {
         // once live, and null otherwise.
         matchStatus: p.match.status,
         liveScore: p.match.liveScore,
+        setScore: p.match.setScore, // tennis only — "6-4, 3-6, 2-1" style, for the real set-by-set display
         period: p.match.period,
         clockSeconds: p.match.clockSeconds,
         liveClock: p.match.liveClock,
