@@ -151,6 +151,15 @@ router.get('/today', async (req, res) => {
         total: p.match.total,
         overOdds: p.match.overOdds,
         underOdds: p.match.underOdds,
+        // Real live status, sourced from the free ESPN score poller — not
+        // the (now-removed) paid live-reassessment loop. matchStatus is
+        // 'scheduled' | 'live' | 'final'; the rest are only meaningful
+        // once live, and null otherwise.
+        matchStatus: p.match.status,
+        liveScore: p.match.liveScore,
+        period: p.match.period,
+        clockSeconds: p.match.clockSeconds,
+        liveClock: p.match.liveClock,
         unlocked,
       };
     })
