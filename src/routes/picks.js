@@ -93,13 +93,22 @@ function resolveOptionalUser(req) {
 // requester is authenticated and entitled. Attach Authorization header to
 // unlock full detail. "Today" rolls over at midnight Pacific Time.
 router.get('/today', async (req, res) => {
-  const { sport } = req.query;
+  const { sport, markets } = req.query;
   const { startOfDay, endOfDay } = getTimezoneDayBounds('America/Los_Angeles');
+
+  // Default stays moneyline-only — every existing page (Terminal, the
+  // picks list, Spread/Totals' own display, stats) depends on that and
+  // would otherwise see spread/total picks as unexplained duplicate rows.
+  // Pass ?markets=all to opt into every market type — used by the Parlay
+  // Confidence Builder, which genuinely needs to combine picks across
+  // moneyline/spread/total.
+  const marketFilter = markets === 'all' ? undefined : 'moneyline';
 
   const where = {
     // Today's Picks is the frozen pre-match prediction — never the
     // separate, deliberately-evolving pickType:'live' record.
     pickType: { in: ['model', 'winner'] },
+    ...(marketFilter ? { market: marketFilter } : {}),
     match: {
       startTime: { gte: startOfDay, lte: endOfDay },
       ...(sport ? { sport: { slug: sport } } : {}),
@@ -125,6 +134,8 @@ router.get('/today', async (req, res) => {
         matchup: `${p.match.competitorA} vs ${p.match.competitorB}`,
         startTime: p.match.startTime,
         pickType: p.pickType,
+        market: p.market, // 'moneyline' | 'spread' | 'total' — callers that opted into ?markets=all need this to tell picks apart
+        line: p.line, // the spread/total number this specific pick was made against, null for moneyline
         price: p.price,
         // Redact the actual pick and confidence until purchased/subscribed
         selection: unlocked ? p.selection : null,
@@ -229,6 +240,11 @@ router.get('/stats', async (req, res) => {
     where: {
       pick: {
         pickType: 'model',
+        market: 'moneyline', // spread/total picks are also pickType:'model' now —
+                              // excluded here so they don't get mixed into the
+                              // published moneyline track record. Worth its own
+                              // stats endpoint later if spread/total picks need
+                              // their own published win rate.
         odds: { gte: -2000, lte: 2000 },
         ...(sport ? { match: { sport: { slug: sport } } } : {}),
       },
@@ -342,7 +358,7 @@ router.get('/matches-today', async (req, res) => {
 
   const shaped = await Promise.all(
     matches.map(async (m) => {
-      const pick = m.picks.find((p) => p.pickType === 'model') || m.picks.find((p) => p.pickType === 'winner') || null;
+      const pick = m.picks.find((p) => p.pickType === 'model' && p.market === 'moneyline') || m.picks.find((p) => p.pickType === 'winner' && p.market === 'moneyline') || null;
       const unlocked = pick ? await userHasAccess(userId, pick.id) : false;
 
       let pickedSide = null;
@@ -453,6 +469,7 @@ router.get('/archive/results', async (req, res) => {
     where: {
       pick: {
         pickType: 'model',
+        market: 'moneyline', // keep spread/total picks out of the moneyline archive — same reasoning as /stats
         odds: { gte: -2000, lte: 2000 },
         ...(sport ? { match: { sport: { slug: sport } } } : {}),
       },
