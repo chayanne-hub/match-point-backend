@@ -141,6 +141,22 @@ because they're more famous. Think in probabilities, not certainties. Give a
 real, differentiated confidence number — do not default to a lazy 50-55%
 out of caution when the evidence actually supports a stronger or weaker lean,
 but also don't force high confidence where the evidence is genuinely mixed.
+
+Calibration matters more than decisiveness. A stated confidence of 75% is a
+claim that this side wins roughly 3 times out of 4 in genuinely comparable
+spots — not just "the side you like more." Be honest with yourself about
+whether the evidence actually supports that claim:
+- Reserve 80%+ for cases where multiple INDEPENDENT factors genuinely
+  converge — not one strong signal doing all the work while the rest are
+  neutral or thin. A big form edge alone, with nothing else backing it up,
+  is a 65-70% case, not an 85% case.
+- If your case for a high number rests on a single factor, or if you
+  notice yourself rounding up to sound more decisive than the evidence
+  actually supports, that's the signal to bring the number back down, not
+  a reason to look for one more supporting detail to justify it.
+- Mixed or thin evidence belongs in the 55-65% band. That's not hedging —
+  it's an honest report of a genuinely close case, which is a real and
+  useful signal in its own right.
 `.trim();
 
 const SPORT_PROCESS = {
