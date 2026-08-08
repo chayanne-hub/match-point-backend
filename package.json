@@ -6,8 +6,8 @@
   "type": "commonjs",
   "scripts": {
     "dev": "node src/server.js",
-    "start": "chmod +x node_modules/.bin/prisma 2>/dev/null; prisma db push --skip-generate --accept-data-loss && node src/server.js",
-    "postinstall": "chmod +x node_modules/.bin/prisma 2>/dev/null; prisma generate",
+    "start": "prisma db push --skip-generate --accept-data-loss && node src/server.js",
+    "postinstall": "prisma generate",
     "pipeline": "node src/pipeline/cron.js",
     "migrate": "prisma migrate dev",
     "studio": "prisma studio"
