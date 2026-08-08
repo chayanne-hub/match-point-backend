@@ -24,6 +24,11 @@
 const fetch = require('node-fetch');
 
 const ANTHROPIC_MODEL = process.env.MATCH_ANALYST_MODEL || 'claude-sonnet-5';
+// Used only for fixing a broken JSON response — the content/reasoning is
+// already done at that point, so this is a cheap mechanical task, not
+// real analysis. Deliberately a smaller/cheaper model than the main
+// research call, same reasoning as generateRationale.js's Haiku use.
+const JSON_REPAIR_MODEL = process.env.JSON_REPAIR_MODEL || 'claude-haiku-4-5-20251001';
 
 // Reused in every prompt that asks Claude for structured JSON — the most
 // common cause of parse failures in practice is natural writing habits
@@ -69,6 +74,62 @@ function parseClaudeJson(text) {
     } catch (secondErr) {
       return null; // caller logs using the original error for a clearer message
     }
+  }
+}
+
+/**
+ * Last-resort repair: sends Claude its OWN broken JSON and asks for a
+ * syntax-only fix. Deliberately cheap — no web search tool, a small
+ * prompt, and the fast/cheap model — since the actual research and
+ * reasoning already happened in the original (expensive) call; this is
+ * purely a mechanical fix, not a re-analysis. Only called when the local
+ * repair in parseClaudeJson() has already failed.
+ *
+ * Returns the parsed object, or null if this also fails (never throws) —
+ * at that point the caller gives up for this cycle, same as before, but
+ * the local + Claude repair pair together should catch the large
+ * majority of cases that used to be a fully wasted expensive call.
+ */
+async function repairJsonViaClaude(brokenText, context) {
+  if (!process.env.ANTHROPIC_API_KEY) return null;
+
+  const prompt = `The following text was supposed to be a single valid JSON object but has a syntax error (extra/missing punctuation, an unescaped quote, a stray line break inside a string, etc.). Fix ONLY the syntax — do not change, add, or remove any actual content, wording, or values. Respond with ONLY the corrected JSON object, nothing else, no markdown fences.
+
+${brokenText}`;
+
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: JSON_REPAIR_MODEL,
+        max_tokens: 1500,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+    });
+    if (!res.ok) {
+      console.error(`[match-analyst] JSON repair call itself failed (${res.status}) for ${context}`);
+      return null;
+    }
+    const data = await res.json();
+    const text = data.content?.[0]?.text?.trim();
+    if (!text) return null;
+
+    const withoutFences = text.replace(/```json|```/g, '').trim();
+    const jsonMatch = withoutFences.match(/\{[\s\S]*\}/);
+    const cleaned = jsonMatch ? jsonMatch[0] : withoutFences;
+    const parsed = parseClaudeJson(cleaned);
+    if (parsed) {
+      console.log(`[match-analyst] Claude JSON repair succeeded for ${context} — saved an otherwise-wasted analysis call.`);
+    }
+    return parsed;
+  } catch (err) {
+    console.error(`[match-analyst] JSON repair call errored for ${context}:`, err.message);
+    return null;
   }
 }
 
@@ -409,7 +470,10 @@ ${JSON_VALIDITY_REMINDER}
 
     let parsed = parseClaudeJson(cleaned);
     if (!parsed) {
-      console.error(`[match-analyst] failed to parse Claude's JSON for ${competitorA} vs ${competitorB} even after repair attempt. Raw text: ${cleaned.slice(0, 300)}`);
+      parsed = await repairJsonViaClaude(cleaned, `${competitorA} vs ${competitorB} (pregame analysis)`);
+    }
+    if (!parsed) {
+      console.error(`[match-analyst] failed to parse Claude's JSON for ${competitorA} vs ${competitorB} even after repair attempts. Raw text: ${cleaned.slice(0, 300)}`);
       return null;
     }
 
@@ -587,7 +651,10 @@ ${jsonInstruction}
 
     let parsed = parseClaudeJson(cleaned);
     if (!parsed) {
-      console.error(`[match-analyst] failed to parse live reassessment JSON for ${competitorA} vs ${competitorB} even after repair attempt. Raw text: ${cleaned.slice(0, 300)}`);
+      parsed = await repairJsonViaClaude(cleaned, `${competitorA} vs ${competitorB} (live moneyline reassessment)`);
+    }
+    if (!parsed) {
+      console.error(`[match-analyst] failed to parse live reassessment JSON for ${competitorA} vs ${competitorB} even after repair attempts. Raw text: ${cleaned.slice(0, 300)}`);
       return null;
     }
 
@@ -791,7 +858,10 @@ ${jsonInstruction}
 
     let parsed = parseClaudeJson(cleaned);
     if (!parsed) {
-      console.error(`[match-analyst] failed to parse live total JSON for ${competitorA} vs ${competitorB} even after repair attempt. Raw text: ${cleaned.slice(0, 300)}`);
+      parsed = await repairJsonViaClaude(cleaned, `${competitorA} vs ${competitorB} (live total reassessment)`);
+    }
+    if (!parsed) {
+      console.error(`[match-analyst] failed to parse live total JSON for ${competitorA} vs ${competitorB} even after repair attempts. Raw text: ${cleaned.slice(0, 300)}`);
       return null;
     }
 
