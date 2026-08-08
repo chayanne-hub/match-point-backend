@@ -58,6 +58,34 @@ async function ensureSportRows() {
   }
 }
 
+/**
+ * Given an existing pick and the freshly-fetched match data for this
+ * cycle, returns the current price for whichever side/selection that
+ * pick actually made — or null if it can't be determined (unrecognized
+ * selection format, or that market's fresh price isn't available this
+ * cycle). Never guesses; a missing fresh price just means the caller
+ * leaves the pick's existing odds alone rather than overwriting with a
+ * fabricated number.
+ */
+function freshOddsForPick(pick, m) {
+  if (pick.market === 'moneyline') {
+    if (pick.selection.startsWith(m.competitorA)) return m.oddsA;
+    if (pick.selection.startsWith(m.competitorB)) return m.oddsB;
+    return null;
+  }
+  if (pick.market === 'spread') {
+    if (pick.selection.startsWith(m.competitorA)) return m.spreadOddsA;
+    if (pick.selection.startsWith(m.competitorB)) return m.spreadOddsB;
+    return null;
+  }
+  if (pick.market === 'total') {
+    if (pick.selection.startsWith('Over')) return m.overOdds;
+    if (pick.selection.startsWith('Under')) return m.underOdds;
+    return null;
+  }
+  return null;
+}
+
 async function runForSport(sportSlug) {
   console.log(`[pipeline] fetching ${sportSlug}...`);
 
@@ -103,13 +131,38 @@ async function runForSport(sportSlug) {
       },
     });
 
-    // Skip entirely if picks already exist for this match — analyzeMatch()
-    // is a real research call (web search + reasoning), not a cheap
-    // formula, so it only ever runs once per match, at creation.
-    const alreadyHasPicks = await db.pick.findFirst({
+    // Skip re-analysis entirely if picks already exist for this match —
+    // analyzeMatch() is a real research call (web search + reasoning),
+    // not a cheap formula, so it only ever runs once per match, at
+    // creation. The confidence/selection/rationale it produced stay
+    // frozen forever (no paid live reassessment, see server.js).
+    //
+    // The ODDS shown alongside that frozen pick are a different thing —
+    // just a market price, not model output — and there's no reason
+    // they should also stay frozen at the pregame number once a match
+    // goes live. fetchMatches() already returns fresh in-play odds for
+    // live games on every cycle (The Odds API's /odds endpoint serves
+    // both pre-game and in-play prices from the same request you're
+    // already making) — this was being fetched and silently discarded
+    // for any match that already had a pick. Zero additional API calls
+    // either way; this just stops throwing away data already paid for.
+    const existingPicks = await db.pick.findMany({
       where: { matchId: match.id, pickType: { in: ['model', 'winner'] } },
     });
-    if (alreadyHasPicks) continue;
+    if (existingPicks.length > 0) {
+      if (m.status === 'live') {
+        for (const pick of existingPicks) {
+          const freshOdds = freshOddsForPick(pick, m);
+          // Never overwrite with null — a book briefly pulling a line
+          // (common late in a blowout) shouldn't blank out the last
+          // known real price.
+          if (freshOdds !== null && freshOdds !== pick.odds) {
+            await db.pick.update({ where: { id: pick.id }, data: { odds: freshOdds } });
+          }
+        }
+      }
+      continue;
+    }
 
     if (m.oddsA === null || m.oddsB === null) {
       console.warn(`[pipeline] skipping analysis for ${m.competitorA} vs ${m.competitorB} — no odds available.`);
