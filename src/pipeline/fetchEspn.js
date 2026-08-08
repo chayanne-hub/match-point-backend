@@ -117,6 +117,22 @@ function parseTeamCompetition(competition) {
   const away = competition.competitors.find((c) => c.homeAway === 'away');
   if (!home || !away) return null;
 
+  // period/clock: reverse-engineered from ESPN's scoreboard status object,
+  // same unofficial-endpoint caveat as the rest of this file — status.period
+  // is the quarter/period number, status.clock is seconds remaining in it,
+  // status.displayClock is the "8:42"-style string shown on ESPN's own
+  // site. Only meaningfully used for basketball today (see
+  // basketballTotals.js) but captured generically since it's free —
+  // already have the raw competition object in hand.
+  const period = typeof competition.status?.period === 'number' ? competition.status.period : null;
+  const clockSeconds = typeof competition.status?.clock === 'number' ? Math.round(competition.status.clock) : null;
+  const displayClock = competition.status?.displayClock || null;
+  // Human-readable status ESPN itself displays — "End 6th", "Top 7th",
+  // "Bot 3rd" for baseball, similarly descriptive strings for other
+  // sports. Baseball has no clock at all, so this (not period/clock) is
+  // the real source for its live status display.
+  const statusDetail = competition.status?.type?.shortDetail || competition.status?.type?.detail || null;
+
   return {
     competitorAName: home.team?.displayName || home.team?.shortDisplayName,
     competitorBName: away.team?.displayName || away.team?.shortDisplayName,
@@ -126,6 +142,10 @@ function parseTeamCompetition(competition) {
     eventDate: competition.date,
     homeScore: home.score !== undefined ? Number(home.score) : null,
     awayScore: away.score !== undefined ? Number(away.score) : null,
+    period,
+    clockSeconds,
+    displayClock,
+    statusDetail,
   };
 }
 

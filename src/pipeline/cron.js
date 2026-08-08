@@ -727,6 +727,10 @@ async function updateEspnScoresForSport(sportSlug) {
         // directly. This was being fetched already (parseTeamCompetition
         // captures it generically) but never actually saved before now.
         ...(COUNT_UP_CLOCK_SPORTS.includes(sportSlug) && event.displayClock && { liveClock: event.displayClock }),
+        // Baseball: no clock at all, so period/displayClock don't apply —
+        // ESPN's own human-readable inning status ("End 6th", "Top 7th")
+        // is the real source of truth here, previously never captured.
+        ...(sportSlug === 'baseball' && event.statusDetail && { liveClock: event.statusDetail }),
       },
     });
 
