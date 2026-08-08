@@ -25,6 +25,53 @@ const fetch = require('node-fetch');
 
 const ANTHROPIC_MODEL = process.env.MATCH_ANALYST_MODEL || 'claude-sonnet-5';
 
+// Reused in every prompt that asks Claude for structured JSON — the most
+// common cause of parse failures in practice is natural writing habits
+// (an apostrophe in "Fils' game", a literal line break in a longer
+// analysis) breaking strict JSON string syntax. Repeating this
+// instruction close to the schema itself (not just once at the top of a
+// long prompt) measurably reduces how often that happens.
+const JSON_VALIDITY_REMINDER = `
+Your response must be syntactically valid JSON. Specifically: escape any
+double-quote character that appears inside a string value as \\", escape
+any apostrophe-containing contraction normally (apostrophes don't need
+escaping, but a stray unescaped double-quote does), and never include a
+literal line break inside a string value — write it as one continuous
+line instead. Double-check your JSON is valid before finishing your
+response.`;
+
+/**
+ * Attempts to parse Claude's JSON, with one repair pass if the raw parse
+ * fails: literal control characters (a raw newline, tab, or carriage
+ * return) sitting inside what's otherwise a valid JSON string are the
+ * single most common real-world cause of "Unterminated string" / bad
+ * JSON from an LLM — this escapes any that survived despite the prompt
+ * instruction above, then retries the parse once. Returns null (never
+ * throws) if both attempts fail, exactly like a normal JSON.parse
+ * failure — callers already handle a null/failed parse.
+ */
+function parseClaudeJson(text) {
+  try {
+    return JSON.parse(text);
+  } catch (firstErr) {
+    // Escape raw control characters that appear anywhere in the text —
+    // safe to do broadly here since valid JSON structural whitespace
+    // (between keys/braces) tolerates this transform fine; it's only
+    // needed for the invalid case where one snuck inside a string.
+    const repaired = text.replace(/[\u0000-\u001F]/g, (ch) => {
+      if (ch === '\n') return '\\n';
+      if (ch === '\r') return '';
+      if (ch === '\t') return '\\t';
+      return ''; // drop other stray control characters entirely
+    });
+    try {
+      return JSON.parse(repaired);
+    } catch (secondErr) {
+      return null; // caller logs using the original error for a clearer message
+    }
+  }
+}
+
 const SHARED_PRINCIPLES = `
 Core approach: data over instinct. Look for what the market might be
 under-pricing — angles a casual bettor or a lazily-set line wouldn't fully
@@ -305,6 +352,7 @@ this exact shape:
   "spreadPick": { "selection": "${competitorA} ${spreadLineA > 0 ? '+' : ''}${spreadLineA}" or "${competitorB} ${spreadLineB > 0 ? '+' : ''}${spreadLineB}", "confidence": <integer 0-100>, "analysis": "1-2 sentences" }` : ''}${hasTotal ? `,
   "totalPick": { "selection": "Over ${total}" or "Under ${total}", "confidence": <integer 0-100>, "analysis": "1-2 sentences" }` : ''}
 }
+${JSON_VALIDITY_REMINDER}
 `.trim();
 
   const matchDescription = `${competitorA} vs ${competitorB} (${sport}), ${new Date(startTime).toISOString()}. ${oddsContext} ${spreadContext} ${totalContext}`;
@@ -359,11 +407,9 @@ this exact shape:
     const jsonMatch = withoutFences.match(/\{[\s\S]*\}/);
     const cleaned = jsonMatch ? jsonMatch[0] : withoutFences;
 
-    let parsed;
-    try {
-      parsed = JSON.parse(cleaned);
-    } catch (err) {
-      console.error(`[match-analyst] failed to parse Claude's JSON for ${competitorA} vs ${competitorB}: ${err.message}`);
+    let parsed = parseClaudeJson(cleaned);
+    if (!parsed) {
+      console.error(`[match-analyst] failed to parse Claude's JSON for ${competitorA} vs ${competitorB} even after repair attempt. Raw text: ${cleaned.slice(0, 300)}`);
       return null;
     }
 
@@ -478,6 +524,7 @@ Respond with ONLY a raw JSON object, in this exact shape:
   "analysis": "1-3 sentence updated read given how the match is actually going",
   "factors": [ { "label": "...", "tag": "...", "body": "..." }, ... ]
 }
+${JSON_VALIDITY_REMINDER}
 `.trim();
 
   const prompt = `
@@ -538,11 +585,9 @@ ${jsonInstruction}
     const jsonMatch = withoutFences.match(/\{[\s\S]*\}/);
     const cleaned = jsonMatch ? jsonMatch[0] : withoutFences;
 
-    let parsed;
-    try {
-      parsed = JSON.parse(cleaned);
-    } catch (err) {
-      console.error(`[match-analyst] failed to parse live reassessment JSON for ${competitorA} vs ${competitorB}: ${err.message}`);
+    let parsed = parseClaudeJson(cleaned);
+    if (!parsed) {
+      console.error(`[match-analyst] failed to parse live reassessment JSON for ${competitorA} vs ${competitorB} even after repair attempt. Raw text: ${cleaned.slice(0, 300)}`);
       return null;
     }
 
@@ -623,6 +668,7 @@ Respond with ONLY a raw JSON object, in this exact shape:
   "confidence": <integer 0-100>,
   "analysis": "1-3 sentence updated read on the total given how the game is actually playing out"
 }
+${JSON_VALIDITY_REMINDER}
 `.trim();
 
   const LIVE_TOTAL_GUIDANCE = {
@@ -743,11 +789,9 @@ ${jsonInstruction}
     const jsonMatch = withoutFences.match(/\{[\s\S]*\}/);
     const cleaned = jsonMatch ? jsonMatch[0] : withoutFences;
 
-    let parsed;
-    try {
-      parsed = JSON.parse(cleaned);
-    } catch (err) {
-      console.error(`[match-analyst] failed to parse live total JSON for ${competitorA} vs ${competitorB}: ${err.message}`);
+    let parsed = parseClaudeJson(cleaned);
+    if (!parsed) {
+      console.error(`[match-analyst] failed to parse live total JSON for ${competitorA} vs ${competitorB} even after repair attempt. Raw text: ${cleaned.slice(0, 300)}`);
       return null;
     }
 
