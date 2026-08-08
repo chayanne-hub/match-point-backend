@@ -82,7 +82,9 @@ model Match {
   surface      String?  // tennis only
   venue        String?
   liveScore    String?  // free-text live score snapshot, updated by the live poller
-  liveClock    String?  // "Q3 8:42", "62'", "Top 6th", "Set 2", etc.
+  liveClock    String?  // "Q3 8:42", "62'", "Top 6th", "Set 2", etc. — display only
+  period       Int?     // structured period/quarter number, for formulas that need real math on it
+  clockSeconds Int?     // seconds remaining in the current period — same reasoning
   homeScore    Int?     // structured final/current score for competitorA — needed to
   awayScore    Int?     // compute recent-form factors once matches complete
   setScore     String?  // tennis only — set-by-set games score, e.g. "6-4, 3-2"
@@ -118,6 +120,10 @@ model Pick {
   matchId      String
   match        Match    @relation(fields: [matchId], references: [id])
   pickType     String
+  market       String   @default("moneyline") // "moneyline" | "spread" | "total"
+  line         Float?   // the spread/total number this pick was made against —
+                         // captured at creation time since the market line can
+                         // move before the match settles; null for moneyline
   selection    String
   confidence   Int
   odds         Int
