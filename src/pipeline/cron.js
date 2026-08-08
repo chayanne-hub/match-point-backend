@@ -291,9 +291,13 @@ async function updateLiveScores(sportSlug, sportId) {
 
 async function runAll() {
   await ensureSportRows();
-  for (const sport of SPORTS) {
-    await runForSport(sport);
-  }
+  // Concurrent, not sequential — SPORTS order used to double as processing
+  // order, which meant a heavy day for one sport (30 tennis matches, each
+  // a real API call) could eat the entire cycle before sports later in
+  // the list (baseball, football) ever got a turn. Each sport's matches
+  // are independent (own DB rows, own API calls), so there's no reason
+  // they need to wait on each other.
+  await Promise.all(SPORTS.map((sport) => runForSport(sport)));
 }
 
 // If run directly (npm run pipeline), execute once and exit.
@@ -312,9 +316,30 @@ if (require.main === module) {
 // If imported instead, expose a scheduler you can start from server.js —
 // e.g. every 15 minutes for daily matches, and a tighter interval for live
 // in-play score/odds updates once that data source is connected.
+//
+// isRunning guards against overlapping runs. With enough new matches in
+// one cycle (a busy tennis day especially — real API calls with web
+// search per match add up fast), a single runAll() can take longer than
+// the 15-minute schedule itself. Without this guard, node-cron fires a
+// new run anyway, stacking on top of the one still in progress — and
+// since SPORTS is processed in strict order (tennis, basketball, soccer,
+// baseball, football), sports later in that list can end up perpetually
+// starved as each new overlapping run restarts from tennis. A skipped
+// cycle here just means the next one 15 minutes later picks up where
+// things stand — never a lost match, since alreadyHasPicks still governs
+// what actually needs analysis.
+let isRunning = false;
+
 function startScheduled() {
   cron.schedule('*/15 * * * *', () => {
-    runAll().catch((err) => console.error('[pipeline] scheduled run failed:', err));
+    if (isRunning) {
+      console.warn('[pipeline] previous run still in progress — skipping this cycle to avoid stacking.');
+      return;
+    }
+    isRunning = true;
+    runAll()
+      .catch((err) => console.error('[pipeline] scheduled run failed:', err))
+      .finally(() => { isRunning = false; });
   });
   console.log('[pipeline] scheduled to run every 15 minutes.');
 }
