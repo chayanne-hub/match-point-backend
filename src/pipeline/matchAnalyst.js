@@ -172,7 +172,7 @@ ${process}
  * fallback plan (e.g. skip creating a pick this cycle) rather than crash
  * the pipeline over one bad match.
  */
-async function analyzeMatch({ sport, competitorA, competitorB, oddsA, oddsB, startTime }) {
+async function analyzeMatch({ sport, competitorA, competitorB, oddsA, oddsB, startTime, spread, spreadOddsA, spreadOddsB, total, overOdds, underOdds, pregameProjectedTotal }) {
   const systemPrompt = buildSystemPrompt(sport);
   if (!systemPrompt) {
     console.error(`[match-analyst] no process defined for sport: ${sport}`);
@@ -187,6 +187,93 @@ async function analyzeMatch({ sport, competitorA, competitorB, oddsA, oddsB, sta
     ? `Current moneyline price: ${competitorA} ${oddsA > 0 ? '+' + oddsA : oddsA}, ${competitorB} ${oddsB > 0 ? '+' + oddsB : oddsB} (BetMGM).`
     : 'Current moneyline price: not available.';
 
+  // Spread/total lines are optional — a book may not have posted them yet.
+  // Only ask Claude for a view on a market that actually exists; never
+  // request a pick against a line that isn't real.
+  const hasSpread = spread !== null && spread !== undefined && spreadOddsA !== null && spreadOddsB !== null;
+  const hasTotal = total !== null && total !== undefined && overOdds !== null && underOdds !== null;
+
+  const spreadLineA = hasSpread ? spread : null; // signed relative to competitorA
+  const spreadLineB = hasSpread ? -spread : null;
+  const spreadContext = hasSpread
+    ? `Current point spread: ${competitorA} ${spreadLineA > 0 ? '+' : ''}${spreadLineA} (${spreadOddsA > 0 ? '+' : ''}${spreadOddsA}), ${competitorB} ${spreadLineB > 0 ? '+' : ''}${spreadLineB} (${spreadOddsB > 0 ? '+' : ''}${spreadOddsB}) (BetMGM).`
+    : 'Point spread: not available for this match yet.';
+  const totalContext = hasTotal
+    ? `Current total: ${total} (Over ${overOdds > 0 ? '+' : ''}${overOdds} / Under ${underOdds > 0 ? '+' : ''}${underOdds}) (BetMGM).`
+    : 'Total (over/under): not available for this match yet.';
+
+  const spreadInstructionBlock = hasSpread ? `
+
+Also give an independent spread pick. The line is ${competitorA} ${spreadLineA > 0 ? '+' : ''}${spreadLineA} / ${competitorB} ${spreadLineB > 0 ? '+' : ''}${spreadLineB}.
+"spreadPick.selection" MUST be exactly one of these two strings, verbatim:
+"${competitorA} ${spreadLineA > 0 ? '+' : ''}${spreadLineA}" or "${competitorB} ${spreadLineB > 0 ? '+' : ''}${spreadLineB}".
+This is a genuinely separate judgment from your moneyline pick — a team can be
+the right moneyline pick and still be the wrong side of the spread (e.g. a
+likely winner that you don't think wins by enough to cover), or vice versa.
+Give your own honest read on the margin, not just a copy of your moneyline lean.` : '';
+
+  // Sport-specific guidance for what actually moves a total, beyond the
+  // shared formula baseline — genuinely different weighting per sport,
+  // not just reworded copy.
+  const TOTAL_GUIDANCE = {
+    basketball: 'pace/style fit, injuries, motivation/stakes, and head-to-head history',
+    football: 'weather (wind and cold suppress passing/kicking totals more than any indoor-sport factor), pace/plays-per-game (run-heavy clock-control offenses run far fewer snaps — weight this more heavily than "pace" matters in basketball), QB/O-line injuries (a backup QB or missing starting O-line pieces tends to crater a total more than a single missing skill player), and divisional/rivalry familiarity (division games often trend lower-scoring than raw stats suggest, since both defenses know the opponent well)',
+    baseball: "starting pitcher quality and handedness (this often matters more than either team's overall offensive average — a strong starter can suppress a total by 2-3 runs on its own, and lefty/righty platoon splits shift things further), ballpark factors (some parks are notorious run-inflators — thin air, short fences — or suppressors; a bigger, more consistent effect here than home-court advantage in basketball), bullpen strength (a good team can still leak runs late if the bullpen is thin), and weather/wind (wind blowing out inflates totals, especially at open-air parks)",
+    tennis: "hold percentage and break points (the single biggest lever — two big servers who both hold easily tend to produce longer matches in total games even at a close-looking score margin, while a match with lots of breaks can end in low-game blowouts despite feeling competitive on paper), surface (clay produces more games per set on average — longer rallies, harder to hold/close — while hard and grass tend to run shorter), and Elo gap (a big mismatch often means fewer total games — a straight-sets blowout — while a close gap often means more)",
+    soccer: "xG (expected goals) over actual goals — a team can score 3 in a game they were lucky in, or 0 in a game they dominated, so xG-based averages are far more predictive than raw goals scored/conceded — home/away splits (soccer's home advantage is one of the largest in sports, bigger than in the other sports covered here), missing a key striker or starting keeper (moves a total meaningfully more than a role-player injury would in basketball), and match stakes (a dead rubber or an already-eliminated/already-through team tends to deflate scoring; a must-win tends to inflate it)",
+  };
+  const totalGuidance = TOTAL_GUIDANCE[sport] || 'pace/scoring-environment research relevant to this sport';
+
+  // The unit word and the description of what avgA/avgB actually mean
+  // both genuinely differ per sport — tennis's figure isn't "how many
+  // games this player won," it's "the total-games figure of matches this
+  // player recently played in" (a proxy for their own hold/break
+  // tendencies plus recent opponent quality), which needs its own
+  // sentence rather than a reused "TeamX averaged N points" template.
+  const pregameBaselineText = pregameProjectedTotal ? (
+    sport === 'tennis'
+      ? `
+
+A simple formula-based baseline projects the total at ${pregameProjectedTotal.projectedTotal} games
+(the average of ${competitorA}'s and ${competitorB}'s own recent-match total-games figures — i.e.
+how many total games matches involving each of them have produced over their last 3 matches, not
+how many games either of them personally won: ${competitorA}'s matches averaged
+${pregameProjectedTotal.avgA} total games, ${competitorB}'s averaged ${pregameProjectedTotal.avgB}).
+Treat this as your real starting point, then adjust it up or down using the factors above — those
+are layered ON TOP of the baseline, not replacements for it. Don't just default to the raw formula
+number unadjusted, and don't ignore it either.`
+      : sport === 'soccer'
+      ? `
+
+A simple formula-based baseline projects the total at ${pregameProjectedTotal.projectedTotal} goals.
+It blends each team's own scoring with what they tend to concede (over their last 3 matches):
+${competitorA} has averaged ${pregameProjectedTotal.scoredA} scored / ${pregameProjectedTotal.concededA}
+conceded; ${competitorB} has averaged ${pregameProjectedTotal.scoredB} scored /
+${pregameProjectedTotal.concededB} conceded. This is raw goals, not xG — treat it as your real
+starting point, then adjust it up or down using the factors above (xG over raw goals especially —
+a team's raw scoring average can be misleadingly high or low relative to their underlying process).
+Those factors are layered ON TOP of the baseline, not replacements for it. Don't just default to the
+raw formula number unadjusted, and don't ignore it either.`
+      : `
+
+A simple formula-based baseline projects the total at ${pregameProjectedTotal.projectedTotal}
+${sport === 'baseball' ? 'runs' : 'points'}
+(${competitorA} averaged ${pregameProjectedTotal.avgA} ${sport === 'baseball' ? 'runs' : 'points'} and
+${competitorB} averaged ${pregameProjectedTotal.avgB} ${sport === 'baseball' ? 'runs' : 'points'} over
+their last 3 games — this is just recent scoring average, nothing else). Treat this as your real
+starting point, then adjust it up or down using the factors above — those are layered ON TOP of the
+baseline, not replacements for it. Don't just default to the raw formula number unadjusted, and
+don't ignore it either.`
+  ) : '';
+
+  const totalInstructionBlock = hasTotal ? `
+
+Also give an independent total (over/under) pick. The line is ${total}.
+"totalPick.selection" MUST be exactly one of these two strings, verbatim:
+"Over ${total}" or "Under ${total}".
+Base this on real research into ${totalGuidance} — not on which side you
+picked to win, a total pick is about combined scoring, not who wins.${pregameBaselineText}` : '';
+
   const jsonInstruction = `
 Do not narrate your process — no "I'll research this by...", no summary of
 what you searched for, nothing before or after. Your final message must
@@ -196,10 +283,12 @@ The "selection" field MUST be exactly one of these two strings, verbatim:
 "${competitorA} ML" or "${competitorB} ML" — do not use a spread, total, or
 any other format, even if your analysis discusses those. This is a straight
 moneyline call: who wins.
+${spreadInstructionBlock}
+${totalInstructionBlock}
 
 The "factors" field is an array of the specific things you actually
-checked that meaningfully informed this pick — do not include a factor you
-didn't really look into. Each entry needs:
+checked that meaningfully informed your MONEYLINE pick — do not include a
+factor you didn't really look into. Each entry needs:
   - "label": a short category name (e.g. "Recent Form", "Injury Report",
     "Surface Fit", "Rest & Travel", "Matchup Style")
   - "tag": exactly "Favors ${competitorA}", "Favors ${competitorB}", or
@@ -212,11 +301,13 @@ this exact shape:
   "selection": "${competitorA} ML" or "${competitorB} ML",
   "confidence": <integer 0-100>,
   "analysis": "2-4 sentence writeup citing the specific findings that drove this pick",
-  "factors": [ { "label": "...", "tag": "...", "body": "..." }, ... ]
+  "factors": [ { "label": "...", "tag": "...", "body": "..." }, ... ]${hasSpread ? `,
+  "spreadPick": { "selection": "${competitorA} ${spreadLineA > 0 ? '+' : ''}${spreadLineA}" or "${competitorB} ${spreadLineB > 0 ? '+' : ''}${spreadLineB}", "confidence": <integer 0-100>, "analysis": "1-2 sentences" }` : ''}${hasTotal ? `,
+  "totalPick": { "selection": "Over ${total}" or "Under ${total}", "confidence": <integer 0-100>, "analysis": "1-2 sentences" }` : ''}
 }
 `.trim();
 
-  const matchDescription = `${competitorA} vs ${competitorB} (${sport}), ${new Date(startTime).toISOString()}. ${oddsContext}`;
+  const matchDescription = `${competitorA} vs ${competitorB} (${sport}), ${new Date(startTime).toISOString()}. ${oddsContext} ${spreadContext} ${totalContext}`;
 
   // Real research with web search can legitimately take a while, but a
   // single hung request must never be allowed to block the entire
@@ -288,6 +379,48 @@ this exact shape:
     }
 
     parsed.confidence = Math.max(0, Math.min(100, Math.round(parsed.confidence)));
+
+    // spreadPick/totalPick are validated separately and dropped (not
+    // treated as a whole-response failure) if malformed — the moneyline
+    // pick is still good and shouldn't be thrown away because Claude
+    // botched a secondary field's format.
+    if (hasSpread) {
+      const validSpreadSelections = [
+        `${competitorA} ${spreadLineA > 0 ? '+' : ''}${spreadLineA}`,
+        `${competitorB} ${spreadLineB > 0 ? '+' : ''}${spreadLineB}`,
+      ];
+      if (
+        parsed.spreadPick &&
+        validSpreadSelections.includes(parsed.spreadPick.selection) &&
+        typeof parsed.spreadPick.confidence === 'number' &&
+        typeof parsed.spreadPick.analysis === 'string'
+      ) {
+        parsed.spreadPick.confidence = Math.max(0, Math.min(100, Math.round(parsed.spreadPick.confidence)));
+      } else {
+        if (parsed.spreadPick) console.warn(`[match-analyst] dropping malformed spreadPick for ${competitorA} vs ${competitorB}`);
+        parsed.spreadPick = null;
+      }
+    } else {
+      parsed.spreadPick = null;
+    }
+
+    if (hasTotal) {
+      const validTotalSelections = [`Over ${total}`, `Under ${total}`];
+      if (
+        parsed.totalPick &&
+        validTotalSelections.includes(parsed.totalPick.selection) &&
+        typeof parsed.totalPick.confidence === 'number' &&
+        typeof parsed.totalPick.analysis === 'string'
+      ) {
+        parsed.totalPick.confidence = Math.max(0, Math.min(100, Math.round(parsed.totalPick.confidence)));
+      } else {
+        if (parsed.totalPick) console.warn(`[match-analyst] dropping malformed totalPick for ${competitorA} vs ${competitorB}`);
+        parsed.totalPick = null;
+      }
+    } else {
+      parsed.totalPick = null;
+    }
+
     return parsed;
   } catch (err) {
     clearTimeout(timeoutId);
@@ -437,4 +570,208 @@ ${jsonInstruction}
   }
 }
 
-module.exports = { analyzeMatch, reassessLiveMatch };
+/**
+ * Live total reassessment — parallel to reassessLiveMatch() but for the
+ * total (over/under) market specifically, since the selection format and
+ * grounding data are genuinely different (a live pace projection, not a
+ * live score + odds).
+ *
+ * liveProjection is the real, computed output of
+ * basketballTotals.computeLiveProjectedTotal() — this function's job is
+ * to take that real number and layer real basketball judgment on top of
+ * it (garbage time, a team sitting on a lead, foul trouble, a trailing
+ * team pushing tempo), not to recompute the math itself.
+ *
+ * Returns { selection, confidence, analysis } or null on failure — same
+ * never-throws contract as every other function in this file.
+ */
+async function reassessLiveTotal({ sport, competitorA, competitorB, total, liveScore, liveProjection, priorAnalysis }) {
+  if (!process.env.ANTHROPIC_API_KEY) {
+    console.error('[match-analyst] ANTHROPIC_API_KEY not set — cannot reassess live total.');
+    return null;
+  }
+
+  // liveProjection's shape depends on which formula produced it — the
+  // time-based one (basketball/football) has minutesElapsed/inOvertime;
+  // the innings-based one (baseball) has inningsCompleted/inExtraInnings;
+  // the sets-based one (tennis) has gamesCompletedSoFar/expectedRemainingSets.
+  // Detect by shape rather than trusting `sport` alone, since it's the
+  // caller's actual data that determines which text is honest here.
+  let projectionContext;
+  if (liveProjection && liveProjection.inningsCompleted !== undefined) {
+    projectionContext = `Live pace formula: combined runs so far ÷ innings completed = ${liveProjection.pace} runs/inning. At that pace, projected final total = ${liveProjection.projectedFinal}${liveProjection.inExtraInnings ? ' (game is in extra innings — this projection only reflects pace through the end of regulation (9 innings), there is no fixed remaining-innings count past that)' : ` (${liveProjection.inningsRemaining} inning(s) remaining in regulation)`}.`;
+  } else if (liveProjection && liveProjection.gamesCompletedSoFar !== undefined) {
+    projectionContext = `Live games formula: ${liveProjection.gamesCompletedSoFar} games played so far, averaging ${liveProjection.avgGamesPerSet} games per completed set. Expected remaining sets under a NEUTRAL 50/50-per-set assumption (${liveProjection.matchFormat}): ${liveProjection.expectedRemainingSets} — this does NOT account for who's actually favored to close the match, only the mechanical odds given the current set score. Projected final total = ${liveProjection.projectedTotal} games.`;
+  } else if (sport === 'soccer' && liveProjection && liveProjection.minutesElapsed !== undefined) {
+    projectionContext = `Live pace formula: goals so far ÷ minutes elapsed = ${liveProjection.pace} goals/min. At that pace, projected final total = ${liveProjection.projectedFinal} (${liveProjection.minutesRemaining} minutes remaining in regulation — this does NOT predict added stoppage time, which isn't knowable in advance).`;
+  } else if (liveProjection && liveProjection.minutesElapsed !== undefined) {
+    projectionContext = `Live pace formula: combined score so far ÷ minutes elapsed = ${liveProjection.pace} pts/min. At that pace, projected final total = ${liveProjection.projectedFinal}${liveProjection.inOvertime ? ' (game is in overtime — this projection only reflects pace through end of regulation, there is no fixed remaining duration in OT)' : ` (${liveProjection.minutesRemaining} minutes remaining in regulation)`}.`;
+  } else {
+    projectionContext = 'Live pace projection: not available this cycle.';
+  }
+
+  const jsonInstruction = `
+Do not narrate your process. Your final message must contain ONLY the JSON
+object below and nothing else.
+
+The "selection" field MUST be exactly one of these two strings, verbatim:
+"Over ${total}" or "Under ${total}".
+
+Respond with ONLY a raw JSON object, in this exact shape:
+{
+  "selection": "Over ${total}" or "Under ${total}",
+  "confidence": <integer 0-100>,
+  "analysis": "1-3 sentence updated read on the total given how the game is actually playing out"
+}
+`.trim();
+
+  const LIVE_TOTAL_GUIDANCE = {
+    basketball: `The pace formula above is real math, not a guess — but real basketball
+doesn't score at a perfectly constant rate. Weigh it against what you'd
+actually expect given how the game is playing out: garbage-time fouling
+late, a team protecting a lead by slowing pace deliberately, a shorthanded
+team fading in the second half, a trailing team pushing tempo to chase a
+comeback. Don't just repeat the formula's number unadjusted, and don't
+ignore it either — it's real signal, layer real judgment on top of it.`,
+    football: `The pace formula above is real math, but treat it with real caution —
+football scoring is much lumpier than basketball's. A single possession is
+worth 3-8 points instead of 2-3, and a whole quarter can go scoreless or
+explode with two quick touchdowns. Pure pace math is far less reliable in
+the FIRST HALF especially — weight it more heavily once you're seeing how
+each offense/defense is actually performing that day (second half and
+later). Layer on football-specific dynamics: two-minute-drill stretches
+(end of half, end of game) spike scoring well above the game's average
+pace; a team playing from well behind often abandons the run and speeds up
+via more passing; a team protecting a big lead often does the opposite —
+running the clock, playing conservative, slowing pace right when you might
+expect it to pick up. Don't just repeat the formula's number unadjusted,
+especially early in the game, and don't ignore it either once the sample
+of live play is bigger.`,
+    baseball: `The pace formula above is rougher than basketball's or football's — innings
+aren't equal-length units of time, so runs/inning is a cruder proxy for
+"pace" than points/minute is in a clock sport. The single biggest live
+variable here has no basketball/football equivalent: the starter-to-bullpen
+transition. If a strong starter exits and a shaky bullpen takes over (or
+vice versa), the run-scoring pace can shift hard mid-game in a way pure
+pace math won't see coming — check who's actually on the mound now, not
+just the pregame starter. Late-inning scoring also tends to be lumpier
+than mid-game — a bases-loaded walk or a bullpen implosion can swing the
+total by several runs in one inning. Don't just repeat the formula's
+number unadjusted, especially once a pitching change has happened.`,
+    tennis: `The "expected remaining sets" figure above is a NEUTRAL 50/50-per-set
+assumption — real math on the current set score and match format, but it
+deliberately does NOT know who's actually favored to close the match out.
+That's your job: weigh it against who's actually serving better today,
+who looks fresher, and the current set score/momentum. A set that just
+went to a tiebreak inflates that set's game count (7-6 = 13 games vs. a
+clean 6-2 = 8) — the average-games-per-set figure above already reflects
+the actual sets played, not an assumption, so trust it more than you'd
+trust a similar average in a sport where set/inning length is more
+uniform. Watch for live odds overreacting to a single break before the
+returner has proven they can actually hold the advantage — a single
+break in a long, high-hold-percentage match is weaker signal than the
+market sometimes prices it as. Don't just repeat the formula's number
+unadjusted, and don't ignore it either — it's real signal on the
+mechanical odds, even though it doesn't know who's playing better.`,
+    soccer: `The pace formula above is the shakiest of any sport's live total math —
+goals are rare, lumpy events. A 0-0 game after 60 minutes doesn't mean
+"no goals are coming," it just means variance hasn't broken yet. Weigh
+shot volume, live xG generated, and chance quality far more heavily than
+the raw goals-per-minute number — a team peppering shots and hitting the
+post twice in a scoreless game is a completely different situation than a
+team that hasn't threatened at all, and the pace formula can't tell those
+two apart. Live-state adjustments that matter most: a team down a goal
+with 15-20 minutes left tends to push numbers forward (raises live goal
+probability); a team protecting a 1-0 or 2-0 lead late often sits back
+and manages the clock (suppresses it); a red card is a bigger single-
+event swing here than almost anything in the other sports — a team
+playing a man up very often changes the rest of the match's total-goal
+expectation significantly. Don't just repeat the formula's number
+unadjusted — weigh the underlying game state more than the pace math.`,
+  };
+  const liveTotalGuidance = LIVE_TOTAL_GUIDANCE[sport] || LIVE_TOTAL_GUIDANCE.basketball;
+
+  const prompt = `
+You are re-evaluating a TOTAL (over/under) pick for a game currently IN
+PROGRESS, given the live pace and how the game has actually unfolded.
+
+Match: ${competitorA} vs ${competitorB} (${sport})
+Current score: ${liveScore || 'not available'}
+Total line: ${total}
+${projectionContext}
+
+Your original pre-match total analysis:
+${priorAnalysis || '(not available)'}
+
+${liveTotalGuidance}
+
+${jsonInstruction}
+`.trim();
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 45000);
+
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: ANTHROPIC_MODEL,
+        max_tokens: 500,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+    });
+    clearTimeout(timeoutId);
+
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => '(could not read response body)');
+      console.error(`[match-analyst] live total reassessment API returned ${res.status} for ${competitorA} vs ${competitorB}: ${errBody}`);
+      return null;
+    }
+
+    const data = await res.json();
+    const textBlocks = (data.content || []).filter((b) => b.type === 'text');
+    if (!textBlocks.length) return null;
+    const finalText = textBlocks[textBlocks.length - 1].text;
+
+    const withoutFences = finalText.replace(/```json|```/g, '').trim();
+    const jsonMatch = withoutFences.match(/\{[\s\S]*\}/);
+    const cleaned = jsonMatch ? jsonMatch[0] : withoutFences;
+
+    let parsed;
+    try {
+      parsed = JSON.parse(cleaned);
+    } catch (err) {
+      console.error(`[match-analyst] failed to parse live total JSON for ${competitorA} vs ${competitorB}: ${err.message}`);
+      return null;
+    }
+
+    const validSelections = [`Over ${total}`, `Under ${total}`];
+    if (
+      !validSelections.includes(parsed.selection) ||
+      typeof parsed.confidence !== 'number' ||
+      typeof parsed.analysis !== 'string'
+    ) {
+      console.error(`[match-analyst] live total reassessment missing/invalid fields for ${competitorA} vs ${competitorB}: ${cleaned}`);
+      return null;
+    }
+
+    parsed.confidence = Math.max(0, Math.min(100, Math.round(parsed.confidence)));
+    return parsed;
+  } catch (err) {
+    clearTimeout(timeoutId);
+    if (err.name === 'AbortError') {
+      console.error(`[match-analyst] live total reassessment timed out for ${competitorA} vs ${competitorB} — skipping this cycle.`);
+    } else {
+      console.error(`[match-analyst] live total reassessment failed for ${competitorA} vs ${competitorB}:`, err.message);
+    }
+    return null;
+  }
+}
+
+module.exports = { analyzeMatch, reassessLiveMatch, reassessLiveTotal };
