@@ -437,7 +437,16 @@ ${JSON_VALIDITY_REMINDER}
       },
       body: JSON.stringify({
         model: ANTHROPIC_MODEL,
-        max_tokens: 1500,
+        // Was 1500 — too tight. web_search is a server-side tool, but every
+        // search round's tool_use block and any narration between searches
+        // still counts against this SAME output budget as the final JSON
+        // answer. A match needing several search rounds could burn the
+        // whole budget before ever reaching the actual analysis/factors/
+        // spreadPick/totalPick — producing either a truncated, unparseable
+        // JSON response or, worse, no text response at all (the two
+        // dominant failure modes in production logs). Real headroom here
+        // directly reduces both.
+        max_tokens: 5000,
         system: `${systemPrompt}\n\n${jsonInstruction}`,
         tools: [{ type: 'web_search_20250305', name: 'web_search' }],
         messages: [{ role: 'user', content: `Analyze this match:\n\n${matchDescription}` }],
@@ -628,7 +637,7 @@ ${jsonInstruction}
       },
       body: JSON.stringify({
         model: ANTHROPIC_MODEL,
-        max_tokens: 800,
+        max_tokens: 1200, // was 800 — small margin added since this still writes a full factors array
         messages: [{ role: 'user', content: prompt }],
       }),
     });
