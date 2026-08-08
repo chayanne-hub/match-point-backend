@@ -16,7 +16,10 @@ const cron = require('node-cron');
 const db = require('../lib/db');
 const { fetchMatches, fetchScores } = require('./fetchMatches');
 const { fetchEspnLiveScores, matchEspnEvent } = require('./fetchEspn');
-const { analyzeMatch, reassessLiveMatch } = require('./matchAnalyst');
+const { analyzeMatch, reassessLiveMatch, reassessLiveTotal } = require('./matchAnalyst');
+const { computePregameProjectedTotal, computeLiveProjectedTotal, computeLiveProjectedTotalByInnings } = require('./teamTotals');
+const { computePregameProjectedTotalGames, computeLiveProjectedTotalGames } = require('./tennisTotalGames');
+const { computePregameProjectedTotalGoals, computeLiveProjectedTotalGoals, parseElapsedMinutesFromDisplayClock } = require('./soccerGoalsTotal');
 
 // Confidence bar a pick needs to clear to also be sold as a "model" pick
 // (a genuine-edge call) on top of the always-present "winner" pick (a
@@ -24,6 +27,26 @@ const { analyzeMatch, reassessLiveMatch } = require('./matchAnalyst');
 const MODEL_PICK_THRESHOLD = 65;
 
 const SPORTS = ['tennis', 'basketball', 'soccer', 'baseball', 'football'];
+
+// Sports with a real, computed pregame/live total formula.
+const TOTAL_FORMULA_SPORTS = ['basketball', 'football', 'baseball', 'tennis', 'soccer'];
+
+// Of those, which actually have quarters/periods with a countdown clock
+// (as opposed to baseball's innings or tennis's sets, both discrete units
+// with no clock at all) — used to decide whether the "Q{period} {clock}"
+// liveClock display format is valid for a given sport.
+const QUARTER_BASED_SPORTS = ['basketball', 'football'];
+
+// Tennis's live-total formula is sets-based, not innings-based — needs
+// its own branch (match format + set score) rather than treating it as
+// a variant of either the quarter-clock or innings model.
+const SETS_BASED_SPORTS = ['tennis'];
+
+// Soccer runs on a real clock, but COUNTS UP with variable stoppage time
+// — the opposite convention from basketball/football's countdown clock.
+// Needs its own branch: ESPN's displayClock string ("72'", "45+2'") is
+// parsed directly rather than reused through the countdown-clock math.
+const COUNT_UP_CLOCK_SPORTS = ['soccer'];
 
 async function ensureSportRows() {
   for (const slug of SPORTS) {
@@ -93,6 +116,23 @@ async function runForSport(sportSlug) {
       continue;
     }
 
+    // Basketball + football: a real, computed baseline (avg points scored
+    // over each team's last 3 games) to ground the total pick, on top of
+    // which matchAnalyst.js layers real sport-specific judgment. Null for
+    // any other sport, or if either team/player lacks 3 games of history
+    // yet. Tennis and soccer each use their own module — tennis averages
+    // the two players' figures rather than summing them, and soccer
+    // blends each team's own scoring with what they tend to concede (see
+    // tennisTotalGames.js / soccerGoalsTotal.js headers for why).
+    let pregameProjectedTotal = null;
+    if (SETS_BASED_SPORTS.includes(sportSlug)) {
+      pregameProjectedTotal = await computePregameProjectedTotalGames(m.competitorA, m.competitorB, m.startTime);
+    } else if (sportSlug === 'soccer') {
+      pregameProjectedTotal = await computePregameProjectedTotalGoals(m.competitorA, m.competitorB, m.startTime);
+    } else if (TOTAL_FORMULA_SPORTS.includes(sportSlug)) {
+      pregameProjectedTotal = await computePregameProjectedTotal(sportSlug, m.competitorA, m.competitorB, m.startTime);
+    }
+
     const analysis = await analyzeMatch({
       sport: sportSlug,
       competitorA: m.competitorA,
@@ -100,6 +140,13 @@ async function runForSport(sportSlug) {
       oddsA: m.oddsA,
       oddsB: m.oddsB,
       startTime: m.startTime,
+      spread: m.spread,
+      spreadOddsA: m.spreadOddsA,
+      spreadOddsB: m.spreadOddsB,
+      total: m.total,
+      overOdds: m.overOdds,
+      underOdds: m.underOdds,
+      pregameProjectedTotal,
     });
     if (!analysis) {
       console.warn(`[pipeline] no analysis returned for ${m.competitorA} vs ${m.competitorB} — skipping pick creation this cycle.`);
@@ -124,11 +171,48 @@ async function runForSport(sportSlug) {
         data: {
           match: { connect: { id: match.id } },
           pickType,
+          market: 'moneyline',
           selection: analysis.selection,
           confidence: analysis.confidence,
           odds: pickedOdds,
           rationale: analysis.analysis,
           factsUsed: factsUsedJson,
+        },
+      });
+    }
+
+    // Spread pick — a separate market/product from moneyline, only
+    // created when Claude actually returned one (i.e. a real line
+    // existed and its response validated). No "winner" tier for these
+    // markets yet — that concept (always-sold baseline pick) hasn't been
+    // extended here; every spread/total pick created is a "model" pick.
+    if (analysis.spreadPick) {
+      await db.pick.create({
+        data: {
+          match: { connect: { id: match.id } },
+          pickType: 'model',
+          market: 'spread',
+          line: m.spread,
+          selection: analysis.spreadPick.selection,
+          confidence: analysis.spreadPick.confidence,
+          odds: analysis.spreadPick.selection === `${m.competitorA} ${m.spread > 0 ? '+' : ''}${m.spread}` ? m.spreadOddsA : m.spreadOddsB,
+          rationale: analysis.spreadPick.analysis,
+        },
+      });
+    }
+
+    // Total pick — same treatment.
+    if (analysis.totalPick) {
+      await db.pick.create({
+        data: {
+          match: { connect: { id: match.id } },
+          pickType: 'model',
+          market: 'total',
+          line: m.total,
+          selection: analysis.totalPick.selection,
+          confidence: analysis.totalPick.confidence,
+          odds: analysis.totalPick.selection.startsWith('Over') ? m.overOdds : m.underOdds,
+          rationale: analysis.totalPick.analysis,
         },
       });
     }
@@ -282,12 +366,14 @@ async function updateLivePicksForSport(sportSlug) {
     // missing live price should never block the pick from existing.
     const hasLiveOdds = m.oddsA !== null && m.oddsB !== null;
 
-    // The live board tracks exactly ONE evolving pick per match, kept
-    // entirely separate from the pre-match "model"/"winner" picks — those
-    // are the frozen prediction that Today's Picks, the archive, and all
-    // stats read from, and must NEVER be touched once a match goes live.
+    // The live board tracks exactly ONE evolving MONEYLINE pick per match
+    // (market scoped explicitly now that live total picks also exist with
+    // the same pickType), kept entirely separate from the pre-match
+    // "model"/"winner" picks — those are the frozen prediction that
+    // Today's Picks, the archive, and all stats read from, and must NEVER
+    // be touched once a match goes live.
     const existingLive = await db.pick.findFirst({
-      where: { matchId: match.id, pickType: 'live' },
+      where: { matchId: match.id, pickType: 'live', market: 'moneyline' },
     });
 
     if (existingLive) {
@@ -371,6 +457,107 @@ async function updateLivePicksForSport(sportSlug) {
         },
       });
     }
+
+    // Basketball + football + baseball: a separate evolving TOTAL pick,
+    // tracked in parallel with the moneyline one above using the real
+    // pace formula as grounding. Quarter-based sports need period+clock
+    // data; baseball only needs the current inning (no clock exists);
+    // soccer needs a parseable liveClock string (its count-up clock,
+    // captured separately from the countdown-clock sports' period/clock).
+    // Never fabricates a projection when the needed data isn't there yet.
+    const hasNeededClockData = SETS_BASED_SPORTS.includes(sportSlug)
+      ? match.setScore != null && match.homeScore != null && match.awayScore != null // tennis: needs live set score + sets won by each side
+      : COUNT_UP_CLOCK_SPORTS.includes(sportSlug)
+        ? parseElapsedMinutesFromDisplayClock(match.liveClock) !== null
+        : QUARTER_BASED_SPORTS.includes(sportSlug)
+          ? match.period != null && match.clockSeconds != null
+          : match.period != null; // baseball: just needs the inning number
+
+    if (TOTAL_FORMULA_SPORTS.includes(sportSlug) && m.total !== null && hasNeededClockData) {
+      const combinedScoreSoFar = (match.homeScore || 0) + (match.awayScore || 0);
+      let liveProjection;
+      if (SETS_BASED_SPORTS.includes(sportSlug)) {
+        liveProjection = computeLiveProjectedTotalGames({
+          liveSetScore: match.setScore,
+          league: match.league,
+          setsWonA: match.homeScore,
+          setsWonB: match.awayScore,
+        });
+      } else if (QUARTER_BASED_SPORTS.includes(sportSlug)) {
+        liveProjection = computeLiveProjectedTotal({
+          sport: sportSlug,
+          league: match.league,
+          combinedScoreSoFar,
+          period: match.period,
+          clockSecondsRemaining: match.clockSeconds,
+        });
+      } else if (COUNT_UP_CLOCK_SPORTS.includes(sportSlug)) {
+        liveProjection = computeLiveProjectedTotalGoals({
+          goalsSoFar: combinedScoreSoFar,
+          minutesElapsed: parseElapsedMinutesFromDisplayClock(match.liveClock),
+        });
+      } else {
+        liveProjection = computeLiveProjectedTotalByInnings({
+          combinedRunsSoFar: combinedScoreSoFar,
+          currentInning: match.period,
+        });
+      }
+
+      const existingLiveTotal = await db.pick.findFirst({
+        where: { matchId: match.id, pickType: 'live', market: 'total' },
+      });
+
+      if (existingLiveTotal) {
+        const reassessment = await reassessLiveTotal({
+          sport: sportSlug,
+          competitorA: m.competitorA,
+          competitorB: m.competitorB,
+          total: m.total,
+          liveScore: match.liveScore,
+          liveProjection,
+          priorAnalysis: existingLiveTotal.rationale,
+        });
+        if (reassessment) {
+          const freshPrice = reassessment.selection.startsWith('Over') ? m.overOdds : m.underOdds;
+          await db.pick.update({
+            where: { id: existingLiveTotal.id },
+            data: {
+              selection: reassessment.selection,
+              confidence: reassessment.confidence,
+              rationale: reassessment.analysis,
+              ...(freshPrice !== null && { odds: freshPrice }), // only touch odds if this cycle actually has a fresh price — required field, never null it out
+            },
+          });
+        }
+      } else if (liveProjection) {
+        // First cycle a live projection actually exists for this match —
+        // seed the live total pick from it directly rather than waiting
+        // for a reassessment cycle, so it doesn't sit at whatever the
+        // pregame total pick said while the game is already underway.
+        // Field name differs by which module produced this (teamTotals.js
+        // uses projectedFinal, tennisTotalGames.js uses projectedTotal) —
+        // normalize here rather than assuming one name everywhere.
+        const projectedFinalValue = liveProjection.projectedFinal !== undefined ? liveProjection.projectedFinal : liveProjection.projectedTotal;
+        const seedSelection = projectedFinalValue > m.total ? `Over ${m.total}` : `Under ${m.total}`;
+        const seedPrice = seedSelection.startsWith('Over') ? m.overOdds : m.underOdds;
+        const paceUnit = SETS_BASED_SPORTS.includes(sportSlug) ? 'games/set' : sportSlug === 'baseball' ? 'runs/inning' : sportSlug === 'soccer' ? 'goals/min' : 'pts/min';
+        if (seedPrice !== null) {
+          await db.pick.create({
+            data: {
+              match: { connect: { id: match.id } },
+              pickType: 'live',
+              market: 'total',
+              isLive: true,
+              line: m.total,
+              selection: seedSelection,
+              confidence: 55, // neutral starting confidence — first real reassessment cycle refines this with actual judgment, not just the raw formula
+              odds: seedPrice,
+              rationale: `Seeded from the live formula: ${liveProjection.pace || liveProjection.avgGamesPerSet} ${paceUnit}, projecting a final total of ${projectedFinalValue}.`,
+            },
+          });
+        }
+      }
+    }
   }
 
   console.log(`[live-pipeline] ${sportSlug}: refreshed ${liveMatches.length} live match(es).`);
@@ -396,7 +583,7 @@ async function updateLivePicks() {
  * LIVE_PIPELINE_INTERVAL_MS if you want a different tradeoff.
  */
 function startLiveScheduled() {
-  const intervalMs = Number(process.env.LIVE_PIPELINE_INTERVAL_MS) || 180000; // 3 minutes
+  const intervalMs = Number(process.env.LIVE_PIPELINE_INTERVAL_MS) || 900000; // 15 minutes — cost-conscious default pre-revenue; drop LIVE_PIPELINE_INTERVAL_MS lower once picks are actually selling
   setInterval(() => {
     updateLivePicks().catch(err => console.error('[live-pipeline] run failed:', err));
   }, intervalMs);
@@ -450,6 +637,18 @@ async function updateEspnScoresForSport(sportSlug) {
         awayScore: event.awayScore,
         liveScore: `${event.homeScore} - ${event.awayScore}`,
         ...(event.setScore && { setScore: event.setScore }),
+        ...(event.period != null && { period: event.period }),
+        ...(event.clockSeconds != null && { clockSeconds: event.clockSeconds }),
+        // "Q{period} {clock}" only makes sense for quarter-based sports —
+        // baseball's period means inning number, not a quarter, and has
+        // no countdown clock at all. Leave liveClock alone for baseball
+        // rather than writing a garbled/wrong display string onto it.
+        ...(QUARTER_BASED_SPORTS.includes(sportSlug) && event.period != null && event.displayClock && { liveClock: `Q${event.period} ${event.displayClock}` }),
+        // Soccer: ESPN's displayClock ("72'", "45+2'") is already in the
+        // right display format — no "Q{n}" prefix needed, just persist it
+        // directly. This was being fetched already (parseTeamCompetition
+        // captures it generically) but never actually saved before now.
+        ...(COUNT_UP_CLOCK_SPORTS.includes(sportSlug) && event.displayClock && { liveClock: event.displayClock }),
       },
     });
 
@@ -475,17 +674,14 @@ async function updateEspnScores() {
  * Grading — Track Record support.
  *
  * Determines win/loss/push for one pick against its now-finished match.
- * Only supports the "X ML" moneyline-style selections analyzeMatch() is
- * constrained to produce today — if the selection format ever changes
- * (spreads, totals) this will need a matching parser added alongside it.
+ * Dispatches by pick.market — "moneyline" (the original, unchanged
+ * logic), "spread", or "total".
  *
  * A tied final score (soccer draws being the realistic case, since ML has
  * no draw option in the model) is graded as a push rather than forced into
  * a win/loss — nobody actually won that match outright.
  */
-function gradePick(match, pick) {
-  if (match.homeScore === null || match.awayScore === null) return null;
-
+function gradeMoneyline(match, pick) {
   const pickedName = pick.selection.replace(/\s*ML$/, '').trim();
   let pickedSide = null;
   if (pickedName === match.competitorA) pickedSide = 'A';
@@ -496,6 +692,57 @@ function gradePick(match, pick) {
 
   const actualWinnerSide = match.homeScore > match.awayScore ? 'A' : 'B';
   return pickedSide === actualWinnerSide ? 'win' : 'loss';
+}
+
+/**
+ * Spread grading: pick.selection is "<competitor> <signed line>", e.g.
+ * "Celtics -4.5" or "Warriors +4.5". pick.line holds the same number the
+ * selection references, captured at pick-creation time (the market's
+ * current line can move before settlement — this is what the pick was
+ * actually made against). Uses the picked competitor's OWN margin (their
+ * score minus the opponent's) plus their own signed line — this formula
+ * is symmetric whether the pick was the favorite or the underdog, so no
+ * separate branch is needed for each case.
+ */
+function gradeSpread(match, pick) {
+  if (pick.line === null || pick.line === undefined) return null;
+
+  const isA = pick.selection.startsWith(match.competitorA);
+  const isB = pick.selection.startsWith(match.competitorB);
+  if (!isA && !isB) return null; // unrecognized selection format
+
+  const ownMargin = isA
+    ? match.homeScore - match.awayScore
+    : match.awayScore - match.homeScore;
+
+  const result = ownMargin + pick.line;
+  if (result === 0) return 'push';
+  return result > 0 ? 'win' : 'loss';
+}
+
+/**
+ * Total grading: pick.selection is "Over <line>" or "Under <line>".
+ * pick.line holds the line the pick was made against.
+ */
+function gradeTotal(match, pick) {
+  if (pick.line === null || pick.line === undefined) return null;
+
+  const actualTotal = match.homeScore + match.awayScore;
+  const isOver = pick.selection.startsWith('Over');
+  const isUnder = pick.selection.startsWith('Under');
+  if (!isOver && !isUnder) return null; // unrecognized selection format
+
+  if (actualTotal === pick.line) return 'push';
+  const wentOver = actualTotal > pick.line;
+  return (isOver && wentOver) || (isUnder && !wentOver) ? 'win' : 'loss';
+}
+
+function gradePick(match, pick) {
+  if (match.homeScore === null || match.awayScore === null) return null;
+
+  if (pick.market === 'spread') return gradeSpread(match, pick);
+  if (pick.market === 'total') return gradeTotal(match, pick);
+  return gradeMoneyline(match, pick); // default/legacy rows with no market set
 }
 
 /**
