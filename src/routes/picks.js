@@ -131,6 +131,15 @@ router.get('/today', async (req, res) => {
         confidence: unlocked ? p.confidence : null,
         rationale: unlocked ? p.rationale : null,
         odds: p.odds,
+        // Raw market lines, not model analysis — shown to everyone, same
+        // as odds above. Null whenever a book hasn't posted that market
+        // yet, never a fabricated number.
+        spread: p.match.spread,
+        spreadOddsA: p.match.spreadOddsA,
+        spreadOddsB: p.match.spreadOddsB,
+        total: p.match.total,
+        overOdds: p.match.overOdds,
+        underOdds: p.match.underOdds,
         unlocked,
       };
     })
@@ -353,6 +362,12 @@ router.get('/matches-today', async (req, res) => {
         surface: m.surface,
         oddsA: m.closingOddsA,
         oddsB: m.closingOddsB,
+        spread: m.spread,
+        spreadOddsA: m.spreadOddsA,
+        spreadOddsB: m.spreadOddsB,
+        total: m.total,
+        overOdds: m.overOdds,
+        underOdds: m.underOdds,
         pick: pick
           ? {
               id: pick.id,
@@ -410,6 +425,12 @@ router.get('/:id', async (req, res) => {
     homeScore: pick.match.homeScore,
     awayScore: pick.match.awayScore,
     setScore: pick.match.setScore, // tennis only
+    spread: pick.match.spread,
+    spreadOddsA: pick.match.spreadOddsA,
+    spreadOddsB: pick.match.spreadOddsB,
+    total: pick.match.total,
+    overOdds: pick.match.overOdds,
+    underOdds: pick.match.underOdds,
     selection: pick.selection,
     confidence: pick.confidence,
     odds: pick.odds,

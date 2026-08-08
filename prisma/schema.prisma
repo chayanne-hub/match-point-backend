@@ -88,6 +88,19 @@ model Match {
   setScore     String?  // tennis only — set-by-set games score, e.g. "6-4, 3-2"
   closingOddsA Int?     // last odds seen for competitorA right as the match went live —
   closingOddsB Int?     // an approximation of the "closing line," used for CLV/ROI tracking
+
+  // Spread/totals — raw market lines from The Odds API, stored as-is.
+  // NOT model-analyzed picks (matchAnalyst.js only produces moneyline
+  // selections today) — this is the market's own number, shown for
+  // reference. spread is signed relative to competitorA (negative =
+  // competitorA favored by that many points/goals/runs).
+  spread       Float?
+  spreadOddsA  Int?
+  spreadOddsB  Int?
+  total        Float?   // over/under line
+  overOdds     Int?
+  underOdds    Int?
+
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 

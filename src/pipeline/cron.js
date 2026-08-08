@@ -54,6 +54,14 @@ async function runForSport(sportSlug) {
       update: {
         status: m.status,
         startTime: m.startTime,
+        // Lines move until kickoff — keep them fresh on every pull, same
+        // as status/startTime already were.
+        spread: m.spread,
+        spreadOddsA: m.spreadOddsA,
+        spreadOddsB: m.spreadOddsB,
+        total: m.total,
+        overOdds: m.overOdds,
+        underOdds: m.underOdds,
       },
       create: {
         externalId: m.externalId,
@@ -63,6 +71,12 @@ async function runForSport(sportSlug) {
         competitorB: m.competitorB,
         startTime: m.startTime,
         status: m.status,
+        spread: m.spread,
+        spreadOddsA: m.spreadOddsA,
+        spreadOddsB: m.spreadOddsB,
+        total: m.total,
+        overOdds: m.overOdds,
+        underOdds: m.underOdds,
       },
     });
 
