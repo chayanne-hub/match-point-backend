@@ -28,17 +28,64 @@ const { recordPregameRun, recordEspnPoll, recordAnalysisRetry, recordAnalysisFai
  * even be attempted again — and by then they may have started, missing
  * the window for a pregame pick entirely.
  */
+
+// Global concurrency cap across ALL sports combined — the 5-sports-
+// concurrent design (Promise.all in runAll, below) already bounds
+// simultaneous calls to roughly 5 (one per sport's sequential queue),
+// but during a backlog catch-up (e.g. after Anthropic balance ran out
+// for a while and many matches are all newly eligible at once), that's
+// 5 SUSTAINED concurrent long-running calls for as long as the backlog
+// lasts, not a brief burst. This caps it lower and makes it explicit,
+// so a big backlog queues instead of piling on load that can push every
+// in-flight request past its timeout together — real cost for zero
+// picks, the exact failure mode this is meant to prevent.
+const MAX_CONCURRENT_ANALYSIS = 3;
+let activeAnalysisCount = 0;
+const analysisWaitQueue = [];
+
+function acquireAnalysisSlot() {
+  return new Promise((resolve) => {
+    if (activeAnalysisCount >= MAX_CONCURRENT_ANALYSIS) {
+      console.log(`[pipeline] concurrency cap reached (${MAX_CONCURRENT_ANALYSIS} in flight) — queueing rather than piling on more load.`);
+    }
+    const tryAcquire = () => {
+      if (activeAnalysisCount < MAX_CONCURRENT_ANALYSIS) {
+        activeAnalysisCount++;
+        resolve();
+      } else {
+        analysisWaitQueue.push(tryAcquire);
+      }
+    };
+    tryAcquire();
+  });
+}
+
+function releaseAnalysisSlot() {
+  activeAnalysisCount--;
+  const next = analysisWaitQueue.shift();
+  if (next) next();
+}
+
 async function analyzeMatchWithRetry(params, context) {
-  let result = await analyzeMatch(params);
-  if (result) return result;
-  console.warn(`[match-analyst] first attempt failed for ${context} — retrying once before giving up.`);
-  recordAnalysisRetry();
-  result = await analyzeMatch(params);
-  if (!result) {
-    console.error(`[match-analyst] retry also failed for ${context} — skipping this cycle.`);
-    recordAnalysisFailure(context);
+  // Held across BOTH the first attempt and the retry — a failing match
+  // occupies one slot for its whole up-to-180-second lifetime rather
+  // than releasing and re-queueing between attempts, which keeps the
+  // total concurrent load genuinely capped, not just capped per-attempt.
+  await acquireAnalysisSlot();
+  try {
+    let result = await analyzeMatch(params);
+    if (result) return result;
+    console.warn(`[match-analyst] first attempt failed for ${context} — retrying once before giving up.`);
+    recordAnalysisRetry();
+    result = await analyzeMatch(params);
+    if (!result) {
+      console.error(`[match-analyst] retry also failed for ${context} — skipping this cycle.`);
+      recordAnalysisFailure(context);
+    }
+    return result;
+  } finally {
+    releaseAnalysisSlot();
   }
-  return result;
 }
 const { fetchMatches, fetchScores } = require('./fetchMatches');
 const { fetchEspnLiveScores, matchEspnEvent } = require('./fetchEspn');
