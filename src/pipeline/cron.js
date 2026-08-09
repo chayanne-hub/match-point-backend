@@ -15,6 +15,31 @@ require('dotenv').config();
 const cron = require('node-cron');
 const db = require('../lib/db');
 const { broadcastScoreUpdate } = require('../lib/liveSocket');
+const { recordPregameRun, recordEspnPoll, recordAnalysisRetry, recordAnalysisFailure } = require('../lib/healthStats');
+
+/**
+ * Wraps analyzeMatch() with exactly ONE full retry if the first attempt
+ * returns null (total failure — unparseable JSON even after the cheap
+ * repair pass, or a response missing required fields). Previously a
+ * single bad response meant the match was silently skipped for the
+ * entire cycle and cost a real API call for nothing. This costs one
+ * more real call on the (uncommon) failure path, but recovers matches
+ * that would otherwise need to wait for the next 15-minute cycle to
+ * even be attempted again — and by then they may have started, missing
+ * the window for a pregame pick entirely.
+ */
+async function analyzeMatchWithRetry(params, context) {
+  let result = await analyzeMatch(params);
+  if (result) return result;
+  console.warn(`[match-analyst] first attempt failed for ${context} — retrying once before giving up.`);
+  recordAnalysisRetry();
+  result = await analyzeMatch(params);
+  if (!result) {
+    console.error(`[match-analyst] retry also failed for ${context} — skipping this cycle.`);
+    recordAnalysisFailure(context);
+  }
+  return result;
+}
 const { fetchMatches, fetchScores } = require('./fetchMatches');
 const { fetchEspnLiveScores, matchEspnEvent } = require('./fetchEspn');
 const { analyzeMatch, reassessLiveMatch, reassessLiveTotal } = require('./matchAnalyst');
@@ -187,7 +212,7 @@ async function runForSport(sportSlug) {
       pregameProjectedTotal = await computePregameProjectedTotal(sportSlug, m.competitorA, m.competitorB, m.startTime);
     }
 
-    const analysis = await analyzeMatch({
+    const analysis = await analyzeMatchWithRetry({
       sport: sportSlug,
       competitorA: m.competitorA,
       competitorB: m.competitorB,
@@ -201,7 +226,7 @@ async function runForSport(sportSlug) {
       overOdds: m.overOdds,
       underOdds: m.underOdds,
       pregameProjectedTotal,
-    });
+    }, `${m.competitorA} vs ${m.competitorB} (pregame)`);
     if (!analysis) {
       console.warn(`[pipeline] no analysis returned for ${m.competitorA} vs ${m.competitorB} — skipping pick creation this cycle.`);
       continue;
@@ -273,6 +298,7 @@ async function runForSport(sportSlug) {
   }
 
   console.log(`[pipeline] ${sportSlug}: processed ${matches.length} matches.`);
+  recordPregameRun(sportSlug, matches.length);
 
   await updateLiveScores(sportSlug, sportRow.id);
 }
@@ -500,14 +526,14 @@ async function updateLivePicksForSport(sportSlug) {
         });
       }
     } else {
-      const analysis = await analyzeMatch({
+      const analysis = await analyzeMatchWithRetry({
         sport: sportSlug,
         competitorA: m.competitorA,
         competitorB: m.competitorB,
         oddsA: hasLiveOdds ? m.oddsA : null,
         oddsB: hasLiveOdds ? m.oddsB : null,
         startTime: m.startTime,
-      });
+      }, `${m.competitorA} vs ${m.competitorB} (live, no pregame pick existed)`);
       if (!analysis) continue; // try again next cycle
 
       // odds is a required field on Pick — if there's no live in-play
@@ -696,8 +722,10 @@ async function updateEspnScoresForSport(sportSlug) {
   let espnEvents;
   try {
     espnEvents = await fetchEspnLiveScores(sportSlug);
+    recordEspnPoll(sportSlug, true);
   } catch (err) {
     console.error(`[espn-pipeline] ${sportSlug} fetch failed:`, err.message);
+    recordEspnPoll(sportSlug, false);
     return;
   }
 

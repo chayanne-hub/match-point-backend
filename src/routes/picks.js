@@ -2,6 +2,8 @@ const express = require('express');
 const db = require('../lib/db');
 const { requireAuth } = require('../lib/auth');
 const { fetchEspnNews } = require('../pipeline/fetchEspnNews');
+const { getHealthSnapshot } = require('../lib/healthStats');
+const { isAdminEmail } = require('./auth');
 
 const router = express.Router();
 
@@ -533,6 +535,20 @@ router.get('/archive/results', async (req, res) => {
       outcome: r.outcome,
     })),
   });
+});
+
+// GET /api/picks/admin/health — pipeline status at a glance: last
+// successful run per sport, ESPN poll error counts, analysis retry/
+// failure counts, recent errors. Gated behind requireAuth AND the same
+// admin email check the /auth/me bypass uses — this reveals internal
+// operational detail (error messages, run timing) that shouldn't be
+// public, even to a paying non-admin subscriber.
+router.get('/admin/health', requireAuth, async (req, res) => {
+  const user = await db.user.findUnique({ where: { id: req.userId } });
+  if (!user || !isAdminEmail(user.email)) {
+    return res.status(403).json({ error: 'Admin access required.' });
+  }
+  res.json(getHealthSnapshot());
 });
 
 module.exports = router;
