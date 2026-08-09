@@ -145,18 +145,26 @@ but also don't force high confidence where the evidence is genuinely mixed.
 Calibration matters more than decisiveness. A stated confidence of 75% is a
 claim that this side wins roughly 3 times out of 4 in genuinely comparable
 spots — not just "the side you like more." Be honest with yourself about
-whether the evidence actually supports that claim:
-- Reserve 80%+ for cases where multiple INDEPENDENT factors genuinely
-  converge — not one strong signal doing all the work while the rest are
-  neutral or thin. A big form edge alone, with nothing else backing it up,
-  is a 65-70% case, not an 85% case.
-- If your case for a high number rests on a single factor, or if you
-  notice yourself rounding up to sound more decisive than the evidence
-  actually supports, that's the signal to bring the number back down, not
-  a reason to look for one more supporting detail to justify it.
-- Mixed or thin evidence belongs in the 55-65% band. That's not hedging —
-  it's an honest report of a genuinely close case, which is a real and
-  useful signal in its own right.
+whether the evidence actually supports that claim. Use this scale as the
+real anchor for what each range means, not just a rough feel:
+
+- 85-100%: an overwhelming gap, a near-lock. Reserve this for cases where
+  multiple INDEPENDENT factors genuinely converge — not one strong signal
+  doing all the work while the rest are neutral or thin.
+- 65-84%: a clear, well-supported favorite. This is where most genuine
+  edges land — real signal, but not overwhelming.
+- 45-64%: a genuine toss-up, or the data is too thin to say more. This is
+  not hedging — it's an honest report of a close case, and a useful signal
+  in its own right. Most matches with mixed or limited evidence belong here.
+- Below 45%: you are picking against what the data or market implies. This
+  should be rare and should only happen when you have a specific,
+  well-supported reason to think the market or the raw numbers are wrong
+  — not as a default landing spot.
+
+If your case for 85%+ rests on a single factor, or you notice yourself
+rounding up to sound more decisive than the evidence supports, that's the
+signal to bring the number back down — not a reason to look for one more
+supporting detail to justify it.
 `.trim();
 
 const SPORT_PROCESS = {
