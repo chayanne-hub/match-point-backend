@@ -47,16 +47,12 @@ server.listen(PORT, () => {
 initLiveSocket(server);
 
 startScheduled();
-// startLiveScheduled() is intentionally NOT started. It ran Claude
-// reassessment (real API calls, with a real ongoing cost) for every live
-// match every few minutes for the match's whole duration — the single
-// biggest driver of daily API spend. Replaced with a scoreboard-only
-// approach: the free ESPN score poller (startEspnScheduled, below) keeps
-// live scores current, and the frontend shows those scores under "Live
-// Now" alongside the ORIGINAL pregame pick (confidence/rationale/factors,
-// paid for once, never re-analyzed). No live confidence number that
-// changes during the match anymore — a deliberate trade against cost,
-// not an oversight. Re-enable by uncommenting the line below if that
-// trade-off changes.
-// startLiveScheduled();
+// Re-enabled: live reassessment now runs, meaning confidence for a live
+// match will genuinely recalculate (and re-color) as the match unfolds
+// — real Claude API calls, every LIVE_PIPELINE_INTERVAL_MS (currently
+// 15 minutes, set in cron.js — down from the original 3-minute default
+// to keep cost more reasonable), for every live match, for its full
+// duration. This was disabled earlier specifically to cut this cost;
+// re-enabling it is a real, deliberate, ongoing spend, not free.
+startLiveScheduled();
 startEspnScheduled();
