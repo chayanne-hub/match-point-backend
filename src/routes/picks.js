@@ -1,6 +1,7 @@
 const express = require('express');
 const db = require('../lib/db');
 const { requireAuth } = require('../lib/auth');
+const { fetchEspnNews } = require('../pipeline/fetchEspnNews');
 
 const router = express.Router();
 
@@ -503,6 +504,24 @@ router.get('/archive/results', async (req, res) => {
       outcome: r.outcome,
     })),
   });
+});
+
+// GET /api/picks/news?sport=tennis — real ESPN headlines, public (not
+// proprietary model output, no reason to gate it). Fetched live on each
+// request rather than cached/persisted — news doesn't need model analysis
+// or a pipeline schedule, just a pass-through to a real source.
+router.get('/news', async (req, res) => {
+  const { sport } = req.query;
+  if (!sport) {
+    return res.status(400).json({ error: 'sport query param is required.' });
+  }
+  try {
+    const articles = await fetchEspnNews(sport);
+    res.json({ articles });
+  } catch (err) {
+    console.error('[picks] /news failed:', err.message);
+    res.status(502).json({ error: 'Could not fetch news right now.' });
+  }
 });
 
 module.exports = router;
