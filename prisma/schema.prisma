@@ -88,6 +88,7 @@ model Match {
   homeScore    Int?     // structured final/current score for competitorA — needed to
   awayScore    Int?     // compute recent-form factors once matches complete
   setScore     String?  // tennis only — set-by-set games score, e.g. "6-4, 3-2"
+  periodScores String?  // basketball/football — quarter-by-quarter score, e.g. "25-28, 20-21, 20-24, 22-25"
   closingOddsA Int?     // last odds seen for competitorA right as the match went live —
   closingOddsB Int?     // an approximation of the "closing line," used for CLV/ROI tracking
 

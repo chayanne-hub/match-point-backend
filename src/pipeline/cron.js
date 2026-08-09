@@ -715,6 +715,7 @@ async function updateEspnScoresForSport(sportSlug) {
         awayScore: event.awayScore,
         liveScore: `${event.homeScore} - ${event.awayScore}`,
         ...(event.setScore && { setScore: event.setScore }),
+        ...(event.periodScores && { periodScores: event.periodScores }),
         ...(event.period != null && { period: event.period }),
         ...(event.clockSeconds != null && { clockSeconds: event.clockSeconds }),
         // "Q{period} {clock}" only makes sense for quarter-based sports —

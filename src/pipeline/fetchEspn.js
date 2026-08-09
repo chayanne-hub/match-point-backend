@@ -133,12 +133,31 @@ function parseTeamCompetition(competition) {
   // the real source for its live status display.
   const statusDetail = competition.status?.type?.shortDetail || competition.status?.type?.detail || null;
 
+  // Per-period score breakdown (quarters for basketball/football, innings
+  // handled separately for baseball via its own inning-status field) —
+  // same linescores array tennis's parser already reads for sets, just
+  // never extracted here before. Built as a "25-28, 20-21, 20-24, 22-25"
+  // string, same format tennis's setScore already uses, so the same
+  // parsing helpers (parseSetScore-style) work on either.
+  const homeLines = home.linescores || [];
+  const awayLines = away.linescores || [];
+  const periodCount = Math.max(homeLines.length, awayLines.length);
+  const periodParts = [];
+  for (let i = 0; i < periodCount; i++) {
+    const h = homeLines[i]?.value;
+    const a = awayLines[i]?.value;
+    if (h === undefined || a === undefined) continue;
+    periodParts.push(`${h}-${a}`);
+  }
+  const periodScores = periodParts.length ? periodParts.join(', ') : null;
+
   return {
     competitorAName: home.team?.displayName || home.team?.shortDisplayName,
     competitorBName: away.team?.displayName || away.team?.shortDisplayName,
     completed: !!competition.status?.type?.completed,
     inProgress: competition.status?.type?.state === 'in',
     setScore: null,
+    periodScores,
     eventDate: competition.date,
     homeScore: home.score !== undefined ? Number(home.score) : null,
     awayScore: away.score !== undefined ? Number(away.score) : null,
