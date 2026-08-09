@@ -149,3 +149,20 @@ model Result {
   settledAt  DateTime @default(now())
   gradedFrom String?  // "espn" | "odds_api" — which score source triggered grading
 }
+
+// Fantasy start/sit advice — deliberately its own model, not shoehorned
+// into Pick. This isn't a bet with odds/a stake/a win-loss grade; it's
+// real research content tied to a player's specific matchup. Admin-only
+// while in development — see the on-demand endpoint in picks.js.
+model StartSitAdvice {
+  id         String   @id @default(uuid())
+  playerName String
+  team       String
+  opponent   String
+  sport      String   // "football" | "basketball" — the two sports fantasy advice realistically applies to
+  verdict    String   // "start" | "sit"
+  confidence Int
+  factsUsed  String   // JSON array of {label, tag, body} — same shape Pick.factsUsed already uses
+  rationale  String
+  createdAt  DateTime @default(now())
+}

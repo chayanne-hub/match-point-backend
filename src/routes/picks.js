@@ -5,6 +5,7 @@ const { fetchEspnNews } = require('../pipeline/fetchEspnNews');
 const { getHealthSnapshot } = require('../lib/healthStats');
 const { isAdminEmail } = require('./auth');
 const { fetchBasketballPlayerProps } = require('../pipeline/fetchPlayerProps');
+const { analyzeStartSit } = require('../pipeline/fantasyAnalyst');
 
 const router = express.Router();
 
@@ -581,6 +582,84 @@ router.get('/admin/player-props', requireAuth, async (req, res) => {
     matchup: `${match.competitorA} vs ${match.competitorB}`,
     league: match.league,
     props,
+  });
+});
+
+// POST /api/picks/admin/start-sit — real fantasy start/sit analysis,
+// admin-only, on-demand (this is a real Claude research call, same cost
+// shape as match analysis — not something to trigger automatically for
+// every player in a league). Body: { playerName, team, opponent, sport,
+// spread?, total?, injuryStatus? }. spread/total/injuryStatus are
+// optional real context — pass them when known, omit when not; the
+// analysis is honest about working with less context either way.
+router.post('/admin/start-sit', requireAuth, async (req, res) => {
+  const user = await db.user.findUnique({ where: { id: req.userId } });
+  if (!user || !isAdminEmail(user.email)) {
+    return res.status(403).json({ error: 'Admin access required.' });
+  }
+
+  const { playerName, team, opponent, sport, spread, total, injuryStatus } = req.body || {};
+  if (!playerName || !team || !opponent || !sport) {
+    return res.status(400).json({ error: 'playerName, team, opponent, and sport are required.' });
+  }
+
+  const result = await analyzeStartSit({ playerName, team, opponent, sport, spread, total, injuryStatus });
+  if (!result) {
+    return res.status(502).json({ error: 'Analysis failed — check server logs for the specific cause.' });
+  }
+
+  const saved = await db.startSitAdvice.create({
+    data: {
+      playerName,
+      team,
+      opponent,
+      sport,
+      verdict: result.verdict,
+      confidence: result.confidence,
+      rationale: result.analysis,
+      factsUsed: JSON.stringify(result.factors),
+    },
+  });
+
+  res.json({
+    id: saved.id,
+    playerName,
+    team,
+    opponent,
+    sport,
+    verdict: result.verdict,
+    confidence: result.confidence,
+    analysis: result.analysis,
+    factors: result.factors,
+  });
+});
+
+// GET /api/picks/admin/start-sit/recent — the last 20 saved start/sit
+// analyses, so the admin doesn't have to re-run one to see it again.
+router.get('/admin/start-sit/recent', requireAuth, async (req, res) => {
+  const user = await db.user.findUnique({ where: { id: req.userId } });
+  if (!user || !isAdminEmail(user.email)) {
+    return res.status(403).json({ error: 'Admin access required.' });
+  }
+
+  const recent = await db.startSitAdvice.findMany({
+    orderBy: { createdAt: 'desc' },
+    take: 20,
+  });
+
+  res.json({
+    advice: recent.map((a) => ({
+      id: a.id,
+      playerName: a.playerName,
+      team: a.team,
+      opponent: a.opponent,
+      sport: a.sport,
+      verdict: a.verdict,
+      confidence: a.confidence,
+      analysis: a.rationale,
+      factors: JSON.parse(a.factsUsed || '[]'),
+      createdAt: a.createdAt,
+    })),
   });
 });
 

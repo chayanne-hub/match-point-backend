@@ -921,4 +921,4 @@ ${jsonInstruction}
   }
 }
 
-module.exports = { analyzeMatch, reassessLiveMatch, reassessLiveTotal };
+module.exports = { analyzeMatch, reassessLiveMatch, reassessLiveTotal, parseClaudeJson, repairJsonViaClaude };
