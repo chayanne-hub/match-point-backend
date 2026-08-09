@@ -121,7 +121,8 @@ model Pick {
   matchId      String
   match        Match    @relation(fields: [matchId], references: [id])
   pickType     String
-  market       String   @default("moneyline") // "moneyline" | "spread" | "total"
+  market       String   @default("moneyline") // "moneyline" | "spread" | "total" | "player_points" | "player_rebounds" | "player_assists" | "player_pra" | "player_threes" | "player_blocks" | "player_steals" | "player_double_double"
+  playerName   String?  // set only for player_* markets — no separate Player table yet, this is intentionally the minimal version
   line         Float?   // the spread/total number this pick was made against —
                          // captured at creation time since the market line can
                          // move before the match settles; null for moneyline

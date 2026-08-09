@@ -4,6 +4,7 @@ const { requireAuth } = require('../lib/auth');
 const { fetchEspnNews } = require('../pipeline/fetchEspnNews');
 const { getHealthSnapshot } = require('../lib/healthStats');
 const { isAdminEmail } = require('./auth');
+const { fetchBasketballPlayerProps } = require('../pipeline/fetchPlayerProps');
 
 const router = express.Router();
 
@@ -471,6 +472,7 @@ router.get('/:id', async (req, res) => {
 
   res.json({
     id: pick.id,
+    matchId: pick.matchId,
     sport: pick.match.sport.slug,
     league: pick.match.league,
     matchup: `${pick.match.competitorA} vs ${pick.match.competitorB}`,
@@ -549,6 +551,37 @@ router.get('/admin/health', requireAuth, async (req, res) => {
     return res.status(403).json({ error: 'Admin access required.' });
   }
   res.json(getHealthSnapshot());
+});
+
+// GET /api/picks/admin/player-props?matchId=X — real raw prop lines for
+// one basketball match, fetched on-demand (not automatically, not for
+// every match) given the per-event API cost. Admin-only, same reasoning
+// as /admin/health: this is a "coming soon" feature under real
+// construction, not something to expose to paying subscribers yet —
+// especially since there's no analysis or grading behind it at all,
+// just raw lines.
+router.get('/admin/player-props', requireAuth, async (req, res) => {
+  const user = await db.user.findUnique({ where: { id: req.userId } });
+  if (!user || !isAdminEmail(user.email)) {
+    return res.status(403).json({ error: 'Admin access required.' });
+  }
+
+  const { matchId } = req.query;
+  if (!matchId) {
+    return res.status(400).json({ error: 'matchId query param is required.' });
+  }
+
+  const match = await db.match.findUnique({ where: { id: matchId } });
+  if (!match) {
+    return res.status(404).json({ error: 'Match not found.' });
+  }
+
+  const props = await fetchBasketballPlayerProps(match);
+  res.json({
+    matchup: `${match.competitorA} vs ${match.competitorB}`,
+    league: match.league,
+    props,
+  });
 });
 
 module.exports = router;
