@@ -411,6 +411,32 @@ router.get('/matches-today', async (req, res) => {
   res.json({ matches: shaped });
 });
 
+// GET /api/picks/news?sport=tennis — real ESPN headlines, public (not
+// proprietary model output, no reason to gate it). Fetched live on each
+// request rather than cached/persisted — news doesn't need model analysis
+// or a pipeline schedule, just a pass-through to a real source.
+//
+// IMPORTANT: this must be registered before GET /:id below — Express
+// matches routes in registration order, and /news is a single path
+// segment just like :id, so whichever is registered first wins the
+// match. Registering it after /:id (a real bug this once had) meant
+// every request here got swallowed by the pick-lookup route instead,
+// returning "Pick not found" for a lookup on a pick literally named
+// "news" — a confusing error with nothing to do with the real cause.
+router.get('/news', async (req, res) => {
+  const { sport } = req.query;
+  if (!sport) {
+    return res.status(400).json({ error: 'sport query param is required.' });
+  }
+  try {
+    const articles = await fetchEspnNews(sport);
+    res.json({ articles });
+  } catch (err) {
+    console.error('[picks] /news failed:', err.message);
+    res.status(502).json({ error: 'Could not fetch news right now.' });
+  }
+});
+
 // GET /api/picks/:id — full detail, requires purchase or active subscription
 router.get('/:id', async (req, res) => {
   const pick = await db.pick.findUnique({
@@ -504,24 +530,6 @@ router.get('/archive/results', async (req, res) => {
       outcome: r.outcome,
     })),
   });
-});
-
-// GET /api/picks/news?sport=tennis — real ESPN headlines, public (not
-// proprietary model output, no reason to gate it). Fetched live on each
-// request rather than cached/persisted — news doesn't need model analysis
-// or a pipeline schedule, just a pass-through to a real source.
-router.get('/news', async (req, res) => {
-  const { sport } = req.query;
-  if (!sport) {
-    return res.status(400).json({ error: 'sport query param is required.' });
-  }
-  try {
-    const articles = await fetchEspnNews(sport);
-    res.json({ articles });
-  } catch (err) {
-    console.error('[picks] /news failed:', err.message);
-    res.status(502).json({ error: 'Could not fetch news right now.' });
-  }
 });
 
 module.exports = router;
