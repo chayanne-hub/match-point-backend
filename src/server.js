@@ -1,12 +1,14 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const http = require('http');
 
 const authRoutes = require('./routes/auth');
 const checkoutRoutes = require('./routes/checkout');
 const webhookRoutes = require('./routes/webhooks');
 const picksRoutes = require('./routes/picks');
 const { startScheduled, startLiveScheduled, startEspnScheduled } = require('./pipeline/cron');
+const { initLiveSocket } = require('./lib/liveSocket');
 
 const app = express();
 
@@ -30,9 +32,19 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 4000;
-app.listen(PORT, () => {
+
+// Explicit http.createServer(app) instead of app.listen() directly —
+// app.listen() creates its own internal HTTP server that isn't exposed
+// anywhere, so there'd be no server instance to attach the WebSocket
+// server to. This is the same underlying server either way, just a
+// reference to it we can actually use.
+const server = http.createServer(app);
+
+server.listen(PORT, () => {
   console.log(`Match Point backend listening on port ${PORT}`);
 });
+
+initLiveSocket(server);
 
 startScheduled();
 // startLiveScheduled() is intentionally NOT started. It ran Claude

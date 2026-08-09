@@ -14,6 +14,7 @@
 require('dotenv').config();
 const cron = require('node-cron');
 const db = require('../lib/db');
+const { broadcastScoreUpdate } = require('../lib/liveSocket');
 const { fetchMatches, fetchScores } = require('./fetchMatches');
 const { fetchEspnLiveScores, matchEspnEvent } = require('./fetchEspn');
 const { analyzeMatch, reassessLiveMatch, reassessLiveTotal } = require('./matchAnalyst');
@@ -734,6 +735,26 @@ async function updateEspnScoresForSport(sportSlug) {
         ...(sportSlug === 'baseball' && event.statusDetail && { liveClock: event.statusDetail }),
       },
     });
+
+    // Push to any connected WebSocket clients — but only if something
+    // actually changed. ESPN gets polled every 15s regardless of whether
+    // the score moved; broadcasting unconditionally would flood clients
+    // with no-op messages every cycle for every match, live or not.
+    const liveScoreStr = `${event.homeScore} - ${event.awayScore}`;
+    const somethingChanged = match.status !== newStatus || match.liveScore !== liveScoreStr;
+    if (somethingChanged) {
+      broadcastScoreUpdate({
+        matchId: match.id,
+        sport: sportSlug,
+        matchup: `${match.competitorA} vs ${match.competitorB}`,
+        matchStatus: newStatus,
+        liveScore: liveScoreStr,
+        liveClock: event.statusDetail || event.displayClock || null,
+        period: event.period ?? null,
+        setScore: event.setScore || null,
+        periodScores: event.periodScores || null,
+      });
+    }
 
     // NOTE: no longer flagging the match's pre-match picks as isLive here
     // — see the matching note in updateLiveScores(). The dedicated
