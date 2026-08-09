@@ -5,6 +5,21 @@ const { signToken, requireAuth } = require('../lib/auth');
 
 const router = express.Router();
 
+// Admin bypass — accounts on this list get treated as having a real
+// active subscription everywhere the frontend checks plan status
+// (hero CTA, account rail) without needing an actual Coinbase Commerce
+// payment on file. Set via Railway env var, comma-separated, so this
+// never requires a schema change or a manual database edit to grant or
+// revoke — just update the env var and redeploy.
+const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || '')
+  .split(',')
+  .map((e) => e.trim().toLowerCase())
+  .filter(Boolean);
+
+function isAdminEmail(email) {
+  return ADMIN_EMAILS.includes((email || '').toLowerCase());
+}
+
 // POST /auth/signup  { email, password, username }
 // username is shown publicly (nav, anywhere the account is referenced) —
 // email is never shown on-screen, specifically so streamers/on-screen
@@ -73,17 +88,30 @@ router.get('/me', requireAuth, async (req, res) => {
   });
   if (!user) return res.status(404).json({ error: 'User not found.' });
 
+  // Admin bypass: synthesize a real-shaped "active" subscription instead
+  // of whatever's actually on file (or nothing at all). currentPeriodEnd
+  // is set 100 years out rather than something like "forever" as a
+  // string, so any code doing real date math on it (renewal countdowns,
+  // etc.) doesn't break on an unexpected type.
+  const subscriptionPayload = isAdminEmail(user.email)
+    ? {
+        plan: 'admin_access',
+        status: 'active',
+        currentPeriodEnd: new Date(Date.now() + 100 * 365 * 24 * 60 * 60 * 1000),
+      }
+    : user.subscription
+    ? {
+        plan: user.subscription.plan,
+        status: user.subscription.status,
+        currentPeriodEnd: user.subscription.currentPeriodEnd,
+      }
+    : null;
+
   res.json({
     id: user.id,
     username: user.username,
     createdAt: user.createdAt,
-    subscription: user.subscription
-      ? {
-          plan: user.subscription.plan,
-          status: user.subscription.status,
-          currentPeriodEnd: user.subscription.currentPeriodEnd,
-        }
-      : null,
+    subscription: subscriptionPayload,
   });
 });
 
