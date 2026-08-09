@@ -157,6 +157,7 @@ router.get('/today', async (req, res) => {
         // 'scheduled' | 'live' | 'final'; the rest are only meaningful
         // once live, and null otherwise.
         matchStatus: p.match.status,
+        analyzedAt: p.createdAt, // when the model actually ran on this match — confidence is frozen from this moment on
         liveScore: p.match.liveScore,
         setScore: p.match.setScore, // tennis only — "6-4, 3-6, 2-1" style, for the real set-by-set display
         periodScores: p.match.periodScores, // basketball/football — "25-28, 20-21, 20-24, 22-25" style
@@ -476,6 +477,7 @@ router.get('/:id', async (req, res) => {
     startTime: pick.match.startTime,
     surface: pick.match.surface,
     matchStatus: pick.match.status,
+    analyzedAt: pick.createdAt,
     homeScore: pick.match.homeScore,
     awayScore: pick.match.awayScore,
     setScore: pick.match.setScore, // tennis only
