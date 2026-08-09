@@ -425,6 +425,26 @@ function startScheduled() {
 }
 
 /**
+ * Manual trigger for an admin "Run Pipeline Now" button — real use case
+ * is recovering after a balance-ran-out window instead of waiting up to
+ * 15 minutes for the next scheduled cycle. Shares the SAME isRunning
+ * guard as the scheduled runs, so a manual trigger can never stack on
+ * top of one already in progress (scheduled or manual) — it just
+ * returns { started: false } if something's already running, rather
+ * than kicking off a second overlapping run.
+ */
+async function triggerManualRun() {
+  if (isRunning) {
+    return { started: false, reason: 'A pipeline run is already in progress.' };
+  }
+  isRunning = true;
+  runAll()
+    .catch((err) => console.error('[pipeline] manually-triggered run failed:', err))
+    .finally(() => { isRunning = false; });
+  return { started: true };
+}
+
+/**
  * Fast loop: re-scores picks for matches that are currently live.
  * Runs far more often than the main pipeline so the live picks board's
  * confidence numbers actually move as the market re-prices the match
@@ -929,4 +949,4 @@ function startEspnScheduled() {
   console.log('[espn-pipeline] scheduled to run every 15 seconds.');
 }
 
-module.exports = { runAll, startScheduled, startLiveScheduled, startEspnScheduled };
+module.exports = { runAll, startScheduled, startLiveScheduled, startEspnScheduled, triggerManualRun };

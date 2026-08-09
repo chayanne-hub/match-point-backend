@@ -6,6 +6,7 @@ const { getHealthSnapshot } = require('../lib/healthStats');
 const { isAdminEmail } = require('./auth');
 const { fetchBasketballPlayerProps } = require('../pipeline/fetchPlayerProps');
 const { analyzeStartSit } = require('../pipeline/fantasyAnalyst');
+const { triggerManualRun } = require('../pipeline/cron');
 
 const router = express.Router();
 
@@ -661,6 +662,24 @@ router.get('/admin/start-sit/recent', requireAuth, async (req, res) => {
       createdAt: a.createdAt,
     })),
   });
+});
+
+// POST /api/picks/admin/run-pipeline — manually trigger the pregame
+// pipeline right now instead of waiting up to 15 minutes for the next
+// scheduled cycle. Real use case: recovering after a period where
+// Anthropic balance hit zero and matches got silently skipped. Fires
+// the run and returns immediately (a full 5-sport cycle with real
+// analysis calls can take several minutes) rather than holding the
+// request open — check the Health tab a bit after to see whether
+// matches actually got processed.
+router.post('/admin/run-pipeline', requireAuth, async (req, res) => {
+  const user = await db.user.findUnique({ where: { id: req.userId } });
+  if (!user || !isAdminEmail(user.email)) {
+    return res.status(403).json({ error: 'Admin access required.' });
+  }
+
+  const result = await triggerManualRun();
+  res.json(result);
 });
 
 module.exports = router;
