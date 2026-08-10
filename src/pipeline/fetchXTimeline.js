@@ -54,10 +54,24 @@ async function fetchFromSyndication(handle) {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
     },
   });
+
+  // Read as text FIRST, not res.json() directly — an unofficial endpoint
+  // can return HTML, an empty body, or a redirect page instead of JSON,
+  // and res.json() on any of those just throws an unhelpful "Unexpected
+  // end of JSON input" with zero information about what actually came
+  // back. Logging the real status + a body snippet here is the only way
+  // to diagnose a shape mismatch on an endpoint neither of us can
+  // directly test outside of production.
+  const bodyText = await res.text();
   if (!res.ok) {
-    throw new Error(`syndication endpoint returned ${res.status} for @${handle}`);
+    throw new Error(`syndication endpoint returned ${res.status} for @${handle}. Body: ${bodyText.slice(0, 300)}`);
   }
-  const data = await res.json();
+  let data;
+  try {
+    data = JSON.parse(bodyText);
+  } catch (parseErr) {
+    throw new Error(`syndication endpoint returned non-JSON for @${handle} (status ${res.status}). First 300 chars: ${bodyText.slice(0, 300)}`);
+  }
 
   // Response shape is NOT officially documented and has changed before
   // — defensive parsing throughout, optional-chaining every field, so
