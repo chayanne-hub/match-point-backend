@@ -16,6 +16,7 @@ const stats = {
   analysisRetries: 0,   // how many times analyzeMatchWithRetry's retry path fired
   analysisFailures: 0,  // how many times BOTH attempts failed (real, unrecovered loss)
   recentErrors: [],     // last 20 errors across the whole pipeline, newest first
+  liveCycle: { lastStartedAt: null, lastCompletedAt: null, lastDurationMs: null, matchesReassessed: 0, overlapSkips: 0 },
 };
 
 function recordPregameRun(sport, matchesProcessed) {
@@ -33,6 +34,28 @@ function recordEspnPoll(sport, success) {
     lastSuccessAt: success ? new Date() : existing.lastSuccessAt,
     errorCount: success ? existing.errorCount : existing.errorCount + 1,
   };
+}
+
+function recordLiveCycleStart() {
+  stats.liveCycle.lastStartedAt = new Date();
+}
+
+function recordLiveCycleComplete(matchesReassessed) {
+  const now = new Date();
+  stats.liveCycle.lastCompletedAt = now;
+  stats.liveCycle.lastDurationMs = stats.liveCycle.lastStartedAt ? now.getTime() - stats.liveCycle.lastStartedAt.getTime() : null;
+  stats.liveCycle.matchesReassessed = matchesReassessed;
+}
+
+// This is the real signal to watch — if this count is climbing, the
+// live-reassessment cycle is genuinely taking longer than its own
+// interval to finish (a busy live slate processed too slowly), which is
+// the exact condition that used to cause overlapping/duplicate paid
+// calls before the overlap guard existed. A rising count here means the
+// guard is doing its job, but also that the interval or the processing
+// approach may need real reconsideration, not just "the guard caught it."
+function recordLiveOverlapSkip() {
+  stats.liveCycle.overlapSkips++;
 }
 
 function recordAnalysisRetry() {
@@ -58,7 +81,8 @@ function getHealthSnapshot() {
     analysisRetries: stats.analysisRetries,
     analysisFailures: stats.analysisFailures,
     recentErrors: stats.recentErrors,
+    liveCycle: stats.liveCycle,
   };
 }
 
-module.exports = { recordPregameRun, recordEspnPoll, recordAnalysisRetry, recordAnalysisFailure, recordError, getHealthSnapshot };
+module.exports = { recordPregameRun, recordEspnPoll, recordAnalysisRetry, recordAnalysisFailure, recordError, recordLiveCycleStart, recordLiveCycleComplete, recordLiveOverlapSkip, getHealthSnapshot };

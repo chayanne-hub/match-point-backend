@@ -15,7 +15,7 @@ require('dotenv').config();
 const cron = require('node-cron');
 const db = require('../lib/db');
 const { broadcastScoreUpdate } = require('../lib/liveSocket');
-const { recordPregameRun, recordEspnPoll, recordAnalysisRetry, recordAnalysisFailure } = require('../lib/healthStats');
+const { recordPregameRun, recordEspnPoll, recordAnalysisRetry, recordAnalysisFailure, recordLiveCycleStart, recordLiveCycleComplete, recordLiveOverlapSkip } = require('../lib/healthStats');
 
 /**
  * Wraps analyzeMatch() with exactly ONE full retry if the first attempt
@@ -566,7 +566,7 @@ async function updateLivePicksForSport(sportSlug) {
     matches = await fetchMatches(sportSlug);
   } catch (err) {
     console.error(`[live-pipeline] ${sportSlug} fetch failed:`, err.message);
-    return;
+    return 0;
   }
 
   // Continuously track the most recent pre-match odds for matches that
@@ -587,7 +587,7 @@ async function updateLivePicksForSport(sportSlug) {
   }
 
   const liveMatches = matches.filter(m => m.status === 'in_progress' || m.status === 'live');
-  if (liveMatches.length === 0) return;
+  if (liveMatches.length === 0) return 0;
 
   for (const m of liveMatches) {
     const match = await db.match.findUnique({ where: { externalId: m.externalId } });
@@ -795,12 +795,16 @@ async function updateLivePicksForSport(sportSlug) {
   }
 
   console.log(`[live-pipeline] ${sportSlug}: refreshed ${liveMatches.length} live match(es).`);
+  return liveMatches.length;
 }
 
 async function updateLivePicks() {
+  recordLiveCycleStart();
+  let totalReassessed = 0;
   for (const sport of SPORTS) {
-    await updateLivePicksForSport(sport);
+    totalReassessed += (await updateLivePicksForSport(sport)) || 0;
   }
+  recordLiveCycleComplete(totalReassessed);
 }
 
 /**
@@ -816,10 +820,29 @@ async function updateLivePicks() {
  * to a visitor while cutting API usage by roughly 4x. Tune via
  * LIVE_PIPELINE_INTERVAL_MS if you want a different tradeoff.
  */
+// Same class of bug as the main pipeline's overlap guard, just never
+// applied here. A busy live slate (e.g. 26+ simultaneous live tennis
+// matches during a tournament) processed strictly sequentially at up to
+// ~45s each can genuinely take longer than the 15-minute interval to
+// finish one cycle — meaning the next scheduled run fires while the
+// previous one is still grinding through the match list, and without
+// this guard, they'd stack: every stacked run reassesses the SAME live
+// matches redundantly, real duplicate paid calls, with no relationship
+// to backlog/reload timing at all.
+let liveIsRunning = false;
+
 function startLiveScheduled() {
   const intervalMs = Number(process.env.LIVE_PIPELINE_INTERVAL_MS) || 900000; // 15 minutes — cost-conscious default pre-revenue; drop LIVE_PIPELINE_INTERVAL_MS lower once picks are actually selling
   setInterval(() => {
-    updateLivePicks().catch(err => console.error('[live-pipeline] run failed:', err));
+    if (liveIsRunning) {
+      console.warn('[live-pipeline] previous run still in progress — skipping this cycle to avoid stacking on the same live matches.');
+      recordLiveOverlapSkip();
+      return;
+    }
+    liveIsRunning = true;
+    updateLivePicks()
+      .catch(err => console.error('[live-pipeline] run failed:', err))
+      .finally(() => { liveIsRunning = false; });
   }, intervalMs);
   console.log(`[live-pipeline] scheduled to run every ${Math.round(intervalMs / 1000)} seconds.`);
 }
