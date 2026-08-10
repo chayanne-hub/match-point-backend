@@ -2,6 +2,7 @@ const express = require('express');
 const db = require('../lib/db');
 const { requireAuth } = require('../lib/auth');
 const { fetchEspnNews } = require('../pipeline/fetchEspnNews');
+const { getRecentPosts } = require('../pipeline/fetchXTimeline');
 const { getHealthSnapshot } = require('../lib/healthStats');
 const { isAdminEmail } = require('./auth');
 const { fetchBasketballPlayerProps } = require('../pipeline/fetchPlayerProps');
@@ -615,6 +616,36 @@ router.get('/insiders', async (req, res) => {
     res.json(grouped);
   } catch (err) {
     console.error('[insiders] GET /insiders failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/picks/insiders/feed?sport=tennis — server-cached recent posts
+// per curated account, replacing the client-side X embed widget. Only
+// this backend's single IP ever calls X directly (via fetchXTimeline.js,
+// cached 20 min per handle) — visitors' browsers never talk to X at
+// all anymore, so they can never be individually rate-limited by it,
+// which is exactly what kept happening with the client-side widget
+// approach under real repeated testing.
+router.get('/insiders/feed', async (req, res) => {
+  try {
+    const { sport } = req.query;
+    if (!sport || !INSIDER_SPORTS.includes(sport)) {
+      return res.status(400).json({ error: 'valid sport query param is required.' });
+    }
+    const rows = await db.insiderAccount.findMany({
+      where: { sport },
+      orderBy: { order: 'asc' },
+    });
+    const accounts = await Promise.all(
+      rows.map(async (r) => {
+        const { posts, stale } = await getRecentPosts(r.handle);
+        return { handle: r.handle, posts, stale };
+      })
+    );
+    res.json({ accounts });
+  } catch (err) {
+    console.error('[insiders] GET /insiders/feed failed:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
