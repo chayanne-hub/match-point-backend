@@ -555,6 +555,49 @@ router.get('/admin/health', requireAuth, async (req, res) => {
   res.json(getHealthSnapshot());
 });
 
+// GET /api/picks/admin/pending — real matches that exist (already
+// fetched/upserted by the pipeline) but don't have a real pick yet.
+// Deliberately NOT a fake "pending" Pick row — that would risk leaking
+// into stats/grading logic if a filter was ever missed somewhere. This
+// is a genuinely separate, read-only view straight off Match, showing
+// exactly what's waiting or stuck (including the real cross-cycle
+// failure count) without touching the pick system at all.
+router.get('/admin/pending', requireAuth, async (req, res) => {
+  const user = await db.user.findUnique({ where: { id: req.userId } });
+  if (!user || !isAdminEmail(user.email)) {
+    return res.status(403).json({ error: 'Admin access required.' });
+  }
+
+  const { startOfDay, endOfDay } = getTimezoneDayBounds('America/Los_Angeles');
+  const matches = await db.match.findMany({
+    where: {
+      startTime: { gte: startOfDay, lt: endOfDay },
+      status: { in: ['scheduled', 'live'] },
+      skipAnalysis: false,
+    },
+    include: {
+      sport: true,
+      picks: { where: { pickType: { in: ['model', 'winner'] } }, take: 1 },
+    },
+    orderBy: { startTime: 'asc' },
+  });
+
+  const pending = matches
+    .filter((m) => m.picks.length === 0)
+    .map((m) => ({
+      id: m.id,
+      sport: m.sport.slug,
+      matchup: `${m.competitorA} vs ${m.competitorB}`,
+      league: m.league,
+      startTime: m.startTime,
+      status: m.status,
+      hasOdds: m.oddsA !== null && m.oddsB !== null,
+      analysisFailCycles: m.analysisFailCycles,
+    }));
+
+  res.json({ pending });
+});
+
 // GET /api/picks/admin/player-props?matchId=X — real raw prop lines for
 // one basketball match, fetched on-demand (not automatically, not for
 // every match) given the per-event API cost. Admin-only, same reasoning
