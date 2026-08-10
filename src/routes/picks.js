@@ -170,9 +170,65 @@ router.get('/today', async (req, res) => {
         clockSeconds: p.match.clockSeconds,
         liveClock: p.match.liveClock,
         unlocked,
+        hasPick: true,
       };
     })
   );
+
+  // Real matches that exist (already fetched/upserted by the pipeline —
+  // free ESPN/odds-provider data) but don't have a pick yet. Shown as
+  // genuinely free "upcoming" entries rather than leaving the board
+  // looking empty while analysis is still pending — costs nothing extra
+  // to expose, since this data was already being fetched regardless.
+  // Explicitly no pick-specific fields (confidence/selection/rationale/
+  // odds) since none exist yet; hasPick:false tells the frontend to
+  // render these as a plain schedule entry, not a pick card.
+  if (!markets || markets !== 'all') {
+    const pickedMatchIds = new Set(picks.map((p) => p.matchId));
+    const allMatchesToday = await db.match.findMany({
+      where: {
+        startTime: { gte: startOfDay, lte: endOfDay },
+        status: { in: ['scheduled', 'live'] },
+        skipAnalysis: false,
+        ...(sport ? { sport: { slug: sport } } : {}),
+      },
+      include: { sport: true },
+    });
+    const unanalyzed = allMatchesToday
+      .filter((m) => !pickedMatchIds.has(m.id))
+      .map((m) => ({
+        id: m.id,
+        sport: m.sport.slug,
+        league: m.league,
+        matchup: `${m.competitorA} vs ${m.competitorB}`,
+        startTime: m.startTime,
+        pickType: 'pending',
+        market: 'moneyline',
+        line: null,
+        price: null,
+        selection: null,
+        confidence: null,
+        rationale: null,
+        odds: null,
+        spread: m.spread,
+        spreadOddsA: m.spreadOddsA,
+        spreadOddsB: m.spreadOddsB,
+        total: m.total,
+        overOdds: m.overOdds,
+        underOdds: m.underOdds,
+        matchStatus: m.status,
+        analyzedAt: null,
+        liveScore: m.liveScore,
+        setScore: m.setScore,
+        periodScores: m.periodScores,
+        period: m.period,
+        clockSeconds: m.clockSeconds,
+        liveClock: m.liveClock,
+        unlocked: false,
+        hasPick: false,
+      }));
+    shaped.push(...unanalyzed);
+  }
 
   res.json({ picks: shaped });
 });
