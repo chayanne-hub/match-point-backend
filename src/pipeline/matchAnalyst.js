@@ -165,6 +165,17 @@ If your case for 85%+ rests on a single factor, or you notice yourself
 rounding up to sound more decisive than the evidence supports, that's the
 signal to bring the number back down — not a reason to look for one more
 supporting detail to justify it.
+
+Research efficiently — aim for roughly 3-5 searches total, not one
+exhaustive search per item in the checklist below. Some of what's asked
+for (e.g. bullpen usage over the last several days, pitcher platoon
+splits) is genuinely harder to find via search than other things (e.g.
+injury reports, rankings) — if a specific data point isn't turning up
+after a reasonable search or two, note that as a real limitation in your
+analysis and move on, rather than continuing to search for it. A
+timely, honest answer that says "couldn't confirm bullpen usage, so this
+factor carries less weight" is far more useful than a slow one that
+never finishes.
 `.trim();
 
 const SPORT_PROCESS = {
