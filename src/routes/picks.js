@@ -147,9 +147,15 @@ router.get('/today', async (req, res) => {
   const shaped = [];
   for (const m of matches) {
     if (m.picks.length > 0) {
-      for (const p of m.picks) {
-        shaped.push(await shapePick({ ...p, match: m }, userId));
-      }
+      // One representative pick per match, not every tier — 'winner' and
+      // 'model' are two deliberate product tiers on the SAME underlying
+      // analysis (every match gets a 'winner' pick; confident ones also
+      // get a 'model' pick), not duplicates. Showing both here would
+      // display every analyzed match twice. Prefer 'model' when it
+      // exists (the more complete product), same fallback pattern
+      // already used elsewhere in this file.
+      const p = m.picks.find((pk) => pk.pickType === 'model') || m.picks[0];
+      shaped.push(await shapePick({ ...p, match: m }, userId));
     } else {
       shaped.push(shapeUnanalyzedMatch(m));
     }
