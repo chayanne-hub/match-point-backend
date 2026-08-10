@@ -140,8 +140,16 @@ async function fetchScores(sport) {
       continue;
     }
     const data = await response.json();
+    const cutoff = Date.now() + MAX_DAYS_AHEAD * 24 * 60 * 60 * 1000;
+    // Same real issue as fetchMatches() had: daysFrom only bounds how far
+    // back this looks for recently-finished games, not how far forward
+    // the schedule extends in the same response — a sport with no games
+    // in the near future can still return its whole remaining schedule
+    // here. Filter out anything more than MAX_DAYS_AHEAD out; nothing
+    // that far away needs a score check anyway.
+    const filtered = data.filter((g) => !g.commence_time || new Date(g.commence_time).getTime() <= cutoff);
     combined = combined.concat(
-      data.map((g) => ({
+      filtered.map((g) => ({
         externalId: g.id,
         completed: !!g.completed,
         homeTeam: g.home_team,
