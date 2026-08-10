@@ -101,11 +101,7 @@ async function fetchFromProvider(sport) {
   let combined = [];
 
   for (const sportKey of sportKeys) {
-    // markets=h2h,spreads,totals in one request — The Odds API bills this
-    // as a single call regardless of how many markets are requested
-    // together, so this costs nothing extra over the moneyline-only call
-    // that was here before.
-    const url = `${baseUrl}/sports/${sportKey}/odds?apiKey=${apiKey}&regions=us&markets=h2h,spreads,totals&oddsFormat=american&bookmakers=betmgm`;
+    const url = `${baseUrl}/sports/${sportKey}/odds?apiKey=${apiKey}&regions=us&markets=h2h&oddsFormat=american&bookmakers=betmgm`;
     const response = await fetch(url);
     if (!response.ok) {
       // Log and skip this one key rather than failing the whole sport —
@@ -186,40 +182,6 @@ function normalizeMatch(sport, raw) {
     oddsB = null;
   }
 
-  // Spread and totals — same bookmaker object, different market keys.
-  // "point" is the line itself (e.g. -3.5 for a spread, 218.5 for a
-  // total); "price" is the American odds to bet that side at that line.
-  // Not fatal if either market is missing (e.g. a book hasn't posted a
-  // spread yet) — those fields just stay null, same "don't fabricate a
-  // number" rule as everywhere else in this pipeline.
-  const spreadMarket = bookOdds?.markets?.find((m) => m.key === 'spreads');
-  const spreadOutcomes = spreadMarket?.outcomes || [];
-  const spreadHome = spreadOutcomes.find((o) => o.name === raw.home_team);
-  const spreadAway = spreadOutcomes.find((o) => o.name === raw.away_team);
-  let spread = spreadHome?.point ?? null;
-  let spreadOddsA = spreadHome?.price ?? null;
-  let spreadOddsB = spreadAway?.price ?? null;
-  if ((spreadOddsA !== null && !isPlausibleOdds(spreadOddsA)) || (spreadOddsB !== null && !isPlausibleOdds(spreadOddsB))) {
-    console.warn(`[fetchMatches] rejecting implausible spread odds for ${raw.home_team} vs ${raw.away_team}: ${spreadOddsA} / ${spreadOddsB}`);
-    spread = null;
-    spreadOddsA = null;
-    spreadOddsB = null;
-  }
-
-  const totalsMarket = bookOdds?.markets?.find((m) => m.key === 'totals');
-  const totalsOutcomes = totalsMarket?.outcomes || [];
-  const overOutcome = totalsOutcomes.find((o) => o.name === 'Over');
-  const underOutcome = totalsOutcomes.find((o) => o.name === 'Under');
-  let total = overOutcome?.point ?? underOutcome?.point ?? null;
-  let overOdds = overOutcome?.price ?? null;
-  let underOdds = underOutcome?.price ?? null;
-  if ((overOdds !== null && !isPlausibleOdds(overOdds)) || (underOdds !== null && !isPlausibleOdds(underOdds))) {
-    console.warn(`[fetchMatches] rejecting implausible total odds for ${raw.home_team} vs ${raw.away_team}: ${overOdds} / ${underOdds}`);
-    total = null;
-    overOdds = null;
-    underOdds = null;
-  }
-
   return {
     externalId: raw.id,
     sport,
@@ -229,12 +191,6 @@ function normalizeMatch(sport, raw) {
     startTime: new Date(raw.commence_time),
     oddsA,
     oddsB,
-    spread,
-    spreadOddsA,
-    spreadOddsB,
-    total,
-    overOdds,
-    underOdds,
     status: new Date(raw.commence_time) <= new Date() ? 'live' : 'scheduled',
   };
 }
@@ -243,9 +199,29 @@ function normalizeMatch(sport, raw) {
  * Public entry point: fetch + normalize today's matches for one sport.
  * Returns an array ready to be scored by scoreModel.js and written to the DB.
  */
+
+// Real fix for a confirmed issue: football's odds API endpoint returns
+// the ENTIRE season's schedule (all ~272 NFL games) with no built-in
+// near-term filtering, most of which are weeks or months out and don't
+// have odds posted yet — sportsbooks don't price a game that far in
+// advance. Those get skipped safely before any real analysis cost is
+// incurred (confirmed via real logs — zero football-specific
+// match-analyst calls resulted), so this was never actually costing
+// money, but it's genuine unnecessary overhead every single 15-minute
+// cycle: creating/updating hundreds of DB rows and checking scores for
+// games that can't possibly be relevant yet. Bounded to 14 days out,
+// generous enough to never cut off anything actually useful for any
+// sport, tight enough to eliminate the season-dump problem.
+const MAX_DAYS_AHEAD = 14;
+
 async function fetchMatches(sport) {
   const raw = await fetchFromProvider(sport);
-  return raw.map((m) => normalizeMatch(sport, m));
+  const cutoff = Date.now() + MAX_DAYS_AHEAD * 24 * 60 * 60 * 1000;
+  const filtered = raw.filter((m) => new Date(m.commence_time).getTime() <= cutoff);
+  if (filtered.length < raw.length) {
+    console.log(`[fetchMatches] ${sport}: filtered ${raw.length} → ${filtered.length} matches within the next ${MAX_DAYS_AHEAD} days.`);
+  }
+  return filtered.map((m) => normalizeMatch(sport, m));
 }
 
 module.exports = { fetchMatches, fetchScores };
