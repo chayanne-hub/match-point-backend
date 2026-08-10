@@ -60,7 +60,14 @@ async function fetchBasketballPlayerProps(match) {
   const apiKey = process.env.ODDS_API_KEY;
   const baseUrl = process.env.ODDS_API_BASE_URL || 'https://api.the-odds-api.com/v4';
   const marketsParam = BASKETBALL_PROP_MARKETS.join(',');
-  const url = `${baseUrl}/sports/${sportKey}/events/${match.externalId}/odds?apiKey=${apiKey}&regions=us&markets=${marketsParam}&oddsFormat=american&bookmakers=betmgm`;
+  // Real fix: this used to hard-restrict to bookmakers=betmgm specifically.
+  // If The Odds API's aggregated coverage of BetMGM has ANY gap for a
+  // given match (even though BetMGM's own site has the props — confirmed
+  // happening for a real WNBA match), that restriction meant getting
+  // nothing back at all, even when other books had the same props
+  // available. No longer restricting to one specific book — takes
+  // whichever bookmaker is actually present in the response.
+  const url = `${baseUrl}/sports/${sportKey}/events/${match.externalId}/odds?apiKey=${apiKey}&regions=us&markets=${marketsParam}&oddsFormat=american`;
 
   let res;
   try {
@@ -80,8 +87,21 @@ async function fetchBasketballPlayerProps(match) {
   }
 
   const data = await res.json();
-  const bookmaker = (data.bookmakers || [])[0]; // just betmgm, requested above
-  if (!bookmaker) return [];
+  // Real diagnostic logging — previously this silently returned [] with
+  // zero trace of WHY, which made a real bug (see above) look identical
+  // to genuinely "no props posted yet." Now the actual response shape
+  // gets logged whenever there's nothing usable, so this is diagnosable
+  // from Railway's logs instead of guessed at blind.
+  if (!data.bookmakers || data.bookmakers.length === 0) {
+    console.warn(`[player-props] ${match.competitorA} vs ${match.competitorB}: API returned zero bookmakers for this event. Full response: ${JSON.stringify(data).slice(0, 500)}`);
+    return [];
+  }
+  const bookmaker = data.bookmakers.find((b) => b.markets && b.markets.length > 0) || data.bookmakers[0];
+  if (!bookmaker || !bookmaker.markets || bookmaker.markets.length === 0) {
+    console.warn(`[player-props] ${match.competitorA} vs ${match.competitorB}: bookmaker(s) present (${data.bookmakers.map(b => b.key).join(', ')}) but none had usable markets.`);
+    return [];
+  }
+  console.log(`[player-props] ${match.competitorA} vs ${match.competitorB}: using bookmaker "${bookmaker.key}", ${bookmaker.markets.length} market(s).`);
 
   const results = [];
   for (const market of bookmaker.markets || []) {
