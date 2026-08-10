@@ -6,6 +6,7 @@ const { getHealthSnapshot } = require('../lib/healthStats');
 const { isAdminEmail } = require('./auth');
 const { fetchBasketballPlayerProps } = require('../pipeline/fetchPlayerProps');
 const { analyzePlayerProps } = require('../pipeline/propsAnalyst');
+const { fetchEspnLiveScores, matchEspnEvent } = require('../pipeline/fetchEspn');
 const { analyzeStartSit } = require('../pipeline/fantasyAnalyst');
 const { triggerManualRun, triggerManualRunTomorrow } = require('../pipeline/cron');
 
@@ -161,6 +162,49 @@ router.get('/today', async (req, res) => {
       shaped.push(shapeUnanalyzedMatch(m));
     }
   }
+
+  // EXPERIMENTAL — real test, not a permanent architecture change yet.
+  // Pulls ESPN's own schedule directly and surfaces any event that has
+  // NO corresponding Match row at all (not even an unanalyzed one) —
+  // this catches real gaps in the odds provider's coverage, like tennis
+  // doubles (which that provider doesn't seem to carry at all) or a
+  // specific singles match that provider simply never returned despite
+  // being real and priced on a real sportsbook (confirmed happening for
+  // at least one real match today). These entries have no odds and
+  // never will via the normal pipeline — reusing matchEspnEvent() here
+  // for the INVERSE of its normal purpose: finding ESPN events that
+  // DON'T match anything we already have, not events that do.
+  if (sport && !markets) {
+    try {
+      const espnEvents = await fetchEspnLiveScores(sport);
+      const alreadyKnown = matches; // same list already fetched above — both picked and unanalyzed matches
+      const espnOnly = espnEvents.filter((ev) => !matchEspnEvent(ev, alreadyKnown) && !ev.completed);
+      espnOnly.forEach((ev, i) => {
+        shaped.push({
+          id: `espn-only-${sport}-${i}-${new Date(ev.eventDate).getTime()}`,
+          sport,
+          league: 'ESPN Schedule', // real tournament/league name isn't available from this parsing path
+          matchup: `${ev.competitorAName} vs ${ev.competitorBName}`,
+          startTime: ev.eventDate,
+          pickType: 'pending',
+          market: 'moneyline',
+          line: null, price: null, selection: null, confidence: null, rationale: null, odds: null,
+          spread: null, spreadOddsA: null, spreadOddsB: null, total: null, overOdds: null, underOdds: null,
+          matchStatus: ev.inProgress ? 'live' : 'scheduled',
+          analyzedAt: null,
+          liveScore: null, setScore: ev.setScore || null, periodScores: null, period: null, clockSeconds: null, liveClock: null,
+          unlocked: false,
+          hasPick: false,
+          espnOnly: true, // real flag — no odds provider will ever price this via the normal pipeline; distinct from a normal "waiting on analysis" entry
+        });
+      });
+    } catch (err) {
+      console.error(`[today] ESPN supplemental fetch failed for ${sport}:`, err.message);
+      // Fails silently into just not adding supplemental entries — the
+      // normal picks/unanalyzed matches above are unaffected either way.
+    }
+  }
+
   shaped.sort((a, b) => (b.confidence || -1) - (a.confidence || -1));
 
   res.json({ picks: shaped });
