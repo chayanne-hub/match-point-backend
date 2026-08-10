@@ -63,14 +63,22 @@ function namesLikelyMatch(a, b) {
   return lastA === lastB && lastA.length > 2; // avoid matching on short/common words
 }
 
+// Real bug this replaced: comparing exact UTC calendar days meant any
+// evening match in the US (the majority of them — prime time games,
+// night matches) could fall on tomorrow's UTC date while still being
+// today locally. If ESPN and The Odds API reported the event time even
+// a few minutes apart near that UTC midnight boundary, the two sides
+// landed on different UTC days and never matched at all — meaning that
+// match's status could never update to 'live', leaving it stuck showing
+// as upcoming forever, well past its actual start time. A generous
+// absolute time window avoids the boundary entirely instead of trying
+// to get calendar-day comparison exactly right across two providers
+// that don't necessarily agree on timezone handling.
 function sameCalendarDay(dateA, dateB) {
-  const a = new Date(dateA);
-  const b = new Date(dateB);
-  return (
-    a.getUTCFullYear() === b.getUTCFullYear() &&
-    a.getUTCMonth() === b.getUTCMonth() &&
-    a.getUTCDate() === b.getUTCDate()
-  );
+  const a = new Date(dateA).getTime();
+  const b = new Date(dateB).getTime();
+  const HOURS_20 = 20 * 60 * 60 * 1000;
+  return Math.abs(a - b) < HOURS_20;
 }
 
 /**
