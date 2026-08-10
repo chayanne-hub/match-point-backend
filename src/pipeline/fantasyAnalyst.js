@@ -112,7 +112,7 @@ ${JSON_VALIDITY_REMINDER}
 `.trim();
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 90000);
+  const timeoutId = setTimeout(() => controller.abort(), 150000); // was 90s — see matchAnalyst.js for the real-log reasoning behind this change; same web-search-based research shape, same risk
 
   try {
     const res = await fetch('https://api.anthropic.com/v1/messages', {

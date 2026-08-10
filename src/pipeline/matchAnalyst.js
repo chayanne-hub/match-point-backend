@@ -445,10 +445,18 @@ ${JSON_VALIDITY_REMINDER}
   // Real research with web search can legitimately take a while, but a
   // single hung request must never be allowed to block the entire
   // sequential pipeline run indefinitely — every match after it would
-  // wait forever too. 90s is generous for a multi-search-round-trip
-  // research call while still guaranteeing forward progress.
+  // wait forever too. Was 90s; raised to 150s after real logs showed
+  // multiple baseball matches timing out on BOTH the first attempt and
+  // the retry, back to back — meaning 90s was cutting off requests that
+  // may well have finished successfully given a bit more room, and
+  // failing twice wastes strictly MORE real spend for zero output than
+  // one longer, successful call would have cost. Concurrency is still
+  // capped globally (see MAX_CONCURRENT_ANALYSIS in cron.js), so a
+  // slower match holding its slot longer doesn't risk the kind of
+  // pile-up that caused problems before — it's a genuinely safer trade
+  // now than it would have been without that cap in place.
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 90000);
+  const timeoutId = setTimeout(() => controller.abort(), 150000);
 
   try {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
