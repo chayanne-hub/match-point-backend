@@ -52,6 +52,9 @@ async function fetchFromSyndication(handle) {
       // and some unofficial endpoints reject requests that look like
       // bare server-to-server calls with no UA at all.
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+      'Accept': 'application/json',
+      'Referer': 'https://twitter.com/',
+      'Origin': 'https://twitter.com',
     },
   });
 
@@ -65,6 +68,10 @@ async function fetchFromSyndication(handle) {
   const bodyText = await res.text();
   if (!res.ok) {
     throw new Error(`syndication endpoint returned ${res.status} for @${handle}. Body: ${bodyText.slice(0, 300)}`);
+  }
+  if (!bodyText || !bodyText.trim()) {
+    const contentType = res.headers.get('content-type') || '(none)';
+    throw new Error(`syndication endpoint returned an EMPTY body for @${handle} (status ${res.status}, content-type: ${contentType})`);
   }
   let data;
   try {
