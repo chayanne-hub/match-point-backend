@@ -168,3 +168,23 @@ model StartSitAdvice {
   rationale  String
   createdAt  DateTime @default(now())
 }
+
+// Real fix for a confirmed bug: results were computed successfully on
+// the backend (visible in logs) but lost whenever Railway's reverse
+// proxy killed the HTTP connection before a longer analysis call
+// finished — the frontend saw "failed" for work that had actually
+// succeeded and been paid for. Persisted here the instant it's
+// computed, independent of whether the triggering request is still
+// connected; the frontend fetches by matchId afterward instead of
+// relying on one long-lived request/response round trip.
+model PlayerPropAnalysis {
+  id         String   @id @default(uuid())
+  matchId    String
+  playerName String
+  market     String
+  line       Float?
+  verdict    String   // "over" | "under"
+  confidence Int
+  reasoning  String
+  createdAt  DateTime @default(now())
+}

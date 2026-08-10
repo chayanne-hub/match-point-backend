@@ -744,9 +744,9 @@ router.post('/admin/analyze-props', requireAuth, async (req, res) => {
     return res.status(403).json({ error: 'Admin access required.' });
   }
 
-  const { playerName, team, opponent, sport, propLines } = req.body || {};
-  if (!playerName || !team || !opponent || !Array.isArray(propLines) || propLines.length === 0) {
-    return res.status(400).json({ error: 'playerName, team, opponent, and a non-empty propLines array are required.' });
+  const { playerName, team, opponent, sport, propLines, matchId } = req.body || {};
+  if (!playerName || !team || !opponent || !matchId || !Array.isArray(propLines) || propLines.length === 0) {
+    return res.status(400).json({ error: 'playerName, team, opponent, matchId, and a non-empty propLines array are required.' });
   }
 
   await acquirePropsAnalysisSlot();
@@ -755,10 +755,62 @@ router.post('/admin/analyze-props', requireAuth, async (req, res) => {
     if (!results) {
       return res.status(502).json({ error: 'Analysis failed — check server logs for the specific cause.' });
     }
+
+    // Persisted BEFORE attempting to respond — real fix for results
+    // getting lost when Railway's proxy kills the connection on a
+    // longer call. Even if res.json() below never reaches the browser,
+    // this data is already safely saved and fetchable via
+    // /admin/player-prop-analyses.
+    await db.playerPropAnalysis.createMany({
+      data: results.map((r) => ({
+        matchId,
+        playerName,
+        market: r.market,
+        line: (propLines.find((p) => p.market === r.market) || {}).line ?? null,
+        verdict: r.verdict,
+        confidence: r.confidence,
+        reasoning: r.reasoning,
+      })),
+    });
+
     res.json({ playerName, props: results });
   } finally {
     releasePropsAnalysisSlot();
   }
+});
+
+// GET /api/picks/admin/player-prop-analyses?matchId=X — real fallback
+// for the case above: if the triggering POST's connection died before
+// the response arrived, the analysis still completed and was saved.
+// The frontend polls this after a failed/timed-out request to check
+// whether the work actually succeeded server-side before giving up.
+router.get('/admin/player-prop-analyses', requireAuth, async (req, res) => {
+  const user = await db.user.findUnique({ where: { id: req.userId } });
+  if (!user || !isAdminEmail(user.email)) {
+    return res.status(403).json({ error: 'Admin access required.' });
+  }
+
+  const { matchId } = req.query;
+  if (!matchId) {
+    return res.status(400).json({ error: 'matchId query param is required.' });
+  }
+
+  const rows = await db.playerPropAnalysis.findMany({
+    where: { matchId },
+    orderBy: { createdAt: 'desc' },
+  });
+
+  res.json({
+    analyses: rows.map((r) => ({
+      playerName: r.playerName,
+      market: r.market,
+      line: r.line,
+      verdict: r.verdict,
+      confidence: r.confidence,
+      reasoning: r.reasoning,
+      createdAt: r.createdAt,
+    })),
+  });
 });
 
 // POST /api/picks/admin/start-sit — real fantasy start/sit analysis,
