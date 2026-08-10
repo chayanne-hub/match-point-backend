@@ -6,7 +6,7 @@ const { getHealthSnapshot } = require('../lib/healthStats');
 const { isAdminEmail } = require('./auth');
 const { fetchBasketballPlayerProps } = require('../pipeline/fetchPlayerProps');
 const { analyzeStartSit } = require('../pipeline/fantasyAnalyst');
-const { triggerManualRun } = require('../pipeline/cron');
+const { triggerManualRun, triggerManualRunTomorrow } = require('../pipeline/cron');
 
 const router = express.Router();
 
@@ -679,6 +679,20 @@ router.post('/admin/run-pipeline', requireAuth, async (req, res) => {
   }
 
   const result = await triggerManualRun();
+  res.json(result);
+});
+
+// POST /api/picks/admin/run-pipeline-tomorrow — same as above, but
+// filtered to tomorrow's matches only. Real use case: right after
+// "Skip Today's Backlog," kick off tomorrow's slate immediately rather
+// than waiting for the scheduled cycle to naturally reach it.
+router.post('/admin/run-pipeline-tomorrow', requireAuth, async (req, res) => {
+  const user = await db.user.findUnique({ where: { id: req.userId } });
+  if (!user || !isAdminEmail(user.email)) {
+    return res.status(403).json({ error: 'Admin access required.' });
+  }
+
+  const result = await triggerManualRunTomorrow();
   res.json(result);
 });
 

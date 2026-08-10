@@ -159,7 +159,22 @@ function freshOddsForPick(pick, m) {
   return null;
 }
 
-async function runForSport(sportSlug) {
+// Same timezone day-boundary logic picks.js already uses for "today's"
+// picks — duplicated here rather than shared across a routes/pipeline
+// import boundary, kept small and self-contained.
+function getPacificDayBounds(daysFromNow = 0) {
+  const dtf = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Los_Angeles',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+  });
+  const reference = new Date(Date.now() + daysFromNow * 24 * 60 * 60 * 1000);
+  const parts = dtf.formatToParts(reference).reduce((acc, p) => { acc[p.type] = p.value; return acc; }, {});
+  const startOfDay = new Date(`${parts.year}-${parts.month}-${parts.day}T00:00:00-07:00`); // -07:00 covers PDT; close enough for a day-window filter, not exact-instant grading
+  const endOfDay = new Date(startOfDay.getTime() + 24 * 60 * 60 * 1000);
+  return { startOfDay, endOfDay };
+}
+
+async function runForSport(sportSlug, dayFilter = null) {
   console.log(`[pipeline] fetching ${sportSlug}...`);
 
   let matches;
@@ -168,6 +183,20 @@ async function runForSport(sportSlug) {
   } catch (err) {
     console.error(`[pipeline] ${sportSlug} fetch failed:`, err.message);
     return;
+  }
+
+  // Optional day filter — used by the admin "Run Pipeline for Tomorrow"
+  // action specifically, so it only touches tomorrow's matches and
+  // never re-processes today's (which may be deliberately skipped via
+  // skipAnalysis, or already handled). Normal scheduled runs pass no
+  // filter and behave exactly as before.
+  if (dayFilter === 'tomorrow') {
+    const { startOfDay, endOfDay } = getPacificDayBounds(1);
+    matches = matches.filter((m) => {
+      const t = new Date(m.startTime).getTime();
+      return t >= startOfDay.getTime() && t < endOfDay.getTime();
+    });
+    console.log(`[pipeline] ${sportSlug}: filtered to ${matches.length} match(es) starting tomorrow.`);
   }
 
   const sportRow = await db.sport.findUnique({ where: { slug: sportSlug } });
@@ -436,6 +465,11 @@ async function runAll() {
   await Promise.all(SPORTS.map((sport) => runForSport(sport)));
 }
 
+async function runAllTomorrow() {
+  await ensureSportRows();
+  await Promise.all(SPORTS.map((sport) => runForSport(sport, 'tomorrow')));
+}
+
 // If run directly (npm run pipeline), execute once and exit.
 if (require.main === module) {
   runAll()
@@ -496,6 +530,25 @@ async function triggerManualRun() {
   isRunning = true;
   runAll()
     .catch((err) => console.error('[pipeline] manually-triggered run failed:', err))
+    .finally(() => { isRunning = false; });
+  return { started: true };
+}
+
+/**
+ * Same as triggerManualRun, but scoped to tomorrow's matches only —
+ * real use case: kicking off tomorrow's slate fresh right after using
+ * "Skip Today's Backlog", without waiting for tomorrow to actually
+ * arrive on the clock or touching anything from today. Shares the same
+ * isRunning guard, so it can't overlap with a normal scheduled run or
+ * another manual trigger either.
+ */
+async function triggerManualRunTomorrow() {
+  if (isRunning) {
+    return { started: false, reason: 'A pipeline run is already in progress.' };
+  }
+  isRunning = true;
+  runAllTomorrow()
+    .catch((err) => console.error('[pipeline] manually-triggered tomorrow run failed:', err))
     .finally(() => { isRunning = false; });
   return { started: true };
 }
@@ -1005,4 +1058,4 @@ function startEspnScheduled() {
   console.log('[espn-pipeline] scheduled to run every 15 seconds.');
 }
 
-module.exports = { runAll, startScheduled, startLiveScheduled, startEspnScheduled, triggerManualRun };
+module.exports = { runAll, startScheduled, startLiveScheduled, startEspnScheduled, triggerManualRun, triggerManualRunTomorrow };
