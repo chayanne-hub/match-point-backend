@@ -594,6 +594,31 @@ router.get('/news', async (req, res) => {
   }
 });
 
+// GET /api/picks/insiders — public. Grouped by sport, ordered. This is
+// what the left-side Insiders sidebar fetches on page load.
+//
+// IMPORTANT: same rule as /news above — must be registered before
+// GET /:id, or a request here gets swallowed by the pick-lookup route
+// (which would treat "insiders" as a pick ID, find nothing, and return
+// a 404 "Pick not found" — exactly the bug this fixes).
+router.get('/insiders', async (req, res) => {
+  try {
+    const rows = await db.insiderAccount.findMany({
+      orderBy: [{ sport: 'asc' }, { order: 'asc' }],
+    });
+    const grouped = {};
+    INSIDER_SPORTS.forEach((s) => { grouped[s] = []; });
+    rows.forEach((r) => {
+      if (!grouped[r.sport]) grouped[r.sport] = [];
+      grouped[r.sport].push(r.handle);
+    });
+    res.json(grouped);
+  } catch (err) {
+    console.error('[insiders] GET /insiders failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/picks/:id — full detail, requires purchase or active subscription
 router.get('/:id', async (req, res) => {
   const pick = await db.pick.findUnique({
@@ -1042,26 +1067,6 @@ router.post('/admin/skip-today-backlog', requireAuth, async (req, res) => {
 // ---------------------------------------------------------------------------
 
 const INSIDER_SPORTS = ['tennis', 'basketball', 'soccer', 'baseball', 'football'];
-
-// GET /api/picks/insiders — public. Grouped by sport, ordered. This is
-// what the sidebar itself fetches on page load.
-router.get('/insiders', async (req, res) => {
-  try {
-    const rows = await db.insiderAccount.findMany({
-      orderBy: [{ sport: 'asc' }, { order: 'asc' }],
-    });
-    const grouped = {};
-    INSIDER_SPORTS.forEach((s) => { grouped[s] = []; });
-    rows.forEach((r) => {
-      if (!grouped[r.sport]) grouped[r.sport] = [];
-      grouped[r.sport].push(r.handle);
-    });
-    res.json(grouped);
-  } catch (err) {
-    console.error('[insiders] GET /insiders failed:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
 
 // GET /api/picks/admin/insiders — admin-only, full rows (with IDs) for
 // the management UI in the Health tab.
