@@ -142,13 +142,14 @@ router.get('/today', async (req, res) => {
     },
     include: {
       sport: true,
-      picks: { where: { pickType: { in: ['model', 'winner'] }, market: 'moneyline' } },
+      picks: { where: { pickType: { in: ['model', 'winner', 'live'] }, market: { in: ['moneyline'] } } },
     },
   });
 
   const shaped = [];
   for (const m of matches) {
-    if (m.picks.length > 0) {
+    const pregamePicks = m.picks.filter((pk) => pk.pickType !== 'live');
+    if (pregamePicks.length > 0) {
       // One representative pick per match, not every tier — 'winner' and
       // 'model' are two deliberate product tiers on the SAME underlying
       // analysis (every match gets a 'winner' pick; confident ones also
@@ -156,8 +157,23 @@ router.get('/today', async (req, res) => {
       // display every analyzed match twice. Prefer 'model' when it
       // exists (the more complete product), same fallback pattern
       // already used elsewhere in this file.
-      const p = m.picks.find((pk) => pk.pickType === 'model') || m.picks[0];
-      shaped.push(await shapePick({ ...p, match: m }, userId));
+      const p = pregamePicks.find((pk) => pk.pickType === 'model') || pregamePicks[0];
+      // Real fix: live reassessment (cron.js, updateLivePicksForSport)
+      // has been computing an updated selection/confidence/rationale
+      // every 15 minutes this whole time, writing it to a SEPARATE
+      // pickType:'live' record — deliberately kept apart from the
+      // frozen pregame pick so stats/grading never touch it. But
+      // nothing ever displayed that live record; the frontend showed
+      // the frozen pregame value even while a match was live, making
+      // confidence look permanently static. When a match is actually
+      // live and a live-reassessed record exists, use ITS
+      // selection/confidence/rationale for display — analyzedAt still
+      // reflects the ORIGINAL pregame analysis time (that's real
+      // information, not something to overwrite), only the live
+      // judgment itself is swapped in.
+      const liveOverride = m.status === 'live' ? m.picks.find((pk) => pk.pickType === 'live') : null;
+      const displayPick = liveOverride ? { ...p, selection: liveOverride.selection, confidence: liveOverride.confidence, rationale: liveOverride.rationale, odds: liveOverride.odds } : p;
+      shaped.push(await shapePick({ ...displayPick, match: m }, userId));
     } else {
       shaped.push(shapeUnanalyzedMatch(m));
     }
