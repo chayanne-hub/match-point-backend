@@ -1033,4 +1033,99 @@ router.post('/admin/skip-today-backlog', requireAuth, async (req, res) => {
   res.json({ skipped: toSkip.length, totalToday: todaysMatches.length });
 });
 
+// ---------------------------------------------------------------------------
+// Insiders — curated X/Twitter accounts for the frontend's left-side
+// Insiders sidebar. This does NOT call the X API — the account list is
+// just stored here; the actual tweets are rendered client-side via X's
+// free embed widget (platform.twitter.com/widgets.js). So this has zero
+// ongoing API cost, same as everything else the sidebar does.
+// ---------------------------------------------------------------------------
+
+const INSIDER_SPORTS = ['tennis', 'basketball', 'soccer', 'baseball', 'football'];
+
+// GET /api/picks/insiders — public. Grouped by sport, ordered. This is
+// what the sidebar itself fetches on page load.
+router.get('/insiders', async (req, res) => {
+  try {
+    const rows = await db.insiderAccount.findMany({
+      orderBy: [{ sport: 'asc' }, { order: 'asc' }],
+    });
+    const grouped = {};
+    INSIDER_SPORTS.forEach((s) => { grouped[s] = []; });
+    rows.forEach((r) => {
+      if (!grouped[r.sport]) grouped[r.sport] = [];
+      grouped[r.sport].push(r.handle);
+    });
+    res.json(grouped);
+  } catch (err) {
+    console.error('[insiders] GET /insiders failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/picks/admin/insiders — admin-only, full rows (with IDs) for
+// the management UI in the Health tab.
+router.get('/admin/insiders', requireAuth, async (req, res) => {
+  const user = await db.user.findUnique({ where: { id: req.userId } });
+  if (!user || !isAdminEmail(user.email)) {
+    return res.status(403).json({ error: 'Admin access required.' });
+  }
+
+  const accounts = await db.insiderAccount.findMany({
+    orderBy: [{ sport: 'asc' }, { order: 'asc' }],
+  });
+  res.json({ accounts });
+});
+
+// POST /api/picks/admin/insiders  { handle, sport } — admin-only.
+router.post('/admin/insiders', requireAuth, async (req, res) => {
+  const user = await db.user.findUnique({ where: { id: req.userId } });
+  if (!user || !isAdminEmail(user.email)) {
+    return res.status(403).json({ error: 'Admin access required.' });
+  }
+
+  const { handle, sport } = req.body || {};
+  if (!handle || !sport) {
+    return res.status(400).json({ error: 'handle and sport are required.' });
+  }
+  if (!INSIDER_SPORTS.includes(sport)) {
+    return res.status(400).json({ error: `Unknown sport: ${sport}` });
+  }
+
+  const cleanHandle = handle.trim().replace(/^@/, '');
+  if (!cleanHandle) {
+    return res.status(400).json({ error: 'handle cannot be empty.' });
+  }
+
+  try {
+    const existingCount = await db.insiderAccount.count({ where: { sport } });
+    const account = await db.insiderAccount.create({
+      data: { sport, handle: cleanHandle, order: existingCount },
+    });
+    res.json({ account });
+  } catch (err) {
+    if (err.code === 'P2002') {
+      return res.status(409).json({ error: 'That handle is already tracked for this sport.' });
+    }
+    console.error('[insiders] POST /admin/insiders failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/picks/admin/insiders/:id — admin-only.
+router.delete('/admin/insiders/:id', requireAuth, async (req, res) => {
+  const user = await db.user.findUnique({ where: { id: req.userId } });
+  if (!user || !isAdminEmail(user.email)) {
+    return res.status(403).json({ error: 'Admin access required.' });
+  }
+
+  try {
+    await db.insiderAccount.delete({ where: { id: req.params.id } });
+    res.json({ deleted: true });
+  } catch (err) {
+    console.error('[insiders] DELETE /admin/insiders failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;

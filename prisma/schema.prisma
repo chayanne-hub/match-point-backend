@@ -188,3 +188,18 @@ model PlayerPropAnalysis {
   reasoning  String
   createdAt  DateTime @default(now())
 }
+
+// Curated X/Twitter accounts for the homepage's left-side Insiders
+// sidebar. Only stores which handles to embed — the actual tweet
+// content is rendered client-side via X's free embed widget
+// (platform.twitter.com/widgets.js), so this has no ongoing API cost.
+// Managed from the Health admin tab (GET/POST/DELETE /api/picks/admin/insiders).
+model InsiderAccount {
+  id        String   @id @default(uuid())
+  sport     String   // "tennis" | "basketball" | "soccer" | "baseball" | "football"
+  handle    String   // X handle, no leading @
+  order     Int      @default(0)
+  createdAt DateTime @default(now())
+
+  @@unique([sport, handle])
+}
