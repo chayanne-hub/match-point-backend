@@ -76,6 +76,7 @@ model Match {
   externalId   String   @unique // ID from the odds/data provider, for de-duping on each pull
   league       String   // "ATP" | "NBA" | "EPL" | "MLB" | "NFL" etc.
   skipAnalysis Boolean  @default(false) // true = pipeline never attempts this match again, e.g. bulk-skipped backlog after a balance-outage window
+  analysisFailCycles Int @default(0) // how many separate 15-min cycles this match has FULLY failed (both first attempt and retry exhausted) — real fix for a confirmed bug: previously a stubborn match could be re-attempted every single cycle for hours with no cap, each cycle burning a full paid attempt+retry for zero output
   competitorA  String
   competitorB  String
   startTime    DateTime

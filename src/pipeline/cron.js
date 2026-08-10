@@ -242,6 +242,20 @@ async function runForSport(sportSlug, dayFilter = null) {
     // nothing.
     if (match.skipAnalysis) continue;
 
+    // Real fix for a confirmed bug: a match that consistently fails (for
+    // whatever underlying reason — a genuinely hard research case, a
+    // recurring API hiccup specific to that matchup) had NO limit on how
+    // many separate 15-minute cycles it could be re-attempted across.
+    // Real logs showed the same match fully failing (both attempt AND
+    // retry exhausted) in one cycle, then getting hit again from scratch
+    // 15+ minutes later, repeatedly — every cycle burning a full paid
+    // attempt+retry for zero output, for hours, until the match started.
+    // Capped at 3 full cycle-level failures — after that, stop
+    // automatically retrying and surface it as a real, visible failure
+    // (recordAnalysisFailure) rather than silently keep spending on it.
+    const MAX_CYCLE_FAILURES = 3;
+    if (match.analysisFailCycles >= MAX_CYCLE_FAILURES) continue;
+
     // Skip re-analysis entirely if picks already exist for this match —
     // analyzeMatch() is a real research call (web search + reasoning),
     // not a cheap formula, so it only ever runs once per match, at
@@ -313,7 +327,14 @@ async function runForSport(sportSlug, dayFilter = null) {
       pregameProjectedTotal,
     }, `${m.competitorA} vs ${m.competitorB} (pregame)`);
     if (!analysis) {
-      console.warn(`[pipeline] no analysis returned for ${m.competitorA} vs ${m.competitorB} — skipping pick creation this cycle.`);
+      const newFailCount = match.analysisFailCycles + 1;
+      await db.match.update({ where: { id: match.id }, data: { analysisFailCycles: newFailCount } });
+      if (newFailCount >= MAX_CYCLE_FAILURES) {
+        console.error(`[pipeline] ${m.competitorA} vs ${m.competitorB} has now failed ${newFailCount} full cycles — no longer auto-retrying, marking as a real failure.`);
+        recordAnalysisFailure(`${m.competitorA} vs ${m.competitorB} — exceeded ${MAX_CYCLE_FAILURES} cross-cycle failures`);
+      } else {
+        console.warn(`[pipeline] no analysis returned for ${m.competitorA} vs ${m.competitorB} — skipping pick creation this cycle (${newFailCount}/${MAX_CYCLE_FAILURES} cycle failures so far).`);
+      }
       continue;
     }
 
@@ -655,6 +676,9 @@ async function updateLivePicksForSport(sportSlug) {
         });
       }
     } else {
+      const MAX_CYCLE_FAILURES = 3;
+      if (match.analysisFailCycles >= MAX_CYCLE_FAILURES) continue; // same real cap as the pregame path — stop auto-retrying a consistently-failing match
+
       const analysis = await analyzeMatchWithRetry({
         sport: sportSlug,
         competitorA: m.competitorA,
@@ -663,7 +687,14 @@ async function updateLivePicksForSport(sportSlug) {
         oddsB: hasLiveOdds ? m.oddsB : null,
         startTime: m.startTime,
       }, `${m.competitorA} vs ${m.competitorB} (live, no pregame pick existed)`);
-      if (!analysis) continue; // try again next cycle
+      if (!analysis) {
+        const newFailCount = match.analysisFailCycles + 1;
+        await db.match.update({ where: { id: match.id }, data: { analysisFailCycles: newFailCount } });
+        if (newFailCount >= MAX_CYCLE_FAILURES) {
+          recordAnalysisFailure(`${m.competitorA} vs ${m.competitorB} (live) — exceeded ${MAX_CYCLE_FAILURES} cross-cycle failures`);
+        }
+        continue; // try again next cycle, up to the cap above
+      }
 
       // odds is a required field on Pick — if there's no live in-play
       // price, fall back to the closing line captured just before
