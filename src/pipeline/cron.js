@@ -202,11 +202,30 @@ async function runForSport(sportSlug, dayFilter = null) {
   const sportRow = await db.sport.findUnique({ where: { slug: sportSlug } });
 
   for (const m of matches) {
+    // Real fix for a confirmed bug: startTime used to get unconditionally
+    // overwritten with whatever the odds provider currently reports on
+    // EVERY cycle, forever — including for matches that already have a
+    // real pick and should be treated as a fixed, committed point in
+    // time. If the provider ever re-reports a drifting/refreshed
+    // timestamp for a stale listing (confirmed happening for at least
+    // one real match), the match would perpetually look "not yet
+    // started" no matter how many actual days passed, since its
+    // recorded start time kept chasing the current moment. Once a match
+    // has a real pick, its startTime is now frozen — same "commit once,
+    // never drift" philosophy already applied to confidence/analysis.
+    // Market prices (spread/total) still update freely either way,
+    // since those legitimately change pregame.
+    const existingMatch = await db.match.findUnique({
+      where: { externalId: m.externalId },
+      include: { picks: { where: { pickType: { in: ['model', 'winner'] } }, take: 1 } },
+    });
+    const hasRealPick = existingMatch && existingMatch.picks.length > 0;
+
     const match = await db.match.upsert({
       where: { externalId: m.externalId },
       update: {
         status: m.status,
-        startTime: m.startTime,
+        ...(hasRealPick ? {} : { startTime: m.startTime }),
         // Lines move until kickoff — keep them fresh on every pull, same
         // as status/startTime already were.
         spread: m.spread,
@@ -290,7 +309,7 @@ async function runForSport(sportSlug, dayFilter = null) {
     }
 
     if (m.oddsA === null || m.oddsB === null) {
-      console.warn(`[pipeline] skipping analysis for ${m.competitorA} vs ${m.competitorB} — no odds available.`);
+      console.log(`[pipeline] skipping analysis for ${m.competitorA} vs ${m.competitorB} — no odds available.`);
       continue;
     }
 
