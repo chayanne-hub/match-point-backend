@@ -102,136 +102,144 @@ router.get('/today', async (req, res) => {
   const { sport, markets } = req.query;
   const { startOfDay, endOfDay } = getTimezoneDayBounds('America/Los_Angeles');
 
-  // Default stays moneyline-only — every existing page (Terminal, the
-  // picks list, Spread/Totals' own display, stats) depends on that and
-  // would otherwise see spread/total picks as unexplained duplicate rows.
-  // Pass ?markets=all to opt into every market type — used by the Parlay
-  // Confidence Builder, which genuinely needs to combine picks across
-  // moneyline/spread/total.
-  const marketFilter = markets === 'all' ? undefined : 'moneyline';
-
-  const where = {
-    // Today's Picks is the frozen pre-match prediction — never the
-    // separate, deliberately-evolving pickType:'live' record.
-    pickType: { in: ['model', 'winner'] },
-    ...(marketFilter ? { market: marketFilter } : {}),
-    match: {
-      startTime: { gte: startOfDay, lte: endOfDay },
-      ...(sport ? { sport: { slug: sport } } : {}),
-    },
-  };
-
-  const picks = await db.pick.findMany({
-    where,
-    include: { match: { include: { sport: true } } },
-    orderBy: { confidence: 'desc' },
-  });
-
   // Try to resolve the requester, but don't require auth for this endpoint.
   const userId = resolveOptionalUser(req);
 
-  const shaped = await Promise.all(
-    picks.map(async (p) => {
-      const unlocked = await userHasAccess(userId, p.id);
-      return {
-        id: p.id,
-        sport: p.match.sport.slug,
-        league: p.match.league,
-        matchup: `${p.match.competitorA} vs ${p.match.competitorB}`,
-        startTime: p.match.startTime,
-        pickType: p.pickType,
-        market: p.market, // 'moneyline' | 'spread' | 'total' — callers that opted into ?markets=all need this to tell picks apart
-        line: p.line, // the spread/total number this specific pick was made against, null for moneyline
-        price: p.price,
-        // Redact the actual pick and confidence until purchased/subscribed
-        selection: unlocked ? p.selection : null,
-        confidence: unlocked ? p.confidence : null,
-        rationale: unlocked ? p.rationale : null,
-        odds: p.odds,
-        // Raw market lines, not model analysis — shown to everyone, same
-        // as odds above. Null whenever a book hasn't posted that market
-        // yet, never a fabricated number.
-        spread: p.match.spread,
-        spreadOddsA: p.match.spreadOddsA,
-        spreadOddsB: p.match.spreadOddsB,
-        total: p.match.total,
-        overOdds: p.match.overOdds,
-        underOdds: p.match.underOdds,
-        // Real live status, sourced from the free ESPN score poller — not
-        // the (now-removed) paid live-reassessment loop. matchStatus is
-        // 'scheduled' | 'live' | 'final'; the rest are only meaningful
-        // once live, and null otherwise.
-        matchStatus: p.match.status,
-        analyzedAt: p.createdAt, // when the model actually ran on this match — confidence is frozen from this moment on
-        liveScore: p.match.liveScore,
-        setScore: p.match.setScore, // tennis only — "6-4, 3-6, 2-1" style, for the real set-by-set display
-        periodScores: p.match.periodScores, // basketball/football — "25-28, 20-21, 20-24, 22-25" style
-        period: p.match.period,
-        clockSeconds: p.match.clockSeconds,
-        liveClock: p.match.liveClock,
-        unlocked,
-        hasPick: true,
-      };
-    })
-  );
-
-  // Real matches that exist (already fetched/upserted by the pipeline —
-  // free ESPN/odds-provider data) but don't have a pick yet. Shown as
-  // genuinely free "upcoming" entries rather than leaving the board
-  // looking empty while analysis is still pending — costs nothing extra
-  // to expose, since this data was already being fetched regardless.
-  // Explicitly no pick-specific fields (confidence/selection/rationale/
-  // odds) since none exist yet; hasPick:false tells the frontend to
-  // render these as a plain schedule entry, not a pick card.
-  if (!markets || markets !== 'all') {
-    const pickedMatchIds = new Set(picks.map((p) => p.matchId));
-    const allMatchesToday = await db.match.findMany({
+  // ?markets=all (Parlay Builder) doesn't need the Upcoming Matches
+  // feature at all — keeps its original simple pick-only query,
+  // unchanged, no extra load added there.
+  if (markets === 'all') {
+    const picks = await db.pick.findMany({
       where: {
-        startTime: { gte: startOfDay, lte: endOfDay },
-        status: { in: ['scheduled', 'live'] },
-        skipAnalysis: false,
-        ...(sport ? { sport: { slug: sport } } : {}),
+        pickType: { in: ['model', 'winner'] },
+        match: {
+          startTime: { gte: startOfDay, lte: endOfDay },
+          ...(sport ? { sport: { slug: sport } } : {}),
+        },
       },
-      include: { sport: true },
+      include: { match: { include: { sport: true } } },
+      orderBy: { confidence: 'desc' },
     });
-    const unanalyzed = allMatchesToday
-      .filter((m) => !pickedMatchIds.has(m.id))
-      .map((m) => ({
-        id: m.id,
-        sport: m.sport.slug,
-        league: m.league,
-        matchup: `${m.competitorA} vs ${m.competitorB}`,
-        startTime: m.startTime,
-        pickType: 'pending',
-        market: 'moneyline',
-        line: null,
-        price: null,
-        selection: null,
-        confidence: null,
-        rationale: null,
-        odds: null,
-        spread: m.spread,
-        spreadOddsA: m.spreadOddsA,
-        spreadOddsB: m.spreadOddsB,
-        total: m.total,
-        overOdds: m.overOdds,
-        underOdds: m.underOdds,
-        matchStatus: m.status,
-        analyzedAt: null,
-        liveScore: m.liveScore,
-        setScore: m.setScore,
-        periodScores: m.periodScores,
-        period: m.period,
-        clockSeconds: m.clockSeconds,
-        liveClock: m.liveClock,
-        unlocked: false,
-        hasPick: false,
-      }));
-    shaped.push(...unanalyzed);
+    const shaped = await Promise.all(picks.map((p) => shapePick(p, userId)));
+    return res.json({ picks: shaped });
   }
+
+  // Default moneyline mode: ONE query on Match (with its picks included),
+  // not two separate queries against Pick and Match — this endpoint
+  // already polls every 20 seconds from the frontend, so doubling its
+  // query count (as an earlier version of this endpoint briefly did) is
+  // real, meaningful added database load, not a rounding error. Splitting
+  // the single result set into "has a real pick" vs "doesn't yet" happens
+  // in JS below instead of via a second round-trip to the database.
+  const matches = await db.match.findMany({
+    where: {
+      startTime: { gte: startOfDay, lte: endOfDay },
+      status: { in: ['scheduled', 'live'] },
+      skipAnalysis: false,
+      ...(sport ? { sport: { slug: sport } } : {}),
+    },
+    include: {
+      sport: true,
+      picks: { where: { pickType: { in: ['model', 'winner'] }, market: 'moneyline' } },
+    },
+  });
+
+  const shaped = [];
+  for (const m of matches) {
+    if (m.picks.length > 0) {
+      for (const p of m.picks) {
+        shaped.push(await shapePick({ ...p, match: m }, userId));
+      }
+    } else {
+      shaped.push(shapeUnanalyzedMatch(m));
+    }
+  }
+  shaped.sort((a, b) => (b.confidence || -1) - (a.confidence || -1));
 
   res.json({ picks: shaped });
 });
+
+// Shapes one real Pick row (with its match already attached) into the
+// public-facing shape /today returns. Pulled out of the route handler so
+// both the markets=all path and the default path can share it.
+async function shapePick(p, userId) {
+  const unlocked = await userHasAccess(userId, p.id);
+  return {
+    id: p.id,
+    sport: p.match.sport.slug,
+    league: p.match.league,
+    matchup: `${p.match.competitorA} vs ${p.match.competitorB}`,
+    startTime: p.match.startTime,
+    pickType: p.pickType,
+    market: p.market, // 'moneyline' | 'spread' | 'total' — callers that opted into ?markets=all need this to tell picks apart
+    line: p.line, // the spread/total number this specific pick was made against, null for moneyline
+    price: p.price,
+    // Redact the actual pick and confidence until purchased/subscribed
+    selection: unlocked ? p.selection : null,
+    confidence: unlocked ? p.confidence : null,
+    rationale: unlocked ? p.rationale : null,
+    odds: p.odds,
+    // Raw market lines, not model analysis — shown to everyone, same
+    // as odds above. Null whenever a book hasn't posted that market
+    // yet, never a fabricated number.
+    spread: p.match.spread,
+    spreadOddsA: p.match.spreadOddsA,
+    spreadOddsB: p.match.spreadOddsB,
+    total: p.match.total,
+    overOdds: p.match.overOdds,
+    underOdds: p.match.underOdds,
+    // Real live status, sourced from the free ESPN score poller — not
+    // the (now-removed) paid live-reassessment loop. matchStatus is
+    // 'scheduled' | 'live' | 'final'; the rest are only meaningful
+    // once live, and null otherwise.
+    matchStatus: p.match.status,
+    analyzedAt: p.createdAt, // when the model actually ran on this match — confidence is frozen from this moment on
+    liveScore: p.match.liveScore,
+    setScore: p.match.setScore, // tennis only — "6-4, 3-6, 2-1" style, for the real set-by-set display
+    periodScores: p.match.periodScores, // basketball/football — "25-28, 20-21, 20-24, 22-25" style
+    period: p.match.period,
+    clockSeconds: p.match.clockSeconds,
+    liveClock: p.match.liveClock,
+    unlocked,
+    hasPick: true,
+  };
+}
+
+// Shapes a real match that doesn't have a pick yet — genuinely free
+// schedule data, no pick-specific fields fabricated.
+function shapeUnanalyzedMatch(m) {
+  return {
+    id: m.id,
+    sport: m.sport.slug,
+    league: m.league,
+    matchup: `${m.competitorA} vs ${m.competitorB}`,
+    startTime: m.startTime,
+    pickType: 'pending',
+    market: 'moneyline',
+    line: null,
+    price: null,
+    selection: null,
+    confidence: null,
+    rationale: null,
+    odds: null,
+    spread: m.spread,
+    spreadOddsA: m.spreadOddsA,
+    spreadOddsB: m.spreadOddsB,
+    total: m.total,
+    overOdds: m.overOdds,
+    underOdds: m.underOdds,
+    matchStatus: m.status,
+    analyzedAt: null,
+    liveScore: m.liveScore,
+    setScore: m.setScore,
+    periodScores: m.periodScores,
+    period: m.period,
+    clockSeconds: m.clockSeconds,
+    liveClock: m.liveClock,
+    unlocked: false,
+    hasPick: false,
+  };
+}
 
 // GET /api/picks/live?sport=all
 // Selection is locked until purchased/subscribed. Confidence is shown to
