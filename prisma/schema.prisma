@@ -75,6 +75,7 @@ model Match {
   sport        Sport    @relation(fields: [sportId], references: [id])
   externalId   String   @unique // ID from the odds/data provider, for de-duping on each pull
   league       String   // "ATP" | "NBA" | "EPL" | "MLB" | "NFL" etc.
+  skipAnalysis Boolean  @default(false) // true = pipeline never attempts this match again, e.g. bulk-skipped backlog after a balance-outage window
   competitorA  String
   competitorB  String
   startTime    DateTime

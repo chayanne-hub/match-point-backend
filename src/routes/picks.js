@@ -682,4 +682,35 @@ router.post('/admin/run-pipeline', requireAuth, async (req, res) => {
   res.json(result);
 });
 
+// POST /api/picks/admin/skip-today-backlog — bulk-marks every one of
+// today's matches that doesn't yet have a real pick as skipAnalysis,
+// so the pipeline stops re-attempting them and moves straight to
+// tomorrow's matches. Real use case: after a balance-outage window left
+// a pile of today's matches un-analyzed — letting the pipeline "catch
+// up" on all of them risks the exact overload (many concurrent long
+// calls, real spend, zero picks) that caused the problem in the first
+// place. This just draws a line under today and starts clean.
+router.post('/admin/skip-today-backlog', requireAuth, async (req, res) => {
+  const user = await db.user.findUnique({ where: { id: req.userId } });
+  if (!user || !isAdminEmail(user.email)) {
+    return res.status(403).json({ error: 'Admin access required.' });
+  }
+
+  const { startOfDay, endOfDay } = getTimezoneDayBounds('America/Los_Angeles');
+
+  const todaysMatches = await db.match.findMany({
+    where: { startTime: { gte: startOfDay, lt: endOfDay }, skipAnalysis: false },
+    include: { picks: { where: { pickType: { in: ['model', 'winner'] } } } },
+  });
+
+  const toSkip = todaysMatches.filter((m) => m.picks.length === 0);
+
+  await db.match.updateMany({
+    where: { id: { in: toSkip.map((m) => m.id) } },
+    data: { skipAnalysis: true },
+  });
+
+  res.json({ skipped: toSkip.length, totalToday: todaysMatches.length });
+});
+
 module.exports = router;

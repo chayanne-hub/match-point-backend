@@ -204,6 +204,15 @@ async function runForSport(sportSlug) {
       },
     });
 
+    // Deliberately skipped — e.g. bulk-marked via the admin "skip
+    // today's backlog" action after a balance-outage window, so the
+    // pipeline doesn't keep re-attempting a pile of matches that would
+    // otherwise all queue up and risk the same overload that caused
+    // real spend with zero picks in the first place. Checked before
+    // anything else — no DB lookups for existing picks, no analysis,
+    // nothing.
+    if (match.skipAnalysis) continue;
+
     // Skip re-analysis entirely if picks already exist for this match —
     // analyzeMatch() is a real research call (web search + reasoning),
     // not a cheap formula, so it only ever runs once per match, at
