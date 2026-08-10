@@ -5,6 +5,7 @@ const { fetchEspnNews } = require('../pipeline/fetchEspnNews');
 const { getHealthSnapshot } = require('../lib/healthStats');
 const { isAdminEmail } = require('./auth');
 const { fetchBasketballPlayerProps } = require('../pipeline/fetchPlayerProps');
+const { analyzePlayerProps } = require('../pipeline/propsAnalyst');
 const { analyzeStartSit } = require('../pipeline/fantasyAnalyst');
 const { triggerManualRun, triggerManualRunTomorrow } = require('../pipeline/cron');
 
@@ -697,6 +698,67 @@ router.get('/admin/player-props', requireAuth, async (req, res) => {
     league: match.league,
     props,
   });
+});
+
+// Real concurrency cap for props analysis — this runs automatically for
+// every player the moment the Props & Fantasy tab opens (per explicit
+// product decision), which means a match with several players showing
+// props could otherwise fire many simultaneous Claude calls at once.
+// Same defensive pattern as the pregame pipeline's MAX_CONCURRENT_ANALYSIS
+// in cron.js, scoped separately here since this is a distinct, on-demand
+// feature rather than the scheduled pipeline.
+const MAX_CONCURRENT_PROPS_ANALYSIS = 3;
+let activePropsAnalysisCount = 0;
+const propsAnalysisQueue = [];
+
+function acquirePropsAnalysisSlot() {
+  return new Promise((resolve) => {
+    const tryAcquire = () => {
+      if (activePropsAnalysisCount < MAX_CONCURRENT_PROPS_ANALYSIS) {
+        activePropsAnalysisCount++;
+        resolve();
+      } else {
+        propsAnalysisQueue.push(tryAcquire);
+      }
+    };
+    tryAcquire();
+  });
+}
+
+function releasePropsAnalysisSlot() {
+  activePropsAnalysisCount--;
+  const next = propsAnalysisQueue.shift();
+  if (next) next();
+}
+
+// POST /api/picks/admin/analyze-props — real confidence-scored verdicts
+// for one player's full set of prop lines, in a single call. Body:
+// { playerName, team, opponent, sport, propLines: [...] } — propLines
+// comes straight from the raw /admin/player-props response, grouped by
+// player on the frontend. Admin-only, real cost per call (one Claude
+// request covering all of this player's markets at once — see
+// propsAnalyst.js for why it's structured this way).
+router.post('/admin/analyze-props', requireAuth, async (req, res) => {
+  const user = await db.user.findUnique({ where: { id: req.userId } });
+  if (!user || !isAdminEmail(user.email)) {
+    return res.status(403).json({ error: 'Admin access required.' });
+  }
+
+  const { playerName, team, opponent, sport, propLines } = req.body || {};
+  if (!playerName || !team || !opponent || !Array.isArray(propLines) || propLines.length === 0) {
+    return res.status(400).json({ error: 'playerName, team, opponent, and a non-empty propLines array are required.' });
+  }
+
+  await acquirePropsAnalysisSlot();
+  try {
+    const results = await analyzePlayerProps({ playerName, team, opponent, sport: sport || 'basketball', propLines });
+    if (!results) {
+      return res.status(502).json({ error: 'Analysis failed — check server logs for the specific cause.' });
+    }
+    res.json({ playerName, props: results });
+  } finally {
+    releasePropsAnalysisSlot();
+  }
 });
 
 // POST /api/picks/admin/start-sit — real fantasy start/sit analysis,
