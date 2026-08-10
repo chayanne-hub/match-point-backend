@@ -194,7 +194,26 @@ router.get('/today', async (req, res) => {
     try {
       const espnEvents = await fetchEspnLiveScores(sport);
       const alreadyKnown = matches; // same list already fetched above — both picked and unanalyzed matches
-      const espnOnly = espnEvents.filter((ev) => !matchEspnEvent(ev, alreadyKnown) && !ev.completed);
+      const espnOnlyRaw = espnEvents.filter((ev) =>
+        !matchEspnEvent(ev, alreadyKnown) &&
+        !ev.completed &&
+        // Future-round bracket slots ESPN lists before the actual
+        // players are determined — not a real, bettable matchup yet.
+        // Confirmed happening in production (15+ of these in one
+        // response) rather than a hypothetical edge case.
+        ev.competitorAName !== 'TBD' && ev.competitorBName !== 'TBD'
+      );
+      // De-dupe by matchup+time — confirmed happening in production
+      // (several real matches, like Naomi Osaka vs Elena Rybakina,
+      // appearing twice) — likely ESPN listing the same event under more
+      // than one grouping/league query.
+      const seenEspnKeys = new Set();
+      const espnOnly = espnOnlyRaw.filter((ev) => {
+        const key = `${ev.competitorAName}|${ev.competitorBName}|${ev.eventDate}`;
+        if (seenEspnKeys.has(key)) return false;
+        seenEspnKeys.add(key);
+        return true;
+      });
       espnOnly.forEach((ev, i) => {
         shaped.push({
           id: `espn-only-${sport}-${i}-${new Date(ev.eventDate).getTime()}`,
