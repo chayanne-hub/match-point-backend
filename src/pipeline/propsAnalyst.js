@@ -41,7 +41,14 @@ else on this platform:
   Should be rare, and only with a specific, well-supported reason.
 
 If your case for 85%+ rests on a single factor, bring the number back
-down. A real edge is rarely that clean.`;
+down. A real edge is rarely that clean.
+
+Research efficiently — aim for roughly 3-5 searches total across ALL of
+this player's props combined, not per prop. If a specific data point
+(e.g. exact recent shot volume) isn't turning up after a reasonable
+search or two, note that as a real limitation in your reasoning and
+move on rather than continuing to search for it. A timely answer that
+honestly notes a limitation beats a slow one that never finishes.`;
 
 /**
  * Real analysis for one player across all their available prop lines in
@@ -112,7 +119,7 @@ ${JSON_VALIDITY_REMINDER}
       },
       body: JSON.stringify({
         model: ANTHROPIC_MODEL,
-        max_tokens: 4000,
+        max_tokens: 6000, // was 4000 — a player with several prop lines needs real room for multiple verdicts + reasoning each; too tight risked truncated, malformed JSON
         system: systemPrompt,
         tools: [{ type: 'web_search_20250305', name: 'web_search' }],
         messages: [{ role: 'user', content: `Evaluate all listed prop lines for ${playerName}.` }],
@@ -143,7 +150,7 @@ ${JSON_VALIDITY_REMINDER}
       return null;
     }
 
-    return parsed.props
+    const finalResults = parsed.props
       .filter((p) => ['over', 'under'].includes(p.verdict) && typeof p.confidence === 'number')
       .map((p) => ({
         market: p.market,
@@ -151,6 +158,8 @@ ${JSON_VALIDITY_REMINDER}
         confidence: Math.max(0, Math.min(100, Math.round(p.confidence))),
         reasoning: p.reasoning || '',
       }));
+    console.log(`[props-analyst] succeeded for ${playerName} — ${finalResults.length} prop(s) evaluated.`);
+    return finalResults;
   } catch (err) {
     clearTimeout(timeoutId);
     if (err.name === 'AbortError') {
