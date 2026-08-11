@@ -3,6 +3,7 @@ const db = require('../lib/db');
 const { requireAuth } = require('../lib/auth');
 const { fetchEspnNews } = require('../pipeline/fetchEspnNews');
 const { getRecentPosts } = require('../pipeline/fetchXTimeline');
+const { getStandings, getRecordMap } = require('../pipeline/fetchEspnStandings');
 const { getHealthSnapshot } = require('../lib/healthStats');
 const { isAdminEmail } = require('./auth');
 const { fetchBasketballPlayerProps } = require('../pipeline/fetchPlayerProps');
@@ -701,9 +702,45 @@ router.get('/rankings', async (req, res) => {
       // evidence. Ties break toward the larger sample.
       .sort((a, b) => b.avgConfidence - a.avgConfidence || b.timesPicked - a.timesPicked);
 
+    // Join each team's REAL season record (ESPN standings) onto the
+    // model's view of them. Best-effort: tennis has no standings, and a
+    // name that doesn't match an ESPN displayName just gets null — the
+    // model rankings still render fully without it.
+    if (sport && sport !== 'tennis') {
+      try {
+        const recordMap = await getRecordMap(sport);
+        rankings.forEach((r) => {
+          const rec = recordMap[r.name];
+          r.seasonRecord = rec ? rec.record : null;
+          r.seasonLeague = rec ? rec.league : null;
+        });
+      } catch (err) {
+        console.error('[rankings] season record join failed:', err.message);
+      }
+    }
+
     res.json({ rankings });
   } catch (err) {
     console.error('[rankings] GET /rankings failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/picks/standings?sport=basketball — real league standings
+// (ESPN), grouped by league (soccer spans several; basketball returns
+// NBA + WNBA groups). Server-cached 6h in the adapter. Tennis returns
+// an empty list honestly — tours use rankings, not standings, and that
+// data isn't wired up.
+//
+// Registered before GET /:id — same route-ordering rule as /rankings.
+router.get('/standings', async (req, res) => {
+  try {
+    const { sport } = req.query;
+    if (!sport) return res.status(400).json({ error: 'sport query param is required.' });
+    const groups = await getStandings(sport);
+    res.json({ groups });
+  } catch (err) {
+    console.error('[standings] GET /standings failed:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
