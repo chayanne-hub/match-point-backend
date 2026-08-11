@@ -190,7 +190,15 @@ router.get('/today', async (req, res) => {
       // information, not something to overwrite), only the live
       // judgment itself is swapped in.
       const liveOverride = m.status === 'live' ? m.picks.find((pk) => pk.pickType === 'live') : null;
-      const displayPick = liveOverride ? { ...p, selection: liveOverride.selection, confidence: liveOverride.confidence, rationale: liveOverride.rationale, odds: liveOverride.odds } : p;
+      // entryOdds is the PREGAME pick's frozen price — the number the
+      // call was originally made at. The live record's odds get
+      // overwritten with the current market price every cycle, so
+      // without carrying this through separately there'd be nothing to
+      // compare against. This is what the Line Value meter measures:
+      // current live price vs. the price when the pick was made.
+      const displayPick = liveOverride
+        ? { ...p, selection: liveOverride.selection, confidence: liveOverride.confidence, rationale: liveOverride.rationale, odds: liveOverride.odds, entryOdds: p.odds }
+        : p;
       shaped.push(await shapePick({ ...displayPick, match: m }, userId));
     } else {
       shaped.push(shapeUnanalyzedMatch(m));
@@ -283,6 +291,7 @@ async function shapePick(p, userId) {
     confidence: unlocked ? p.confidence : null,
     rationale: unlocked ? p.rationale : null,
     odds: p.odds,
+    entryOdds: p.entryOdds ?? null, // pregame price for this same pick, when the match is live — powers the Line Value meter
     // Raw market lines, not model analysis — shown to everyone, same
     // as odds above. Null whenever a book hasn't posted that market
     // yet, never a fabricated number.
