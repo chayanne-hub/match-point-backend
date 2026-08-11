@@ -89,7 +89,8 @@ async function analyzeMatchWithRetry(params, context) {
 }
 const { fetchMatches, fetchScores } = require('./fetchMatches');
 const { fetchEspnLiveScores, matchEspnEvent } = require('./fetchEspn');
-const { analyzeMatch, reassessLiveMatch, reassessLiveTotal } = require('./matchAnalyst');
+const { analyzeMatch, reassessLiveTotal } = require('./matchAnalyst');
+const { marketImpliedFactor } = require('./scoreModel');
 const { computePregameProjectedTotal, computeLiveProjectedTotal, computeLiveProjectedTotalByInnings } = require('./teamTotals');
 const { computePregameProjectedTotalGames, computeLiveProjectedTotalGames } = require('./tennisTotalGames');
 const { computePregameProjectedTotalGoals, computeLiveProjectedTotalGoals, parseElapsedMinutesFromDisplayClock } = require('./soccerGoalsTotal');
@@ -651,93 +652,60 @@ async function updateLivePicksForSport(sportSlug) {
     });
 
     if (existingLive) {
-      // Genuinely re-evaluate each cycle — weighing the live score and
-      // the players' known skill/history (via the original pre-match
-      // analysis as context) alongside the current odds when available.
-      // Odds are real signal (fast market movement can reflect something
-      // real — an injury, momentum), but reassessLiveMatch() is
-      // explicitly told not to let them be the ONLY driver, and it
-      // handles "not available" gracefully when there's no live market.
-      const reassessment = await reassessLiveMatch({
-        sport: sportSlug,
-        competitorA: m.competitorA,
-        competitorB: m.competitorB,
-        liveScore: match.liveScore,
-        oddsA: hasLiveOdds ? m.oddsA : null,
-        oddsB: hasLiveOdds ? m.oddsB : null,
-        priorAnalysis: existingLive.rationale,
-      });
-
-      if (reassessment) {
-        // Only touch the displayed price if we actually have a fresh
-        // one this cycle — otherwise leave whatever was last stored
-        // (real closing/live odds) rather than guessing or nulling it
-        // out, since odds is a required field on Pick.
-        const updateData = {
-          selection: reassessment.selection,
-          confidence: reassessment.confidence,
-          rationale: reassessment.analysis,
-          factsUsed: JSON.stringify(reassessment.factors),
-        };
-        if (hasLiveOdds) {
-          updateData.odds = reassessment.selection === `${m.competitorA} ML` ? m.oddsA : m.oddsB;
-        }
-        await db.pick.update({ where: { id: existingLive.id }, data: updateData });
-      } else if (hasLiveOdds) {
-        // Reassessment failed this cycle (timeout, bad response, etc.) —
-        // still refresh the displayed price so it doesn't go stale, but
-        // leave the judgment (selection/confidence/rationale) untouched
-        // rather than guess.
-        const currentOdds = existingLive.selection === `${m.competitorA} ML` ? m.oddsA : m.oddsB;
-        await db.pick.update({
-          where: { id: existingLive.id },
-          data: { odds: currentOdds },
-        });
-      }
-    } else {
-      const MAX_CYCLE_FAILURES = 3;
-      if (match.analysisFailCycles >= MAX_CYCLE_FAILURES) continue; // same real cap as the pregame path — stop auto-retrying a consistently-failing match
-
-      const analysis = await analyzeMatchWithRetry({
-        sport: sportSlug,
-        competitorA: m.competitorA,
-        competitorB: m.competitorB,
-        oddsA: hasLiveOdds ? m.oddsA : null,
-        oddsB: hasLiveOdds ? m.oddsB : null,
-        startTime: m.startTime,
-      }, `${m.competitorA} vs ${m.competitorB} (live, no pregame pick existed)`);
-      if (!analysis) {
-        const newFailCount = match.analysisFailCycles + 1;
-        await db.match.update({ where: { id: match.id }, data: { analysisFailCycles: newFailCount } });
-        if (newFailCount >= MAX_CYCLE_FAILURES) {
-          recordAnalysisFailure(`${m.competitorA} vs ${m.competitorB} (live) — exceeded ${MAX_CYCLE_FAILURES} cross-cycle failures`);
-        }
-        continue; // try again next cycle, up to the cap above
-      }
-
-      // odds is a required field on Pick — if there's no live in-play
-      // price, fall back to the closing line captured just before
-      // kickoff (a real, genuine market price) rather than blocking
-      // pick creation entirely just because no in-play market exists.
-      let pickedOdds;
+      // Product decision: Live Now's confidence moves on real LIVE ODDS
+      // movement only, never a fresh Claude call. Everywhere else on
+      // the site (pregame picks, the archive, stats) stays exactly as
+      // it was — real research-backed analysis, frozen once set. This
+      // is the same market-implied-probability math scoreModel.js's
+      // marketImpliedFactor already uses for the pregame market factor,
+      // just applied to the current LIVE price instead of the pregame
+      // one. Real benefits over the old Claude-reassessment approach:
+      // it's free (no API cost per cycle), it's instant, and it can't
+      // silently fail the way an API call can — which is exactly what
+      // was happening before (a failed reassessment call left
+      // confidence frozen with no visible symptom other than "it's not
+      // moving," confirmed via the Health tab's failure counts).
       if (hasLiveOdds) {
-        pickedOdds = analysis.selection === `${m.competitorA} ML` ? m.oddsA : m.oddsB;
-      } else if (match.closingOddsA !== null && match.closingOddsB !== null) {
-        pickedOdds = analysis.selection === `${m.competitorA} ML` ? match.closingOddsA : match.closingOddsB;
-      } else {
-        continue; // no live odds AND no closing odds on record — genuinely nothing to store, try again next cycle
+        const normalized = marketImpliedFactor(m.oddsA, m.oddsB);
+        if (normalized !== null) {
+          const confidence = Math.round(50 + Math.abs(normalized) * 50);
+          const favorsA = normalized >= 0; // "even" defaults to A, same tiebreak buildPicks() already uses pregame
+          const selection = favorsA ? `${m.competitorA} ML` : `${m.competitorB} ML`;
+          await db.pick.update({
+            where: { id: existingLive.id },
+            data: { selection, confidence, odds: favorsA ? m.oddsA : m.oddsB },
+          });
+        }
       }
+      // No live odds this cycle — leave selection/confidence/odds exactly
+      // as they are. Never guess a number with nothing real to derive it
+      // from, same rule this whole pipeline follows everywhere else.
+    } else {
+      // A match's FIRST live pick, for the rare case no pregame pick
+      // ever existed for it. Same "market math, not analysis" rule
+      // applies here too — no Claude call means this genuinely cannot
+      // fail the way analyzeMatchWithRetry could, so there's no
+      // analysisFailCycles tracking needed on this path anymore.
+      const sourceOddsA = hasLiveOdds ? m.oddsA : match.closingOddsA;
+      const sourceOddsB = hasLiveOdds ? m.oddsB : match.closingOddsB;
+      if (sourceOddsA === null || sourceOddsB === null) continue; // genuinely nothing to derive a number from yet — try again next cycle once odds exist
+
+      const normalized = marketImpliedFactor(sourceOddsA, sourceOddsB);
+      if (normalized === null) continue;
+      const confidence = Math.round(50 + Math.abs(normalized) * 50);
+      const favorsA = normalized >= 0;
+      const selection = favorsA ? `${m.competitorA} ML` : `${m.competitorB} ML`;
 
       await db.pick.create({
         data: {
           match: { connect: { id: match.id } },
           pickType: 'live',
           isLive: true,
-          selection: analysis.selection,
-          confidence: analysis.confidence,
-          odds: pickedOdds,
-          rationale: analysis.analysis,
-          factsUsed: JSON.stringify(analysis.factors),
+          selection,
+          confidence,
+          odds: favorsA ? sourceOddsA : sourceOddsB,
+          rationale: 'Live confidence tracks the current market odds directly — no separate research pass runs while a match is in progress.',
+          factsUsed: JSON.stringify([]),
         },
       });
     }
