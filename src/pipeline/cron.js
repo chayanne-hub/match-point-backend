@@ -659,40 +659,42 @@ async function updateLivePicksForSport(sportSlug) {
     });
 
     if (existingLive) {
-      // Product decision: Live Now's confidence moves on real LIVE ODDS
-      // movement only, never a fresh Claude call. Everywhere else on
-      // the site (pregame picks, the archive, stats) stays exactly as
-      // it was — real research-backed analysis, frozen once set. This
-      // is the same market-implied-probability math scoreModel.js's
-      // marketImpliedFactor already uses for the pregame market factor,
-      // just applied to the current LIVE price instead of the pregame
-      // one. Real benefits over the old Claude-reassessment approach:
-      // it's free (no API cost per cycle), it's instant, and it can't
-      // silently fail the way an API call can — which is exactly what
-      // was happening before (a failed reassessment call left
-      // confidence frozen with no visible symptom other than "it's not
-      // moving," confirmed via the Health tab's failure counts).
+      // Product decision: the PICK itself is locked the moment it's
+      // first set live — only confidence and the displayed price move
+      // after that, using real live-odds movement, never a fresh Claude
+      // call. This is deliberately NOT the same math as the pregame/
+      // create-new-pick path below, which always reports confidence for
+      // whichever side the market currently favors (so it never drops
+      // below 50). Once locked, confidence needs to be able to honestly
+      // fall below 50% — that's the real signal that the market has
+      // turned against the pick you're actually showing, not something
+      // to hide by silently flipping the selection to match.
       if (hasLiveOdds) {
-        const normalized = marketImpliedFactor(m.oddsA, m.oddsB);
+        const lockedSideIsA = existingLive.selection === `${m.competitorA} ML`;
+        const normalized = marketImpliedFactor(m.oddsA, m.oddsB); // -1..+1, positive favors A
         if (normalized !== null) {
-          const confidence = Math.round(50 + Math.abs(normalized) * 50);
-          const favorsA = normalized >= 0; // "even" defaults to A, same tiebreak buildPicks() already uses pregame
-          const selection = favorsA ? `${m.competitorA} ML` : `${m.competitorB} ML`;
+          const signedForLockedSide = lockedSideIsA ? normalized : -normalized;
+          const confidence = Math.max(0, Math.min(100, Math.round(50 + signedForLockedSide * 50)));
+          const lockedOdds = lockedSideIsA ? m.oddsA : m.oddsB;
           await db.pick.update({
             where: { id: existingLive.id },
-            data: { selection, confidence, odds: favorsA ? m.oddsA : m.oddsB },
+            data: { confidence, odds: lockedOdds }, // selection intentionally untouched — locked
           });
         }
       }
-      // No live odds this cycle — leave selection/confidence/odds exactly
-      // as they are. Never guess a number with nothing real to derive it
-      // from, same rule this whole pipeline follows everywhere else.
+      // No live odds this cycle — leave confidence/odds exactly as they
+      // are. Never guess a number with nothing real to derive it from,
+      // same rule this whole pipeline follows everywhere else.
     } else {
       // A match's FIRST live pick, for the rare case no pregame pick
-      // ever existed for it. Same "market math, not analysis" rule
-      // applies here too — no Claude call means this genuinely cannot
-      // fail the way analyzeMatchWithRetry could, so there's no
-      // analysisFailCycles tracking needed on this path anymore.
+      // ever existed for it. This is the one moment the pick itself
+      // still gets chosen from the market (whichever side it favors
+      // right now) — from here on, every future cycle hits the locked
+      // branch above and never touches selection again. Same "market
+      // math, not analysis" rule applies here too — no Claude call
+      // means this genuinely cannot fail the way analyzeMatchWithRetry
+      // could, so there's no analysisFailCycles tracking needed on this
+      // path anymore.
       const sourceOddsA = hasLiveOdds ? m.oddsA : match.closingOddsA;
       const sourceOddsB = hasLiveOdds ? m.oddsB : match.closingOddsB;
       if (sourceOddsA === null || sourceOddsB === null) continue; // genuinely nothing to derive a number from yet — try again next cycle once odds exist
