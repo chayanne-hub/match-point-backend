@@ -445,8 +445,16 @@ this exact shape:
   "confidence": <integer 0-100>,
   "analysis": "2-4 sentence writeup citing the specific findings that drove this pick",
   "factors": [ { "label": "...", "tag": "...", "body": "..." }, ... ]${hasSpread ? `,
-  "spreadPick": { "selection": "${competitorA} ${spreadLineA > 0 ? '+' : ''}${spreadLineA}" or "${competitorB} ${spreadLineB > 0 ? '+' : ''}${spreadLineB}", "confidence": <integer 0-100>, "analysis": "1-2 sentences" }` : ''}${hasTotal ? `,
-  "totalPick": { "selection": "Over ${total}" or "Under ${total}", "confidence": <integer 0-100>, "analysis": "1-2 sentences" }` : ''}
+  "spreadPick": {
+    "selection": "${competitorA} ${spreadLineA > 0 ? '+' : ''}${spreadLineA}" or "${competitorB} ${spreadLineB > 0 ? '+' : ''}${spreadLineB}",
+    "confidence": <integer 0-100>,
+    "analysis": "2-3 sentence writeup specific to the spread/margin judgment — not a repeat of the moneyline analysis",
+    "factors": [ { "label": "...", "tag": "Favors ${competitorA} ${spreadLineA > 0 ? '+' : ''}${spreadLineA}" or "Favors ${competitorB} ${spreadLineB > 0 ? '+' : ''}${spreadLineB}" or "Neutral", "body": "one sentence" }, ... ] — the specific things that actually informed the SPREAD/MARGIN judgment specifically (e.g. blowout potential, garbage-time risk, a team's tendency to cover/not cover as a favorite or underdog) — do not just copy the moneyline factors array` : ''}${hasTotal ? `,
+  "totalPick": {
+    "selection": "Over ${total}" or "Under ${total}",
+    "confidence": <integer 0-100>,
+    "analysis": "2-3 sentence writeup specific to the combined-scoring judgment — not a repeat of the moneyline or spread analysis",
+    "factors": [ { "label": "...", "tag": "Favors Over" or "Favors Under" or "Neutral", "body": "one sentence" }, ... ] — the specific pace/scoring-environment things from ${totalGuidance} that actually informed THIS total judgment` : ''}
 }
 ${JSON_VALIDITY_REMINDER}
 `.trim();
@@ -489,7 +497,11 @@ ${JSON_VALIDITY_REMINDER}
         // JSON response or, worse, no text response at all (the two
         // dominant failure modes in production logs). Real headroom here
         // directly reduces both.
-        max_tokens: 5000,
+        // Was 1500, then 5000 — bumped again since spreadPick/totalPick now
+        // each carry their own factors array (not just a 1-2 sentence
+        // blurb), real additional output volume on top of the same
+        // existing budget concerns described below.
+        max_tokens: 6500,
         system: `${systemPrompt}\n\n${jsonInstruction}`,
         tools: [{ type: 'web_search_20250305', name: 'web_search' }],
         messages: [{ role: 'user', content: `Analyze this match:\n\n${matchDescription}` }],
@@ -558,6 +570,10 @@ ${JSON_VALIDITY_REMINDER}
         typeof parsed.spreadPick.analysis === 'string'
       ) {
         parsed.spreadPick.confidence = Math.max(0, Math.min(100, Math.round(parsed.spreadPick.confidence)));
+        // factors is a nice-to-have, not a hard requirement — a missing or
+        // malformed factors array shouldn't throw away an otherwise-valid
+        // spreadPick, same "degrade gracefully" rule as everywhere else.
+        if (!Array.isArray(parsed.spreadPick.factors)) parsed.spreadPick.factors = [];
       } else {
         if (parsed.spreadPick) console.warn(`[match-analyst] dropping malformed spreadPick for ${competitorA} vs ${competitorB}`);
         parsed.spreadPick = null;
@@ -575,6 +591,7 @@ ${JSON_VALIDITY_REMINDER}
         typeof parsed.totalPick.analysis === 'string'
       ) {
         parsed.totalPick.confidence = Math.max(0, Math.min(100, Math.round(parsed.totalPick.confidence)));
+        if (!Array.isArray(parsed.totalPick.factors)) parsed.totalPick.factors = [];
       } else {
         if (parsed.totalPick) console.warn(`[match-analyst] dropping malformed totalPick for ${competitorA} vs ${competitorB}`);
         parsed.totalPick = null;

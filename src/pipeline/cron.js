@@ -402,6 +402,7 @@ async function runForSport(sportSlug, dayFilter = null) {
           confidence: analysis.spreadPick.confidence,
           odds: analysis.spreadPick.selection === `${m.competitorA} ${m.spread > 0 ? '+' : ''}${m.spread}` ? m.spreadOddsA : m.spreadOddsB,
           rationale: analysis.spreadPick.analysis,
+          factsUsed: JSON.stringify(analysis.spreadPick.factors || []),
         },
       });
     }
@@ -418,6 +419,7 @@ async function runForSport(sportSlug, dayFilter = null) {
           confidence: analysis.totalPick.confidence,
           odds: analysis.totalPick.selection.startsWith('Over') ? m.overOdds : m.underOdds,
           rationale: analysis.totalPick.analysis,
+          factsUsed: JSON.stringify(analysis.totalPick.factors || []),
         },
       });
     }
