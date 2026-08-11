@@ -601,6 +601,13 @@ async function triggerManualRunTomorrow() {
  * during play. Unlike the main pick-creation loop, this UPDATES existing
  * picks instead of skipping them once they exist.
  */
+// Tracks the last time each live-total pick actually got a real Claude
+// reassessment call, independent of how often the outer live loop
+// itself runs (see LIVE_TOTAL_REASSESS_INTERVAL_MS below, inside
+// updateLivePicksForSport) — in-memory only, resets on redeploy, which
+// is fine since a fresh reassessment on restart is harmless.
+const lastTotalReassessAt = new Map();
+
 async function updateLivePicksForSport(sportSlug) {
   let matches;
   try {
@@ -760,27 +767,43 @@ async function updateLivePicksForSport(sportSlug) {
       });
 
       if (existingLiveTotal) {
-        const reassessment = await reassessLiveTotal({
-          sport: sportSlug,
-          competitorA: m.competitorA,
-          competitorB: m.competitorB,
-          total: m.total,
-          liveScore: match.liveScore,
-          liveProjection,
-          priorAnalysis: existingLiveTotal.rationale,
-        });
-        if (reassessment) {
-          const freshPrice = reassessment.selection.startsWith('Over') ? m.overOdds : m.underOdds;
-          await db.pick.update({
-            where: { id: existingLiveTotal.id },
-            data: {
-              selection: reassessment.selection,
-              confidence: reassessment.confidence,
-              rationale: reassessment.analysis,
-              ...(freshPrice !== null && { odds: freshPrice }), // only touch odds if this cycle actually has a fresh price — required field, never null it out
-            },
+        // Real cost gate, independent of LIVE_PIPELINE_INTERVAL_MS.
+        // This Claude call used to inherit whatever cadence the outer
+        // live loop ran at — fine back when that loop itself was 15
+        // minutes, but now that Live Now's odds-based confidence needs
+        // a much faster loop (2 min), letting this Claude call ride
+        // along unthrottled would multiply its cost by ~7.5x with no
+        // one having actually decided that. This keeps its own slower,
+        // separately-configurable minimum spacing regardless of how
+        // often the outer loop ticks.
+        const lastReassessedAt = lastTotalReassessAt.get(existingLiveTotal.id) || 0;
+        const totalReassessIntervalMs = Number(process.env.LIVE_TOTAL_REASSESS_INTERVAL_MS) || 900000; // 15 min default — matches the original combined-loop cadence this is now decoupled from
+        if (Date.now() - lastReassessedAt >= totalReassessIntervalMs) {
+          const reassessment = await reassessLiveTotal({
+            sport: sportSlug,
+            competitorA: m.competitorA,
+            competitorB: m.competitorB,
+            total: m.total,
+            liveScore: match.liveScore,
+            liveProjection,
+            priorAnalysis: existingLiveTotal.rationale,
           });
+          lastTotalReassessAt.set(existingLiveTotal.id, Date.now());
+          if (reassessment) {
+            const freshPrice = reassessment.selection.startsWith('Over') ? m.overOdds : m.underOdds;
+            await db.pick.update({
+              where: { id: existingLiveTotal.id },
+              data: {
+                selection: reassessment.selection,
+                confidence: reassessment.confidence,
+                rationale: reassessment.analysis,
+                ...(freshPrice !== null && { odds: freshPrice }), // only touch odds if this cycle actually has a fresh price — required field, never null it out
+              },
+            });
+          }
         }
+        // Gate not yet cleared — skip the Claude call entirely this
+        // cycle, leave the existing live-total pick exactly as it was.
       } else if (liveProjection) {
         // First cycle a live projection actually exists for this match —
         // seed the live total pick from it directly rather than waiting
