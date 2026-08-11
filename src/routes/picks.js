@@ -127,6 +127,18 @@ router.get('/today', async (req, res) => {
     return res.json({ picks: shaped });
   }
 
+  // ?includeFinal=true — the Scoreboard tab needs this. Default mode
+  // (below, no query param) intentionally excludes finished matches,
+  // since that's the right behavior for the live-polling Money Line
+  // board. But that meant NOTHING ever fetched final matches with their
+  // real score/pick shape via REST — Scoreboard was silently relying on
+  // whatever finished while a WebSocket happened to be connected during
+  // this exact browser session, missing anything that finished earlier
+  // or while the tab was closed. This explicitly asks for the full
+  // day's slate including finals, same full pick/score shape as normal.
+  const includeFinal = req.query.includeFinal === 'true';
+  const statusFilter = includeFinal ? { in: ['scheduled', 'live', 'final'] } : { in: ['scheduled', 'live'] };
+
   // Default moneyline mode: ONE query on Match (with its picks included),
   // not two separate queries against Pick and Match — this endpoint
   // already polls every 20 seconds from the frontend, so doubling its
@@ -137,8 +149,12 @@ router.get('/today', async (req, res) => {
   const matches = await db.match.findMany({
     where: {
       startTime: { gte: startOfDay, lte: endOfDay },
-      status: { in: ['scheduled', 'live'] },
-      skipAnalysis: false,
+      status: statusFilter,
+      // skipAnalysis only matters for matches the pipeline might still
+      // attempt — irrelevant (and could wrongly hide a real final match)
+      // once a match has actually finished, so it's only applied in the
+      // normal (non-final) mode.
+      ...(includeFinal ? {} : { skipAnalysis: false }),
       ...(sport ? { sport: { slug: sport } } : {}),
     },
     include: {
