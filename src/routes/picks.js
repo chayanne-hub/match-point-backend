@@ -636,6 +636,78 @@ router.get('/insiders', async (req, res) => {
   }
 });
 
+// GET /api/picks/rankings?sport=tennis — the model's own power rankings.
+// Ranks teams/players by the model's REAL data about them: how confident
+// the model has been when picking them, and how those picks actually
+// graded out. No invented composite score — just honest aggregates
+// (times picked, avg confidence, W-L record, win rate), sorted by avg
+// confidence. Only frozen pregame picks (model/winner, moneyline) count,
+// same rule the Win Rate Tracker uses — live picks evolve mid-game and
+// aren't a real prediction to rank anyone by.
+//
+// IMPORTANT: registered before GET /:id — same Express route-ordering
+// rule as /news and /insiders above, or "rankings" gets swallowed as a
+// pick id.
+router.get('/rankings', async (req, res) => {
+  try {
+    const { sport } = req.query;
+
+    const picks = await db.pick.findMany({
+      where: {
+        pickType: { in: ['model', 'winner'] },
+        market: 'moneyline',
+        ...(sport ? { match: { sport: { slug: sport } } } : {}),
+      },
+      include: {
+        result: true,
+        match: { include: { sport: true } },
+      },
+    });
+
+    const byName = {};
+    for (const p of picks) {
+      const name = p.selection.replace(/\s*ML$/, '').trim();
+      if (!name) continue;
+      const key = `${p.match.sport.slug}|${name}`;
+      if (!byName[key]) {
+        byName[key] = { name, sport: p.match.sport.slug, timesPicked: 0, confidenceSum: 0, wins: 0, losses: 0, pushes: 0 };
+      }
+      const row = byName[key];
+      row.timesPicked++;
+      row.confidenceSum += p.confidence;
+      if (p.result) {
+        if (p.result.outcome === 'win') row.wins++;
+        else if (p.result.outcome === 'loss') row.losses++;
+        else if (p.result.outcome === 'push') row.pushes++;
+      }
+    }
+
+    const rankings = Object.values(byName)
+      .map((r) => {
+        const decided = r.wins + r.losses;
+        return {
+          name: r.name,
+          sport: r.sport,
+          timesPicked: r.timesPicked,
+          avgConfidence: Math.round(r.confidenceSum / r.timesPicked),
+          wins: r.wins,
+          losses: r.losses,
+          pushes: r.pushes,
+          winRate: decided > 0 ? Math.round((r.wins / decided) * 100) : null,
+        };
+      })
+      // avg confidence is the ranking key — it's literally "how the
+      // model rates them"; record/win rate are shown alongside as the
+      // evidence. Ties break toward the larger sample.
+      .sort((a, b) => b.avgConfidence - a.avgConfidence || b.timesPicked - a.timesPicked);
+
+    res.json({ rankings });
+  } catch (err) {
+    console.error('[rankings] GET /rankings failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/picks/insiders/feed?sport=tennis — server-cached recent posts
 // per curated account, replacing the client-side X embed widget. Only
 // this backend's single IP ever calls X directly (via fetchXTimeline.js,
