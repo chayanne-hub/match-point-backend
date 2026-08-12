@@ -293,7 +293,13 @@ async function runForSport(sportSlug, dayFilter = null) {
     const match = await db.match.upsert({
       where: { externalId: m.externalId },
       update: {
-        status: m.status,
+        // Never let the odds provider's schedule-derived guess overwrite
+        // ESPN's observed state. Promotion to live/final comes from the
+        // score poller; this side only ever moves a match that's still
+        // genuinely scheduled.
+        ...(existingMatch && ['live', 'in_progress', 'final'].includes(existingMatch.status)
+          ? {}
+          : { status: m.status }),
         ...startTimeUpdate,
         // Lines move until kickoff — keep them fresh on every pull, same
         // as status/startTime already were.

@@ -58,6 +58,11 @@ const DYNAMIC_PREFIXES = {
 // player is a game from winning. The old cap treated those as garbage and
 // threw away every live quote in a one-sided match, which froze live
 // confidence and odds at their pregame values.
+// How long after a scheduled start we'll assume a match really is under
+// way even though ESPN never confirmed it. Only a safety net — ESPN is
+// the real source of truth for live state.
+const STALE_START_FALLBACK_MS = Number(process.env.STALE_START_FALLBACK_MS) || 3 * 60 * 60 * 1000;
+
 const MAX_PLAUSIBLE_ODDS = 100000;
 
 function isPlausibleOdds(price) {
@@ -322,7 +327,20 @@ function normalizeMatch(sport, raw) {
     startTime: new Date(raw.commence_time),
     oddsA,
     oddsB,
-    status: new Date(raw.commence_time) <= new Date() ? 'live' : 'scheduled',
+    // The odds provider does NOT know whether a match has started — it
+    // only knows when it was SCHEDULED to. Treating "start time passed"
+    // as "live" is wrong for tennis in particular: a session is scheduled
+    // at one timestamp and the matches actually begin as courts free up,
+    // so at the session time every match in the block flipped to LIVE at
+    // once, all showing 0-0. ESPN reports actual in-progress state and is
+    // polled every 15 seconds, so it owns this now.
+    //
+    // The fallback exists so a match ESPN never matches (a name mismatch,
+    // an event it doesn't cover) doesn't stay 'scheduled' forever and
+    // stop receiving live odds. Well past any realistic session slip.
+    status: (Date.now() - new Date(raw.commence_time).getTime()) > STALE_START_FALLBACK_MS
+      ? 'live'
+      : 'scheduled',
   };
 }
 
