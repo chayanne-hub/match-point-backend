@@ -933,6 +933,25 @@ async function updateEspnScoresForSport(sportSlug) {
 
     const newStatus = event.completed ? 'final' : event.inProgress ? 'live' : match.status;
 
+    // ONE canonical live-clock string, computed here and used for BOTH the
+    // database write and the WebSocket broadcast. These used to be derived
+    // separately and disagreed: the DB stored "Q3 8:42" for quarter sports
+    // while the broadcast pushed a bare "8:42", so the displayed clock
+    // visibly changed format depending on whether it arrived by socket or
+    // by the 20-second poll.
+    //   - Quarter sports: "Q{period} {clock}"
+    //   - Count-up clock (soccer): ESPN's displayClock is already correct
+    //   - Baseball: no clock at all; ESPN's own "Top 7th"/"End 6th" status
+    //     is the real source of truth
+    let newLiveClock = null;
+    if (QUARTER_BASED_SPORTS.includes(sportSlug) && event.period != null && event.displayClock) {
+      newLiveClock = `Q${event.period} ${event.displayClock}`;
+    } else if (COUNT_UP_CLOCK_SPORTS.includes(sportSlug) && event.displayClock) {
+      newLiveClock = event.displayClock;
+    } else if (sportSlug === 'baseball' && event.statusDetail) {
+      newLiveClock = event.statusDetail;
+    }
+
     await db.match.update({
       where: { id: match.id },
       data: {
@@ -944,20 +963,7 @@ async function updateEspnScoresForSport(sportSlug) {
         ...(event.periodScores && { periodScores: event.periodScores }),
         ...(event.period != null && { period: event.period }),
         ...(event.clockSeconds != null && { clockSeconds: event.clockSeconds }),
-        // "Q{period} {clock}" only makes sense for quarter-based sports —
-        // baseball's period means inning number, not a quarter, and has
-        // no countdown clock at all. Leave liveClock alone for baseball
-        // rather than writing a garbled/wrong display string onto it.
-        ...(QUARTER_BASED_SPORTS.includes(sportSlug) && event.period != null && event.displayClock && { liveClock: `Q${event.period} ${event.displayClock}` }),
-        // Soccer: ESPN's displayClock ("72'", "45+2'") is already in the
-        // right display format — no "Q{n}" prefix needed, just persist it
-        // directly. This was being fetched already (parseTeamCompetition
-        // captures it generically) but never actually saved before now.
-        ...(COUNT_UP_CLOCK_SPORTS.includes(sportSlug) && event.displayClock && { liveClock: event.displayClock }),
-        // Baseball: no clock at all, so period/displayClock don't apply —
-        // ESPN's own human-readable inning status ("End 6th", "Top 7th")
-        // is the real source of truth here, previously never captured.
-        ...(sportSlug === 'baseball' && event.statusDetail && { liveClock: event.statusDetail }),
+        ...(newLiveClock !== null && { liveClock: newLiveClock }),
       },
     });
 
@@ -966,7 +972,23 @@ async function updateEspnScoresForSport(sportSlug) {
     // the score moved; broadcasting unconditionally would flood clients
     // with no-op messages every cycle for every match, live or not.
     const liveScoreStr = `${event.homeScore} - ${event.awayScore}`;
-    const somethingChanged = match.status !== newStatus || match.liveScore !== liveScoreStr;
+    // Previously this only compared status and the aggregate score string,
+    // which missed most real in-play movement:
+    //   - TENNIS: homeScore/awayScore are SETS WON, so every game inside a
+    //     set ("6-4, 3-2" -> "6-4, 4-2") changed setScore while the score
+    //     string stayed identical — nothing was ever pushed mid-set.
+    //   - BASEBALL: "Top 7th" -> "Bot 7th" moves with no runs scoring.
+    //   - BASKETBALL/FOOTBALL: the game clock and quarter breakdown move
+    //     constantly between scoring plays.
+    // Now any real change to the fields we actually display triggers a push.
+    const somethingChanged =
+      match.status !== newStatus ||
+      match.liveScore !== liveScoreStr ||
+      (event.setScore && match.setScore !== event.setScore) ||
+      (event.periodScores && match.periodScores !== event.periodScores) ||
+      (newLiveClock !== null && match.liveClock !== newLiveClock) ||
+      (event.period != null && match.period !== event.period);
+
     if (somethingChanged) {
       broadcastScoreUpdate({
         matchId: match.id,
@@ -974,7 +996,7 @@ async function updateEspnScoresForSport(sportSlug) {
         matchup: `${match.competitorA} vs ${match.competitorB}`,
         matchStatus: newStatus,
         liveScore: liveScoreStr,
-        liveClock: event.statusDetail || event.displayClock || null,
+        liveClock: newLiveClock, // same string the DB now stores — no more format mismatch
         period: event.period ?? null,
         setScore: event.setScore || null,
         periodScores: event.periodScores || null,
