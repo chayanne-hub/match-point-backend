@@ -111,6 +111,12 @@ model Match {
   /// The Odds API key this match came from (e.g. tennis_atp_cincinnati_open).
   /// Tennis is keyed per tournament, so this is what lets a live refresh
   /// target one event instead of every tournament currently running.
+  /// How many times the provider has pushed this match's start time LATER.
+  /// Real reschedules (a tennis match slipping when the previous one
+  /// overruns) are normal and must reach the board. A provider re-reporting
+  /// a drifting timestamp forever is not — that made matches look
+  /// permanently "about to start". Counting the pushes separates the two.
+  startTimePushes Int   @default(0)
   sportKey     String?
   bestOddsA    Int?
   bestOddsB    Int?

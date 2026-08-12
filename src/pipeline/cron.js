@@ -249,15 +249,52 @@ async function runForSport(sportSlug, dayFilter = null) {
     // since those legitimately change pregame.
     const existingMatch = await db.match.findUnique({
       where: { externalId: m.externalId },
-      include: { picks: { where: { pickType: { in: ['model', 'winner'] } }, take: 1 } },
     });
-    const hasRealPick = existingMatch && existingMatch.picks.length > 0;
+
+    // START TIME: update it, but not blindly.
+    //
+    // Freezing it entirely once a pick existed stopped the drift bug, but
+    // broke something more common — tennis matches are scheduled "not
+    // before" a session time and routinely slip when the court's previous
+    // match overruns. Those are real reschedules and the board was showing
+    // stale times for the rest of the day.
+    //
+    // The distinction that matters isn't "has a pick", it's whether the
+    // time keeps being pushed. A genuine delay moves once or twice and
+    // settles; the drift pathology pushes forever so the match never
+    // arrives. Counting pushes catches the second without blocking the
+    // first. A match that's already live or final is frozen outright —
+    // its start time is history at that point, not a schedule.
+    const MAX_START_TIME_PUSHES = 6;
+    const prevStart = existingMatch ? new Date(existingMatch.startTime).getTime() : null;
+    const nextStart = new Date(m.startTime).getTime();
+    const alreadyUnderway = existingMatch && ['live', 'in_progress', 'final'].includes(existingMatch.status);
+    const pushes = existingMatch?.startTimePushes ?? 0;
+
+    let startTimeUpdate = {};
+    if (!existingMatch) {
+      startTimeUpdate = {}; // create path sets it below
+    } else if (alreadyUnderway) {
+      // no-op: a started match's time is a fact, not a plan
+    } else if (nextStart <= prevStart) {
+      // Moved earlier or unchanged — never the drift pathology, always safe.
+      startTimeUpdate = { startTime: m.startTime };
+    } else if (pushes < MAX_START_TIME_PUSHES) {
+      startTimeUpdate = { startTime: m.startTime, startTimePushes: pushes + 1 };
+      const mins = Math.round((nextStart - prevStart) / 60000);
+      if (mins >= 5) {
+        console.log(`[pipeline] ${m.competitorA} vs ${m.competitorB}: start pushed ${mins}m later (${pushes + 1}/${MAX_START_TIME_PUSHES}).`);
+      }
+    } else if (pushes === MAX_START_TIME_PUSHES) {
+      console.warn(`[pipeline] ${m.competitorA} vs ${m.competitorB}: start time pushed ${pushes} times — freezing it, provider timestamp looks like it's drifting.`);
+      startTimeUpdate = { startTimePushes: pushes + 1 }; // record the freeze once, then stop logging
+    }
 
     const match = await db.match.upsert({
       where: { externalId: m.externalId },
       update: {
         status: m.status,
-        ...(hasRealPick ? {} : { startTime: m.startTime }),
+        ...startTimeUpdate,
         // Lines move until kickoff — keep them fresh on every pull, same
         // as status/startTime already were.
         spread: m.spread,
