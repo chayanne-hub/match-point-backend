@@ -130,7 +130,7 @@ async function resolveSportKeys(sport, baseUrl, apiKey) {
 
 // The Odds API only accepts one sport_key per request — this fetches each
 // key for a sport separately and merges the results.
-async function fetchFromProvider(sport) {
+async function fetchFromProvider(sport, onlyKeys) {
   const apiKey = process.env.ODDS_API_KEY;
   const baseUrl = process.env.ODDS_API_BASE_URL;
 
@@ -141,7 +141,22 @@ async function fetchFromProvider(sport) {
     );
   }
 
-  const sportKeys = await resolveSportKeys(sport, baseUrl, apiKey);
+  let sportKeys = await resolveSportKeys(sport, baseUrl, apiKey);
+
+  // Targeted refresh. Tennis is keyed PER TOURNAMENT, so a break of serve
+  // at Cincinnati used to trigger a paid call for Cincinnati AND Montreal
+  // AND every other running event — three or four requests to learn about
+  // one point. When the caller knows which tournament actually moved it
+  // says so, and we buy only that one. This is what makes a short
+  // reactive cooldown affordable.
+  if (Array.isArray(onlyKeys) && onlyKeys.length) {
+    const before = sportKeys.length;
+    sportKeys = sportKeys.filter((k) => onlyKeys.includes(k));
+    if (!sportKeys.length) return []; // asked for a key that isn't running
+    if (before !== sportKeys.length) {
+      console.log(`[fetchMatches] ${sport}: targeted ${sportKeys.join(', ')} (skipped ${before - sportKeys.length} other key(s)).`);
+    }
+  }
   let combined = [];
 
   for (const sportKey of sportKeys) {
@@ -265,6 +280,9 @@ function normalizeMatch(sport, raw) {
 
   return {
     externalId: raw.id,
+    // Which tournament/league key this came from — tennis needs it to
+    // refresh a single event rather than every running tournament.
+    sportKey: raw.sport_key || null,
     bestOddsA,
     bestOddsB,
     bestBookA,
@@ -299,8 +317,8 @@ function normalizeMatch(sport, raw) {
 // sport, tight enough to eliminate the season-dump problem.
 const MAX_DAYS_AHEAD = 14;
 
-async function fetchMatches(sport) {
-  const raw = await fetchFromProvider(sport);
+async function fetchMatches(sport, onlyKeys) {
+  const raw = await fetchFromProvider(sport, onlyKeys);
   const cutoff = Date.now() + MAX_DAYS_AHEAD * 24 * 60 * 60 * 1000;
   const filtered = raw.filter((m) => new Date(m.commence_time).getTime() <= cutoff);
   if (filtered.length < raw.length) {

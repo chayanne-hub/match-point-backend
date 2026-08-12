@@ -269,6 +269,7 @@ async function runForSport(sportSlug, dayFilter = null) {
         // Best price across all books — refreshed every pull like the
         // rest of the market data. Display only; BetMGM remains the line
         // of record for grading.
+        sportKey: m.sportKey ?? null,
         bestOddsA: m.bestOddsA ?? null,
         bestOddsB: m.bestOddsB ?? null,
         bestBookA: m.bestBookA ?? null,
@@ -282,6 +283,7 @@ async function runForSport(sportSlug, dayFilter = null) {
         competitorB: m.competitorB,
         startTime: m.startTime,
         status: m.status,
+        sportKey: m.sportKey ?? null,
         bestOddsA: m.bestOddsA ?? null,
         bestOddsB: m.bestOddsB ?? null,
         bestBookA: m.bestBookA ?? null,
@@ -728,10 +730,23 @@ async function triggerManualRunTomorrow() {
 // is fine since a fresh reassessment on restart is harmless.
 const lastTotalReassessAt = new Map();
 
-async function updateLivePicksForSport(sportSlug) {
+async function updateLivePicksForSport(sportSlug, onlyKeys) {
+  // Live odds are a paid, per-sport decision — see LIVE_ODDS_SPORTS.
+  if (!LIVE_ODDS_SPORTS.includes(sportSlug)) return 0;
+  // A database check before an API call. The live loop used to fetch odds
+  // for all five sports on every cycle regardless of whether any of them
+  // had a match in progress — paying for football odds at 4am when the
+  // NFL hasn't played in months. Every skipped sport here is a credit
+  // saved with zero loss of information.
+  const liveCount = await db.match.count({
+    where: { sport: { slug: sportSlug }, status: { in: ['live', 'in_progress'] } },
+  });
+  if (liveCount === 0) return 0;
+
   let matches;
   try {
-    matches = await fetchMatches(sportSlug);
+    // onlyKeys targets a single tournament when a scoring event named one.
+    matches = await fetchMatches(sportSlug, onlyKeys);
   } catch (err) {
     console.error(`[live-pipeline] ${sportSlug} fetch failed:`, err.message);
     return 0;
@@ -1060,6 +1075,79 @@ async function updateLivePicks() {
 // to backlog/reload timing at all.
 let liveIsRunning = false;
 
+// ---- Event-driven live odds ------------------------------------------
+// Sports flagged by a real scoring event, with a per-sport cooldown so a
+// burst of points can't turn into a burst of paid API calls. The baseline
+// interval loop still runs underneath this to catch drift with no scoring.
+// Which sports pay for LIVE odds. Pregame analysis still covers every
+// sport; this is only about in-play price refreshes, which are the
+// expensive part. Tennis is the launch focus: its lines move hardest (a
+// single break can swing a price 200 points), which is exactly the
+// volatility the "wait for a better number" thesis needs.
+const LIVE_ODDS_SPORTS = (process.env.LIVE_ODDS_SPORTS || 'tennis')
+  .split(',').map((x) => x.trim()).filter(Boolean);
+
+// Dirty set is keyed by TOURNAMENT, not sport. Tennis runs several events
+// at once under separate API keys, so a break at Cincinnati should buy
+// Cincinnati's odds and nothing else.
+const oddsDirty = new Map(); // sportSlug -> Set(sportKey)
+const lastReactiveFetch = new Map(); // sportKey (or sportSlug) -> timestamp
+
+function markOddsDirty(sportSlug, sportKey) {
+  if (!LIVE_ODDS_SPORTS.includes(sportSlug)) return; // not paying for live odds here
+  if (!oddsDirty.has(sportSlug)) oddsDirty.set(sportSlug, new Set());
+  if (sportKey) oddsDirty.get(sportSlug).add(sportKey);
+  else oddsDirty.get(sportSlug).add('*'); // unknown tournament — refresh the sport
+}
+
+// How soon after a scoring event we're willing to pay for fresh odds.
+// Books need a few seconds to reprice anyway, so firing instantly would
+// often just buy the stale number.
+const REACTIVE_COOLDOWN_MS = Number(process.env.LIVE_REACTIVE_COOLDOWN_MS) || 45000;
+
+async function processDirtySports() {
+  if (liveIsRunning) return; // never overlap the scheduled cycle
+  const now = Date.now();
+
+  // Cooldown is per TOURNAMENT key, so a busy event can't starve a
+  // quieter one running at the same time.
+  const work = [];
+  for (const [sportSlug, keys] of oddsDirty.entries()) {
+    const dueKeys = [...keys].filter((k) => now - (lastReactiveFetch.get(k) || 0) >= REACTIVE_COOLDOWN_MS);
+    if (dueKeys.length) work.push([sportSlug, dueKeys]);
+  }
+  if (!work.length) return;
+
+  liveIsRunning = true;
+  try {
+    for (const [sportSlug, dueKeys] of work) {
+      dueKeys.forEach((k) => {
+        oddsDirty.get(sportSlug).delete(k);
+        lastReactiveFetch.set(k, now);
+      });
+      const targeted = dueKeys.filter((k) => k !== '*');
+      try {
+        const updated = await updateLivePicksForSport(sportSlug, targeted.length ? targeted : null);
+        if (updated > 0) {
+          console.log(`[live-reactive] ${sportSlug}: refreshed ${targeted.length ? targeted.join(', ') : 'all keys'} after a scoring event.`);
+        }
+      } catch (err) {
+        console.error(`[live-reactive] ${sportSlug} failed: ${err.message}`);
+      }
+    }
+    beat('Live odds');
+  } finally {
+    liveIsRunning = false;
+  }
+}
+
+function startReactiveOdds() {
+  // Checked often; actual fetches are gated by the cooldown above, so
+  // this interval costs nothing on its own.
+  setInterval(() => { processDirtySports().catch(() => {}); }, 10000);
+  console.log(`[live-reactive] watching for scoring events (cooldown ${Math.round(REACTIVE_COOLDOWN_MS / 1000)}s per sport).`);
+}
+
 function startLiveScheduled() {
   const intervalMs = Number(process.env.LIVE_PIPELINE_INTERVAL_MS) || 900000; // 15 minutes — cost-conscious default pre-revenue; drop LIVE_PIPELINE_INTERVAL_MS lower once picks are actually selling
   setInterval(() => {
@@ -1194,6 +1282,12 @@ async function updateEspnScoresForSport(sportSlug) {
       (event.period != null && match.period !== event.period);
 
     if (somethingChanged) {
+      // A scoring event is exactly when the price moves — a break of
+      // serve, a goal, a run. ESPN polling is free and already runs every
+      // 15 seconds, so it makes a far better trigger than a clock: we buy
+      // odds when something happened, not on a timer that's either too
+      // slow to catch the swing or too fast to afford.
+      markOddsDirty(sportSlug, match.sportKey);
       broadcastScoreUpdate({
         matchId: match.id,
         sport: sportSlug,
@@ -1352,4 +1446,4 @@ function startEspnScheduled() {
   console.log('[espn-pipeline] scheduled to run every 15 seconds.');
 }
 
-module.exports = { runAll, startWatchdog, startScheduled, startLiveScheduled, startEspnScheduled, triggerManualRun, triggerManualRunTomorrow };
+module.exports = { runAll, startWatchdog, startReactiveOdds, startScheduled, startLiveScheduled, startEspnScheduled, triggerManualRun, triggerManualRunTomorrow };

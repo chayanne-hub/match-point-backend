@@ -108,6 +108,10 @@ model Match {
   // Best price across every US book, captured alongside the BetMGM line of
   // record. Display only — grading and the published track record stay on
   // BetMGM so historical numbers keep meaning the same thing.
+  /// The Odds API key this match came from (e.g. tennis_atp_cincinnati_open).
+  /// Tennis is keyed per tournament, so this is what lets a live refresh
+  /// target one event instead of every tournament currently running.
+  sportKey     String?
   bestOddsA    Int?
   bestOddsB    Int?
   bestBookA    String?
