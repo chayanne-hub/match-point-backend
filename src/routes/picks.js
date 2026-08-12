@@ -266,6 +266,15 @@ router.get('/today', async (req, res) => {
       const espnOnlyRaw = espnEvents.filter((ev) =>
         !matchEspnEvent(ev, alreadyKnown) &&
         !ev.completed &&
+        // TODAY ONLY. ESPN's scoreboard returns whole tournament draws,
+        // not just the current day — tennis especially. Without this,
+        // matches scheduled days from now were injected straight into
+        // today's board, which is why "Upcoming Matches" showed fixtures
+        // from other days. The main query above is already bounded to
+        // today; this supplemental path never was.
+        ev.eventDate &&
+        new Date(ev.eventDate).getTime() >= startOfDay.getTime() &&
+        new Date(ev.eventDate).getTime() <= endOfDay.getTime() &&
         // Future-round bracket slots ESPN lists before the actual
         // players are determined — not a real, bettable matchup yet.
         // Confirmed happening in production (15+ of these in one

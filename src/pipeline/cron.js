@@ -15,7 +15,7 @@ require('dotenv').config();
 const cron = require('node-cron');
 const db = require('../lib/db');
 const { broadcastScoreUpdate } = require('../lib/liveSocket');
-const { recordPregameRun, recordEspnPoll, recordAnalysisRetry, recordAnalysisFailure, recordLiveCycleStart, recordLiveCycleComplete, recordLiveOverlapSkip } = require('../lib/healthStats');
+const { recordPregameRun, recordEspnPoll, recordAnalysisRetry, recordAnalysisFailure, recordError, recordLiveCycleStart, recordLiveCycleComplete, recordLiveOverlapSkip } = require('../lib/healthStats');
 
 /**
  * Wraps analyzeMatch() with exactly ONE full retry if the first attempt
@@ -198,11 +198,41 @@ async function runForSport(sportSlug, dayFilter = null) {
       return t >= startOfDay.getTime() && t < endOfDay.getTime();
     });
     console.log(`[pipeline] ${sportSlug}: filtered to ${matches.length} match(es) starting tomorrow.`);
+  } else {
+    // TODAY ONLY. fetchMatches() returns everything within MAX_DAYS_AHEAD
+    // (14 days) so that schedule data and market lines stay fresh, but
+    // ANALYSIS is a paid research call and must not run days early:
+    //
+    //   - it's real money spent on a match that may not even be relevant
+    //     yet, and books reprice heavily between now and kickoff;
+    //   - the analysis is frozen once written (never re-run), so a pick
+    //     produced 5 days out is what the customer sees at game time,
+    //     built on stale team news;
+    //   - matches from other days then leak into today's board.
+    //
+    // Anything beyond today is still upserted as schedule/odds data by
+    // the loop below on a later day — it just doesn't get analyzed until
+    // the day it's actually played.
+    const { startOfDay, endOfDay } = getPacificDayBounds(0);
+    const before = matches.length;
+    matches = matches.filter((m) => {
+      const t = new Date(m.startTime).getTime();
+      return t >= startOfDay.getTime() && t < endOfDay.getTime();
+    });
+    if (before !== matches.length) {
+      console.log(`[pipeline] ${sportSlug}: ${before} -> ${matches.length} match(es) after restricting to today (Pacific).`);
+    }
   }
 
   const sportRow = await db.sport.findUnique({ where: { slug: sportSlug } });
 
   for (const m of matches) {
+   // One match must never be able to abort the whole sport's run. A
+   // single bad row throwing here used to take down every remaining
+   // match in this sport for the cycle — the same failure mode that
+   // silently froze the live pipeline (see updateLivePicksForSport).
+   // Isolated so a bad row costs one row, and says so in the logs.
+   try {
     // Real fix for a confirmed bug: startTime used to get unconditionally
     // overwritten with whatever the odds provider currently reports on
     // EVERY cycle, forever — including for matches that already have a
@@ -429,6 +459,10 @@ async function runForSport(sportSlug, dayFilter = null) {
         },
       });
     }
+   } catch (err) {
+     console.error(`[pipeline] ${sportSlug}: skipping ${m.competitorA} vs ${m.competitorB} — ${err.message}`);
+     recordError(`${sportSlug} ${m.competitorA} vs ${m.competitorB}: ${err.message}`);
+   }
   }
 
   console.log(`[pipeline] ${sportSlug}: processed ${matches.length} matches.`);
@@ -511,12 +545,29 @@ async function runAll() {
   // the list (baseball, football) ever got a turn. Each sport's matches
   // are independent (own DB rows, own API calls), so there's no reason
   // they need to wait on each other.
-  await Promise.all(SPORTS.map((sport) => runForSport(sport)));
+  // .catch per sport, not a bare Promise.all: Promise.all rejects as soon
+  // as ANY sport throws, abandoning the others mid-flight. One sport's
+  // provider hiccup shouldn't cost the whole slate a cycle.
+  await Promise.all(
+    SPORTS.map((sport) =>
+      runForSport(sport).catch((err) => {
+        console.error(`[pipeline] ${sport} run failed:`, err.message);
+        recordError(`${sport} pipeline run failed: ${err.message}`);
+      })
+    )
+  );
 }
 
 async function runAllTomorrow() {
   await ensureSportRows();
-  await Promise.all(SPORTS.map((sport) => runForSport(sport, 'tomorrow')));
+  await Promise.all(
+    SPORTS.map((sport) =>
+      runForSport(sport, 'tomorrow').catch((err) => {
+        console.error(`[pipeline] ${sport} tomorrow-run failed:`, err.message);
+        recordError(`${sport} tomorrow run failed: ${err.message}`);
+      })
+    )
+  );
 }
 
 // If run directly (npm run pipeline), execute once and exit.
