@@ -407,7 +407,10 @@ async function runForSport(sportSlug, dayFilter = null) {
       where: { matchId: match.id, pickType: { in: ['model', 'winner'] } },
     });
     if (existingPicks.length > 0) {
-      if (m.status === 'live') {
+      // Same correction as the live pipeline's filter: m.status is the
+      // odds provider's guess and no longer ever says 'live'. `match` is
+      // the database row, which carries ESPN's observed state.
+      if (['live', 'in_progress'].includes(match.status)) {
         for (const pick of existingPicks) {
           const freshOdds = freshOddsForPick(pick, m);
           // Never overwrite with null — a book briefly pulling a line
@@ -835,10 +838,12 @@ async function updateLivePicksForSport(sportSlug, onlyKeys) {
   // had a match in progress — paying for football odds at 4am when the
   // NFL hasn't played in months. Every skipped sport here is a credit
   // saved with zero loss of information.
-  const liveCount = await db.match.count({
+  const liveDbMatches = await db.match.findMany({
     where: { sport: { slug: sportSlug }, status: { in: ['live', 'in_progress'] } },
+    select: { externalId: true },
   });
-  if (liveCount === 0) return 0;
+  if (liveDbMatches.length === 0) return 0;
+  const liveExternalIds = new Set(liveDbMatches.map((r) => r.externalId));
 
   let matches;
   try {
@@ -866,7 +871,16 @@ async function updateLivePicksForSport(sportSlug, onlyKeys) {
     });
   }
 
-  const liveMatches = matches.filter(m => m.status === 'in_progress' || m.status === 'live');
+  // Filter on the DATABASE's status, not the provider's.
+  //
+  // This was `m.status`, which is the odds provider's own guess — and
+  // that guess was just changed to never say "live", because the provider
+  // only knows when a match was SCHEDULED to start, not whether it
+  // actually did. ESPN determines live state and writes it to the
+  // database. So this filter silently matched nothing every cycle and the
+  // live confidence meter stopped moving entirely: a regression from the
+  // ESPN-authority change, not a new problem with odds.
+  const liveMatches = matches.filter((m) => liveExternalIds.has(m.externalId));
   if (liveMatches.length === 0) return 0;
 
   for (const m of liveMatches) {
