@@ -100,10 +100,40 @@ function namesLikelyMatch(a, b) {
     if (tb.slice(1).some((tok) => restA.has(tok) && (tok === lastOfA || tok === lastOfB))) return true;
   }
 
-  // Original fallback — surname for players, mascot for teams.
+  // REVERSED NAME ORDER. ESPN and the odds provider disagree on given/
+  // family name order for Chinese, Korean and Japanese players: the odds
+  // feed says "Yue Yuan" and "Xiyu Wang", ESPN says "Yuan Yue" and "Wang
+  // Xiyu". Every check above compares positionally, so all of them fail —
+  // and the match then appears TWICE on the board: once from the odds
+  // provider and once as an ESPN-only row with no odds attached.
+  //
+  // Comparing the token SETS catches it. Two different people having the
+  // exact same name tokens in a different order isn't a realistic
+  // collision, and both names must have the same number of parts.
+  if (ta.length === tb.length && ta.length >= 2) {
+    const sortedA = [...ta].sort().join(' ');
+    const sortedB = [...tb].sort().join(' ');
+    if (sortedA === sortedB) return true;
+  }
+
+  // Trailing-token match, for team short forms: "Blue Jays" is the tail of
+  // "Toronto Blue Jays". Mirrors the leading-token rule above.
+  if (shorter.length >= 2 && shorter.every((tok, i) => longer[longer.length - shorter.length + i] === tok)) return true;
+
+  // Bare mascot/surname fallback — ONLY when one side is a single token
+  // ("Dodgers" vs "Los Angeles Dodgers").
+  //
+  // It used to apply to any two names sharing a last token, which merged
+  // DIFFERENT PEOPLE: Xiyu Wang and Xinyu Wang are two separate WTA
+  // players, and matching on "wang" alone would have written one's score
+  // onto the other's match. Common surnames make that a routine
+  // occurrence in tennis, not an edge case.
   const lastA = ta[ta.length - 1];
   const lastB = tb[tb.length - 1];
-  return lastA === lastB && lastA.length > 2; // avoid matching on short/common words
+  if (Math.min(ta.length, tb.length) === 1) {
+    return lastA === lastB && lastA.length > 2; // avoid matching on short/common words
+  }
+  return false;
 }
 
 // Real bug this replaced: comparing exact UTC calendar days meant any

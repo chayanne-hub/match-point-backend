@@ -422,7 +422,16 @@ async function runForSport(sportSlug, dayFilter = null) {
     }
 
     if (m.oddsA === null || m.oddsB === null) {
-      console.log(`[pipeline] skipping analysis for ${m.competitorA} vs ${m.competitorB} — no odds available.`);
+      // Say WHICH kind of "no odds" this is. Zero books means the market
+      // genuinely doesn't exist anywhere (common for tennis qualifying
+      // draws, which most US books don't price). Books present but no
+      // usable price means our own selection logic failed to find a
+      // complete two-way market — a bug on our side, not the provider's.
+      if ((m.bookCount ?? 0) === 0) {
+        console.log(`[pipeline] skipping ${m.competitorA} vs ${m.competitorB} — no book anywhere prices this match (0 bookmakers returned).`);
+      } else {
+        console.warn(`[pipeline] skipping ${m.competitorA} vs ${m.competitorB} — ${m.bookCount} book(s) returned but none had a complete two-way h2h market. This is our side, not the provider's.`);
+      }
       continue;
     }
 

@@ -316,6 +316,11 @@ function normalizeMatch(sport, raw) {
     // Which book the recorded odds actually came from. Usually BetMGM;
     // named explicitly so a fallback price is never mistaken for one.
     oddsBook,
+    // How many books the provider returned for this match at all. This
+    // is the difference between "our fallback is broken" and "nobody
+    // prices this match" — without it, both look identical in the logs
+    // as a bare "no odds available".
+    bookCount: (raw.bookmakers || []).length,
     bestOddsA,
     bestOddsB,
     bestBookA,
