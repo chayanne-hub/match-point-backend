@@ -453,6 +453,18 @@ async function runForSport(sportSlug, dayFilter = null) {
       pregameProjectedTotal,
     }, `${m.competitorA} vs ${m.competitorB} (pregame)`);
     if (!analysis) {
+      // Only count this against the MATCH if analysis is demonstrably
+      // working right now — i.e. something else succeeded this run. When
+      // every call is failing the cause is systemic (no API credit, an
+      // outage, a bad key), and blaming individual matches for it
+      // permanently blacklists the entire slate: three failed cycles and
+      // that match is never analysed again, even after the real problem
+      // is fixed. That is exactly what happened while analysis funding
+      // was off.
+      if (analysisSuccessesThisRun === 0) {
+        console.warn(`[pipeline] analysis failed for ${m.competitorA} vs ${m.competitorB}, but nothing has succeeded this run — treating as a systemic failure, not counting it against the match.`);
+        continue;
+      }
       const newFailCount = match.analysisFailCycles + 1;
       await db.match.update({ where: { id: match.id }, data: { analysisFailCycles: newFailCount } });
       if (newFailCount >= MAX_CYCLE_FAILURES) {
@@ -485,6 +497,8 @@ async function runForSport(sportSlug, dayFilter = null) {
     // Conviction is already fully expressed by the confidence value
     // itself — MODEL_PICK_THRESHOLD still marks where a genuine edge
     // starts, it just no longer needs a duplicate row to say so.
+    analysisSuccessesThisRun++;
+
     await db.pick.create({
       data: {
         match: { connect: { id: match.id } },
@@ -613,7 +627,38 @@ async function updateLiveScores(sportSlug, sportId) {
   }
 }
 
+// Successful analyses in the current run. Used to tell a match-specific
+// failure apart from a systemic one — see the failure handler in
+// runForSport.
+let analysisSuccessesThisRun = 0;
+
 async function runAll() {
+  analysisSuccessesThisRun = 0;
+
+  // Clear failure counters on matches that are still upcoming and still
+  // have no pick. Those counters exist to stop hammering one genuinely
+  // broken match — but they're permanent, so any outage (no API credit,
+  // a bad key, a provider hiccup) silently blacklists the whole slate
+  // forever. A process start is a sensible "try again" boundary: the
+  // per-cycle cap still applies within a run, so the retry cost stays
+  // bounded, but a fixed outage no longer leaves matches unanalysable.
+  try {
+    const { startOfDay, endOfDay } = getPacificDayBounds(0);
+    const cleared = await db.match.updateMany({
+      where: {
+        startTime: { gte: startOfDay, lte: endOfDay },
+        analysisFailCycles: { gt: 0 },
+        status: { in: ['scheduled', 'live', 'in_progress'] },
+        picks: { none: { pickType: { in: ['model', 'winner'] } } },
+      },
+      data: { analysisFailCycles: 0 },
+    });
+    if (cleared.count > 0) {
+      console.log(`[pipeline] cleared failure counters on ${cleared.count} unanalysed match(es) — they'll be retried this run.`);
+    }
+  } catch (err) {
+    console.warn('[pipeline] could not clear failure counters:', err.message);
+  }
   await ensureSportRows();
   // Concurrent, not sequential — SPORTS order used to double as processing
   // order, which meant a heavy day for one sport (30 tennis matches, each
