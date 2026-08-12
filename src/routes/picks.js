@@ -473,15 +473,17 @@ router.get('/stats', async (req, res) => {
   // below-threshold match — so the published win rate described only the
   // high-conviction subset while the site sold every pick. Now it's the
   // complete record, each match counted once.
-  const results = await db.result.findMany({
+  // Fetches ALL THREE markets in one query, then splits them out below.
+  // Spread and total picks have been graded correctly all along but had
+  // no published accuracy anywhere on the site — sold without a track
+  // record. The top-level fields stay moneyline-only (that's the headline
+  // number and what every existing caller expects); byMarket carries the
+  // per-market breakdown alongside it.
+  const allMarketResults = await db.result.findMany({
     where: {
       pick: {
         pickType: { in: ['model', 'winner'] }, // both types, de-duped per match below — see dedupeResultsByMatch
-        market: 'moneyline', // spread/total picks are also pickType:'model' now —
-                              // excluded here so they don't get mixed into the
-                              // published moneyline track record. Worth its own
-                              // stats endpoint later if spread/total picks need
-                              // their own published win rate.
+        market: { in: ['moneyline', 'spread', 'total'] },
         odds: { gte: -2000, lte: 2000 },
         ...(sport ? { match: { sport: { slug: sport } } } : {}),
       },
@@ -489,6 +491,16 @@ router.get('/stats', async (req, res) => {
     include: { pick: { include: { match: true } } },
   });
 
+  // De-dupe WITHIN each market, never across them: one match legitimately
+  // has a moneyline pick AND a spread pick AND a total pick, and each is
+  // a separate real call that belongs in its own record.
+  const resultsByMarket = {
+    moneyline: allMarketResults.filter((r) => r.pick.market === 'moneyline'),
+    spread: allMarketResults.filter((r) => r.pick.market === 'spread'),
+    total: allMarketResults.filter((r) => r.pick.market === 'total'),
+  };
+
+  const results = resultsByMarket.moneyline;
   const uniqueResults = dedupeResultsByMatch(results);
   const decided = uniqueResults.filter((r) => r.outcome !== 'push');
   const wins = decided.filter((r) => r.outcome === 'win').length;
@@ -589,6 +601,39 @@ router.get('/stats', async (req, res) => {
     else break;
   }
 
+  // Per-market records. Same rules as the moneyline figure above: both
+  // legacy pick types, de-duped per match within the market, pushes
+  // excluded from the denominator (they're void, not half a loss), and a
+  // flat $100-stake ROI. Reported honestly with sampleSize attached —
+  // a 67% rate off 6 graded picks means far less than 58% off 200, and
+  // spread/total have been graded for much less time than moneyline.
+  const byMarket = {};
+  for (const [marketName, marketResults] of Object.entries(resultsByMarket)) {
+    const uniq = dedupeResultsByMatch(marketResults);
+    const marketDecided = uniq.filter((r) => r.outcome !== 'push');
+    const marketWins = marketDecided.filter((r) => r.outcome === 'win').length;
+    const marketLosses = marketDecided.filter((r) => r.outcome === 'loss').length;
+    const marketPushes = uniq.length - marketDecided.length;
+
+    let marketRoi = null;
+    if (marketDecided.length > 0) {
+      const totalProfit = marketDecided.reduce(
+        (sum, r) => sum + profitFor(r.pick.odds, r.outcome === 'win'),
+        0
+      );
+      marketRoi = Math.round((totalProfit / (marketDecided.length * 100)) * 1000) / 10;
+    }
+
+    byMarket[marketName] = {
+      winRate: marketDecided.length > 0 ? Math.round((marketWins / marketDecided.length) * 1000) / 10 : null,
+      wins: marketWins,
+      losses: marketLosses,
+      pushes: marketPushes,
+      sampleSize: marketDecided.length,
+      roi: marketRoi,
+    };
+  }
+
   res.json({
     winRate,
     roi,
@@ -599,6 +644,7 @@ router.get('/stats', async (req, res) => {
     avgConfidenceWins,
     streakCount: streakType ? streakCount : null,
     streakType, // 'win' | 'loss' | null
+    byMarket, // { moneyline, spread, total } — each { winRate, wins, losses, pushes, sampleSize, roi }
   });
 });
 
