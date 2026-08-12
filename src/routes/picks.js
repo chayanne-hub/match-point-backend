@@ -4,6 +4,7 @@ const { requireAuth } = require('../lib/auth');
 const { fetchEspnNews } = require('../pipeline/fetchEspnNews');
 const { getRecentPosts } = require('../pipeline/fetchXTimeline');
 const { getStandings, getRecordMap } = require('../pipeline/fetchEspnStandings');
+const { fetchMatches } = require('../pipeline/fetchMatches');
 const { getHealthSnapshot } = require('../lib/healthStats');
 const { isAdminEmail } = require('./auth');
 const { fetchBasketballPlayerProps } = require('../pipeline/fetchPlayerProps');
@@ -860,6 +861,78 @@ router.get('/rankings', async (req, res) => {
     res.json({ rankings });
   } catch (err) {
     console.error('[rankings] GET /rankings failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/picks/admin/diagnose?sport=tennis — why isn't this analysed?
+//
+// Runs the same fetch, normalisation and guards the pipeline uses and
+// reports the decision per match. Lives here rather than in a script
+// because the database is only reachable from inside Railway, and
+// chasing tunnels and public URLs to answer a yes/no question wastes
+// more time than it saves.
+//
+// Read-only: no picks created, no Anthropic credit spent.
+router.get('/admin/diagnose', requireAuth, async (req, res) => {
+  try {
+    const user = await db.user.findUnique({ where: { id: req.userId } });
+    if (!user || !isAdminEmail(user.email)) return res.status(403).json({ error: 'Admin access required.' });
+
+    const sport = req.query.sport || 'tennis';
+    const MAX_CYCLE_FAILURES = 3;
+
+    const matches = await fetchMatches(sport);
+    const sample = matches[0] || {};
+    const build = {
+      // If these are false, the bookmaker-fallback build isn't deployed
+      // and that alone explains everything below.
+      oddsBookFieldPresent: Object.prototype.hasOwnProperty.call(sample, 'oddsBook'),
+      bookCountFieldPresent: Object.prototype.hasOwnProperty.call(sample, 'bookCount'),
+    };
+
+    const { startOfDay, endOfDay } = getTimezoneDayBounds('America/Los_Angeles');
+    const today = matches.filter((m) => {
+      const t = new Date(m.startTime).getTime();
+      return t >= startOfDay.getTime() && t < endOfDay.getTime();
+    });
+
+    const rows = [];
+    const tally = {};
+    for (const m of today) {
+      const match = await db.match.findUnique({
+        where: { externalId: m.externalId },
+        include: { picks: { where: { pickType: { in: ['model', 'winner'] } }, take: 1 } },
+      });
+
+      let verdict;
+      if (!match) verdict = 'NOT_IN_DB';
+      else if (match.picks.length > 0) verdict = 'OK_ALREADY_ANALYSED';
+      else if (match.skipAnalysis) verdict = 'BLOCKED_SKIP_FLAG';
+      else if (m.oddsA === null || m.oddsB === null) {
+        verdict = (m.bookCount ?? 0) === 0 ? 'BLOCKED_NO_BOOK_PRICES_IT' : 'BLOCKED_BOOKS_PRESENT_BUT_UNUSABLE';
+      } else if (match.analysisFailCycles >= MAX_CYCLE_FAILURES) {
+        verdict = `BLOCKED_FAIL_CYCLES_${match.analysisFailCycles}`;
+      } else {
+        verdict = 'SHOULD_ANALYSE';
+      }
+      tally[verdict] = (tally[verdict] || 0) + 1;
+
+      rows.push({
+        matchup: `${m.competitorA} vs ${m.competitorB}`,
+        oddsA: m.oddsA, oddsB: m.oddsB,
+        oddsBook: m.oddsBook ?? null,
+        bookCount: m.bookCount ?? null,
+        inDb: !!match,
+        skipAnalysis: match?.skipAnalysis ?? null,
+        failCycles: match?.analysisFailCycles ?? null,
+        verdict,
+      });
+    }
+
+    res.json({ sport, build, fetched: matches.length, startingToday: today.length, tally, rows });
+  } catch (err) {
+    console.error('[diagnose] failed:', err);
     res.status(500).json({ error: err.message });
   }
 });
