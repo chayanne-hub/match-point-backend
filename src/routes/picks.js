@@ -1024,6 +1024,7 @@ router.get('/archive/results', async (req, res) => {
       sport: r.pick.match.sport.slug,
       league: r.pick.match.league,
       pickType: r.pick.pickType,
+      market: r.pick.market, // exposed so the client can assert what it's plotting rather than trusting an invisible server-side filter
       selection: r.pick.selection,
       confidence: r.pick.confidence,
       odds: r.pick.odds,
