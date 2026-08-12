@@ -40,6 +40,16 @@ function normalizeName(name) {
   return name
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '') // strip accent marks
+    // Latin-extended letters that do NOT decompose under NFD — accent
+    // stripping leaves them intact and the punctuation strip below then
+    // DELETES them, mangling the name. "Novak Đoković" became "novak
+    // okovic" and never matched ESPN's "Novak Djokovic". Transliterated
+    // explicitly instead. (Đ -> dj is the Serbian/Croatian convention;
+    // Vietnamese uses đ -> d, a known limitation not relevant here.)
+    .replace(/\u0110/g, 'Dj').replace(/\u0111/g, 'dj')  // Đ đ
+    .replace(/\u00d8/g, 'O').replace(/\u00f8/g, 'o')    // Ø ø
+    .replace(/\u0141/g, 'L').replace(/\u0142/g, 'l')    // Ł ł
+    .replace(/\u00df/g, 'ss')                          // ß
     .replace(/[^a-zA-Z0-9\s]/g, '')  // strip punctuation
     .toLowerCase()
     .trim()
@@ -58,8 +68,41 @@ function namesLikelyMatch(a, b) {
   if (!na || !nb) return false;
   if (na === nb) return true;
 
-  const lastA = na.split(' ').pop();
-  const lastB = nb.split(' ').pop();
+  const ta = na.split(' ');
+  const tb = nb.split(' ');
+
+  // COMPOUND SURNAMES. The odds provider and ESPN frequently disagree on
+  // how many surnames to print: "Daniel Merida Aguilar" vs "Daniel
+  // Merida", "Alejandro Davidovich Fokina" vs "Alejandro Davidovich".
+  // The old last-token-only check compared "aguilar" to "merida" and
+  // failed, so those matches never joined to their ESPN event and sat
+  // frozen at their opening score forever while ESPN's copy showed up
+  // separately as a duplicate row. Treating one full name as a prefix
+  // of the other fixes the whole class of them. Requires >= 2 shared
+  // leading tokens so a bare surname can't match everyone.
+  const shorter = ta.length <= tb.length ? ta : tb;
+  const longer = ta.length <= tb.length ? tb : ta;
+  if (shorter.length >= 2 && shorter.every((tok, i) => longer[i] === tok)) return true;
+
+  // Reordered/dropped middle surnames ("Carlos Alcaraz Garfia" vs
+  // "Carlos Garfia"): same first name AND at least one shared surname
+  // token. Both conditions together keep this from matching two
+  // different players who merely share a first name.
+  if (ta[0] === tb[0] && ta.length > 1 && tb.length > 1) {
+    const lastOfA = ta[ta.length - 1];
+    const lastOfB = tb[tb.length - 1];
+    const restA = new Set(ta.slice(1));
+    // The shared token must be a real surname (the LAST token of one of
+    // the names). Without this, any two multi-word names sharing a
+    // middle word matched — "Los Angeles Angels" vs "Los Angeles
+    // Dodgers" both contain "angeles", which would have merged two
+    // completely different teams' scores.
+    if (tb.slice(1).some((tok) => restA.has(tok) && (tok === lastOfA || tok === lastOfB))) return true;
+  }
+
+  // Original fallback — surname for players, mascot for teams.
+  const lastA = ta[ta.length - 1];
+  const lastB = tb[tb.length - 1];
   return lastA === lastB && lastA.length > 2; // avoid matching on short/common words
 }
 
