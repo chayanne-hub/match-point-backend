@@ -52,10 +52,40 @@ const DYNAMIC_PREFIXES = {
 // quote, and using it corrupts confidence/pick odds with garbage. No
 // legitimate market price in the sports this pipeline covers gets
 // anywhere near this bound, so anything beyond it is assumed suspended.
-const MAX_PLAUSIBLE_ODDS = 2000;
+// Absolute outer bound — anything past this isn't a price any book would
+// post, it's corrupt data. Deliberately far looser than the old 2000 cap:
+// -10000 (decimal 1.01) is a REAL, routinely-posted in-play price when a
+// player is a game from winning. The old cap treated those as garbage and
+// threw away every live quote in a one-sided match, which froze live
+// confidence and odds at their pregame values.
+const MAX_PLAUSIBLE_ODDS = 100000;
 
 function isPlausibleOdds(price) {
-  return typeof price === 'number' && Math.abs(price) <= MAX_PLAUSIBLE_ODDS;
+  return typeof price === 'number' && Number.isFinite(price) && Math.abs(price) <= MAX_PLAUSIBLE_ODDS && Math.abs(price) >= 100;
+}
+
+function impliedProbFromAmerican(odds) {
+  return odds > 0 ? 100 / (odds + 100) : -odds / (-odds + 100);
+}
+
+/**
+ * The real test for a bogus quote isn't how extreme one side is — it's
+ * whether the two sides make sense TOGETHER. A genuine two-sided market's
+ * implied probabilities sum to a little over 1 (the book's margin). A
+ * suspended-market placeholder posts a lopsided price on one side without
+ * a matching move on the other, so the sum blows out well past any real
+ * margin.
+ *
+ * Real example this now accepts: Merida +1550 / Tien -10000 sums to ~1.05
+ * — a legitimate live price on a nearly-decided match.
+ * Still rejected: -10000 on BOTH sides, which sums to ~1.98.
+ */
+const MAX_PLAUSIBLE_OVERROUND = 1.35; // 35% margin is already far above any real book
+
+function isPlausibleMarket(oddsA, oddsB) {
+  if (!isPlausibleOdds(oddsA) || !isPlausibleOdds(oddsB)) return false;
+  const sum = impliedProbFromAmerican(oddsA) + impliedProbFromAmerican(oddsB);
+  return sum > 0.8 && sum <= MAX_PLAUSIBLE_OVERROUND;
 }
 
 // The /sports endpoint is free (doesn't cost quota) and lists every
@@ -180,12 +210,12 @@ function normalizeMatch(sport, raw) {
   // garbage one, so if either side fails the sanity check, neither side
   // can be trusted. Downstream code already treats null odds as "no
   // price available" and safely skips picks/updates rather than using it.
-  if (oddsA !== null && !isPlausibleOdds(oddsA)) {
-    console.warn(`[fetchMatches] rejecting implausible odds for ${raw.home_team} vs ${raw.away_team}: ${oddsA} / ${oddsB} — likely a suspended-market placeholder.`);
-    oddsA = null;
-    oddsB = null;
-  } else if (oddsB !== null && !isPlausibleOdds(oddsB)) {
-    console.warn(`[fetchMatches] rejecting implausible odds for ${raw.home_team} vs ${raw.away_team}: ${oddsA} / ${oddsB} — likely a suspended-market placeholder.`);
+  // Judge the two prices TOGETHER, not each against an absolute cap. A
+  // heavily one-sided in-play price is normal and real; what isn't real
+  // is a pair whose implied probabilities don't add up to a sane book
+  // margin. See isPlausibleMarket above.
+  if (oddsA !== null && oddsB !== null && !isPlausibleMarket(oddsA, oddsB)) {
+    console.warn(`[fetchMatches] rejecting implausible market for ${raw.home_team} vs ${raw.away_team}: ${oddsA} / ${oddsB} — sides don't form a coherent two-way price.`);
     oddsA = null;
     oddsB = null;
   }
