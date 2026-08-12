@@ -81,11 +81,25 @@ function impliedProbFromAmerican(odds) {
  * Still rejected: -10000 on BOTH sides, which sums to ~1.98.
  */
 const MAX_PLAUSIBLE_OVERROUND = 1.35; // 35% margin is already far above any real book
+// Lower bound is deliberately loose. Soccer h2h is a THREE-way market
+// (Home/Draw/Away) and we only extract the two team prices, so the two
+// sides alone legitimately sum to ~0.75-0.85 with the draw's share
+// missing. An earlier 0.8 floor rejected every real EPL and MLS match.
+// This bound only needs to catch genuinely incoherent quotes (two long
+// prices on both sides, which sum near zero).
+const MIN_PLAUSIBLE_OVERROUND = 0.5;
 
-function isPlausibleMarket(oddsA, oddsB) {
+/**
+ * allPrices, when supplied, is every outcome in the h2h market including
+ * the draw for three-way sports — summing all of them gives the book's
+ * true overround and works for two-way and three-way markets alike.
+ * Falls back to just the two team prices if the full set isn't available.
+ */
+function isPlausibleMarket(oddsA, oddsB, allPrices) {
   if (!isPlausibleOdds(oddsA) || !isPlausibleOdds(oddsB)) return false;
-  const sum = impliedProbFromAmerican(oddsA) + impliedProbFromAmerican(oddsB);
-  return sum > 0.8 && sum <= MAX_PLAUSIBLE_OVERROUND;
+  const prices = Array.isArray(allPrices) && allPrices.length >= 2 ? allPrices : [oddsA, oddsB];
+  const sum = prices.reduce((acc, p) => acc + impliedProbFromAmerican(p), 0);
+  return sum >= MIN_PLAUSIBLE_OVERROUND && sum <= MAX_PLAUSIBLE_OVERROUND;
 }
 
 // The /sports endpoint is free (doesn't cost quota) and lists every
@@ -214,7 +228,10 @@ function normalizeMatch(sport, raw) {
   // heavily one-sided in-play price is normal and real; what isn't real
   // is a pair whose implied probabilities don't add up to a sane book
   // margin. See isPlausibleMarket above.
-  if (oddsA !== null && oddsB !== null && !isPlausibleMarket(oddsA, oddsB)) {
+  // Include EVERY outcome (the draw too, for soccer) so the overround is
+  // computed against the book's actual full market, not a two-way slice.
+  const allOutcomePrices = outcomes.map((o) => o.price).filter((p) => typeof p === 'number');
+  if (oddsA !== null && oddsB !== null && !isPlausibleMarket(oddsA, oddsB, allOutcomePrices)) {
     console.warn(`[fetchMatches] rejecting implausible market for ${raw.home_team} vs ${raw.away_team}: ${oddsA} / ${oddsB} — sides don't form a coherent two-way price.`);
     oddsA = null;
     oddsB = null;
