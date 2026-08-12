@@ -671,6 +671,24 @@ async function updateLivePicksForSport(sportSlug) {
       // fall below 50% — that's the real signal that the market has
       // turned against the pick you're actually showing, not something
       // to hide by silently flipping the selection to match.
+      // SELF-HEAL: live picks created before the inherit-from-pregame fix
+      // may hold the market's side rather than the model's. The update
+      // path below deliberately never changes selection, so those rows
+      // would stay wrong for the rest of the match. Correct them once,
+      // here, against the frozen pregame pick.
+      const pregameForCheck = await db.pick.findFirst({
+        where: { matchId: match.id, pickType: { in: ['model', 'winner'] }, market: 'moneyline' },
+        orderBy: { createdAt: 'asc' },
+      });
+      if (pregameForCheck && pregameForCheck.selection !== existingLive.selection) {
+        console.warn(`[live-pipeline] correcting live pick side for ${m.competitorA} vs ${m.competitorB}: "${existingLive.selection}" -> "${pregameForCheck.selection}" (must match the frozen pregame pick).`);
+        await db.pick.update({
+          where: { id: existingLive.id },
+          data: { selection: pregameForCheck.selection },
+        });
+        existingLive.selection = pregameForCheck.selection; // so the confidence math below uses the corrected side
+      }
+
       if (hasLiveOdds) {
         const lockedSideIsA = existingLive.selection === `${m.competitorA} ML`;
         const normalized = marketImpliedFactor(m.oddsA, m.oddsB); // -1..+1, positive favors A
@@ -688,24 +706,51 @@ async function updateLivePicksForSport(sportSlug) {
       // are. Never guess a number with nothing real to derive it from,
       // same rule this whole pipeline follows everywhere else.
     } else {
-      // A match's FIRST live pick, for the rare case no pregame pick
-      // ever existed for it. This is the one moment the pick itself
-      // still gets chosen from the market (whichever side it favors
-      // right now) — from here on, every future cycle hits the locked
-      // branch above and never touches selection again. Same "market
-      // math, not analysis" rule applies here too — no Claude call
-      // means this genuinely cannot fail the way analyzeMatchWithRetry
-      // could, so there's no analysisFailCycles tracking needed on this
-      // path anymore.
+      // A match's FIRST live pick. The side is INHERITED from the frozen
+      // pregame pick — never re-derived from the market.
+      //
+      // This used to pick whichever side the market currently favored,
+      // which produced a real contradiction on screen: the model's
+      // researched pregame pick (say Rybakina) stayed in the detail
+      // drawer while the live row flipped to Osaka the moment she won a
+      // set and the market moved. Two different picks for one match.
+      //
+      // The live record exists to track what the MODEL'S pick is worth
+      // right now, not to restate who the market likes. If the market
+      // turns against the pick, that has to show as falling confidence
+      // and a longer price — which is exactly the better-price signal
+      // this product is built around — not as a silent switch to the
+      // other side.
+      const pregamePick = await db.pick.findFirst({
+        where: { matchId: match.id, pickType: { in: ['model', 'winner'] }, market: 'moneyline' },
+        orderBy: { createdAt: 'asc' },
+      });
+
       const sourceOddsA = hasLiveOdds ? m.oddsA : match.closingOddsA;
       const sourceOddsB = hasLiveOdds ? m.oddsB : match.closingOddsB;
       if (sourceOddsA === null || sourceOddsB === null) continue; // genuinely nothing to derive a number from yet — try again next cycle once odds exist
 
-      const normalized = marketImpliedFactor(sourceOddsA, sourceOddsB);
+      const normalized = marketImpliedFactor(sourceOddsA, sourceOddsB); // -1..+1, positive favors A
       if (normalized === null) continue;
-      const confidence = Math.round(50 + Math.abs(normalized) * 50);
-      const favorsA = normalized >= 0;
-      const selection = favorsA ? `${m.competitorA} ML` : `${m.competitorB} ML`;
+
+      let selection;
+      let sideIsA;
+      if (pregamePick) {
+        selection = pregamePick.selection;              // locked to the model's real call
+        sideIsA = selection === `${m.competitorA} ML`;
+      } else {
+        // No pregame analysis ever ran for this match (rare). Nothing to
+        // inherit, so fall back to the market — but this is the ONLY
+        // case where the market chooses the side.
+        sideIsA = normalized >= 0;
+        selection = sideIsA ? `${m.competitorA} ML` : `${m.competitorB} ML`;
+      }
+
+      // Confidence is signed for the side we actually hold, so it can
+      // honestly fall below 50% when the market has turned against the
+      // pick — same rule the locked-update branch above uses.
+      const signedForSide = sideIsA ? normalized : -normalized;
+      const confidence = Math.max(0, Math.min(100, Math.round(50 + signedForSide * 50)));
 
       await db.pick.create({
         data: {
@@ -714,8 +759,8 @@ async function updateLivePicksForSport(sportSlug) {
           isLive: true,
           selection,
           confidence,
-          odds: favorsA ? sourceOddsA : sourceOddsB,
-          rationale: 'Live confidence tracks the current market odds directly — no separate research pass runs while a match is in progress.',
+          odds: sideIsA ? sourceOddsA : sourceOddsB,
+          rationale: 'Live confidence tracks the current market price of the model\'s pregame pick — the pick itself never changes once the match starts.',
           factsUsed: JSON.stringify([]),
         },
       });
