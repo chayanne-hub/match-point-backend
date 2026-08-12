@@ -236,7 +236,32 @@ function normalizeMatch(sport, raw) {
   // recorded line to "best available" would silently change what the
   // track record means. Best-available is captured alongside, for display
   // only.
-  const bookOdds = raw.bookmakers?.find((b) => b.key === 'betmgm');
+  // BetMGM is PREFERRED as the line of record — every historical pick,
+  // grade and published win rate was computed against its prices, so
+  // keeping it wherever it exists means those numbers stay comparable.
+  //
+  // But requiring it was throwing away real matches. BetMGM doesn't price
+  // lower-tier tennis (qualifiers, early rounds, ITF-level events), and
+  // with the bookmakers filter removed we now receive ~40 books per
+  // match — so a match with a dozen live markets was being skipped as
+  // "no odds available" purely because one specific book was absent.
+  // That's most of a tennis slate on a normal day.
+  //
+  // Fall back to whichever book actually posted a complete two-way h2h
+  // market, and record which one was used so nothing downstream has to
+  // guess where a price came from.
+  const hasCompleteH2h = (b) => {
+    const m = b?.markets?.find((mk) => mk.key === 'h2h');
+    const outs = m?.outcomes || [];
+    return typeof outs.find((o) => o.name === raw.home_team)?.price === 'number'
+        && typeof outs.find((o) => o.name === raw.away_team)?.price === 'number';
+  };
+
+  const books = raw.bookmakers || [];
+  const bookOdds = (hasCompleteH2h(books.find((b) => b.key === 'betmgm')) && books.find((b) => b.key === 'betmgm'))
+    || books.find(hasCompleteH2h)
+    || null;
+  const oddsBook = bookOdds ? (bookOdds.title || bookOdds.key) : null;
   const h2h = bookOdds?.markets?.find((m) => m.key === 'h2h');
   const outcomes = h2h?.outcomes || [];
 
@@ -283,6 +308,9 @@ function normalizeMatch(sport, raw) {
     // Which tournament/league key this came from — tennis needs it to
     // refresh a single event rather than every running tournament.
     sportKey: raw.sport_key || null,
+    // Which book the recorded odds actually came from. Usually BetMGM;
+    // named explicitly so a fallback price is never mistaken for one.
+    oddsBook,
     bestOddsA,
     bestOddsB,
     bestBookA,

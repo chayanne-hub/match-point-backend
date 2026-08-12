@@ -7,7 +7,7 @@ const authRoutes = require('./routes/auth');
 const checkoutRoutes = require('./routes/checkout');
 const webhookRoutes = require('./routes/webhooks');
 const picksRoutes = require('./routes/picks');
-const { startWatchdog, startScheduled, startLiveScheduled, startEspnScheduled } = require('./pipeline/cron');
+const { startWatchdog, startReactiveOdds, startScheduled, startLiveScheduled, startEspnScheduled } = require('./pipeline/cron');
 const { initLiveSocket } = require('./lib/liveSocket');
 
 const app = express();
@@ -50,6 +50,7 @@ server.listen(PORT, () => {
 initLiveSocket(server);
 
 startWatchdog();
+startReactiveOdds();
 startScheduled();
 // Re-enabled: live reassessment now runs, meaning confidence for a live
 // match will genuinely recalculate (and re-color) as the match unfolds
