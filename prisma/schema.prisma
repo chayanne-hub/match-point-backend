@@ -131,6 +131,7 @@ model Match {
   updatedAt    DateTime @updatedAt
 
   picks        Pick[]
+  oddsHistory  OddsSnapshot[]
 
   @@index([sportId, startTime])
 }
@@ -215,6 +216,33 @@ model PlayerPropAnalysis {
 // content is rendered client-side via X's free embed widget
 // (platform.twitter.com/widgets.js), so this has no ongoing API cost.
 // Managed from the Health admin tab (GET/POST/DELETE /api/picks/admin/insiders).
+/// Time series of prices for a match. Every poll appends one row per side
+/// instead of overwriting, which is what makes "is this a good number right
+/// now" answerable at all — without history there's nothing to compare the
+/// current price against.
+///
+/// Deliberately NOT used for grading or the published track record: those
+/// stay on the BetMGM line of record captured at pick time. This table is
+/// for timing guidance only.
+model OddsSnapshot {
+  id         String   @id @default(uuid())
+  match      Match    @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  matchId    String
+  /// Best price available across all books at this instant, per side,
+  /// plus which book offered it.
+  bestOddsA  Int?
+  bestOddsB  Int?
+  bestBookA  String?
+  bestBookB  String?
+  /// The line-of-record book's price at the same instant, so we can show
+  /// how much line shopping was actually worth.
+  bookOddsA  Int?
+  bookOddsB  Int?
+  capturedAt DateTime @default(now())
+
+  @@index([matchId, capturedAt])
+}
+
 model InsiderAccount {
   id        String   @id @default(uuid())
   sport     String   // "tennis" | "basketball" | "soccer" | "baseball" | "football"

@@ -302,6 +302,31 @@ async function runForSport(sportSlug, dayFilter = null) {
     // real spend with zero picks in the first place. Checked before
     // anything else — no DB lookups for existing picks, no analysis,
     // nothing.
+    // Append a price snapshot rather than only overwriting the current
+    // value. This is what makes timing guidance possible at all — you
+    // can't say "this is a good number right now" without knowing what
+    // the number has been. Only written when there's a real price to
+    // record, and only pre-kickoff, since that's the window a bettor can
+    // still act in.
+    if ((m.bestOddsA != null || m.oddsA != null) && match.status !== 'final') {
+      try {
+        await db.oddsSnapshot.create({
+          data: {
+            matchId: match.id,
+            bestOddsA: m.bestOddsA ?? null,
+            bestOddsB: m.bestOddsB ?? null,
+            bestBookA: m.bestBookA ?? null,
+            bestBookB: m.bestBookB ?? null,
+            bookOddsA: m.oddsA ?? null,
+            bookOddsB: m.oddsB ?? null,
+          },
+        });
+      } catch (err) {
+        // Never let history-keeping break the pipeline that produces picks.
+        console.warn(`[pipeline] odds snapshot failed for ${m.competitorA} vs ${m.competitorB}: ${err.message}`);
+      }
+    }
+
     if (match.skipAnalysis) continue;
 
     // Real fix for a confirmed bug: a match that consistently fails (for

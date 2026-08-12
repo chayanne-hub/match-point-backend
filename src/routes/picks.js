@@ -864,6 +864,95 @@ router.get('/rankings', async (req, res) => {
   }
 });
 
+// GET /api/picks/timing/:pickId — "should I bet this now, or wait?"
+//
+// This is the honest version of that question. It does NOT predict where
+// a line is going: nothing here has the data to do that, and a confident
+// forecast built on a few hours of history would be a guess dressed up as
+// a signal. What it CAN say truthfully is where the current price sits
+// within everything we've actually observed for this match, and what line
+// shopping is worth right now.
+//
+// Registered before GET /:id — same route-ordering rule as /rankings.
+router.get('/timing/:pickId', async (req, res) => {
+  try {
+    const pick = await db.pick.findUnique({
+      where: { id: req.params.pickId },
+      include: { match: true },
+    });
+    if (!pick) return res.status(404).json({ error: 'Pick not found.' });
+
+    const history = await db.oddsSnapshot.findMany({
+      where: { matchId: pick.matchId },
+      orderBy: { capturedAt: 'asc' },
+    });
+
+    // Which side is the pick on? Everything below is from that side's
+    // perspective — a price that's "good" for one side is bad for the other.
+    const sideIsA = pick.selection.startsWith(pick.match.competitorA);
+    const seriesBest = history.map((h) => (sideIsA ? h.bestOddsA : h.bestOddsB)).filter((v) => typeof v === 'number');
+    const seriesBook = history.map((h) => (sideIsA ? h.bookOddsA : h.bookOddsB)).filter((v) => typeof v === 'number');
+
+    if (seriesBest.length < 2) {
+      return res.json({
+        status: 'insufficient_history',
+        message: 'Not enough price history yet for this match.',
+        samples: seriesBest.length,
+      });
+    }
+
+    const latest = history[history.length - 1];
+    const currentBest = sideIsA ? latest.bestOddsA : latest.bestOddsB;
+    const currentBook = sideIsA ? latest.bookOddsA : latest.bookOddsB;
+    const bestBook = sideIsA ? latest.bestBookA : latest.bestBookB;
+
+    // Higher American odds always pay more for the same stake, either
+    // side of zero, so max is simply the best price seen.
+    const observedBest = Math.max(...seriesBest);
+    const observedWorst = Math.min(...seriesBest);
+    const range = observedBest - observedWorst;
+
+    // Where the current price sits in the observed range, 0 (worst seen)
+    // to 100 (best seen). A flat market gives 100 — there's been nothing
+    // better, so now is as good as it's been.
+    const pricePosition = range === 0 ? 100 : Math.round(((currentBest - observedWorst) / range) * 100);
+
+    // What line shopping is worth at this instant, in profit per $100.
+    const profitPer100 = (odds) => (odds > 0 ? odds : (100 / Math.abs(odds)) * 100);
+    const shoppingGain = (typeof currentBest === 'number' && typeof currentBook === 'number')
+      ? Math.round(profitPer100(currentBest) - profitPer100(currentBook))
+      : null;
+
+    // Deliberately conservative language. "Good spot" is a statement
+    // about the observed range, not a prediction; "has been better"
+    // reports a fact rather than advising someone to wait for a price
+    // that may never return.
+    let verdict;
+    if (pricePosition >= 85) verdict = 'at_or_near_best';
+    else if (pricePosition >= 55) verdict = 'mid_range';
+    else verdict = 'below_recent';
+
+    res.json({
+      status: 'ok',
+      selection: pick.selection,
+      currentBest,
+      currentBook,
+      bestBook,
+      shoppingGain,        // extra $ per $100 staked from taking the best book
+      observedBest,
+      observedWorst,
+      pricePosition,       // 0-100 within the observed range
+      verdict,
+      samples: seriesBest.length,
+      firstSeenAt: history[0].capturedAt,
+      lastSeenAt: latest.capturedAt,
+    });
+  } catch (err) {
+    console.error('[timing] failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/picks/standings?sport=basketball — real league standings
 // (ESPN), grouped by league (soccer spans several; basketball returns
 // NBA + WNBA groups). Server-cached 6h in the adapter. Tennis returns
@@ -1009,7 +1098,12 @@ router.get('/archive/results', async (req, res) => {
     },
     include: { pick: { include: { match: { include: { sport: true } } } } },
     orderBy: { settledAt: 'desc' },
-    take: 100,
+    // Was 100 — but this endpoint is read PER SPORT, so a sport with more
+    // than 100 graded picks was silently truncated. The Win Rate Tracker
+    // sums these five calls, so its all-time figure drifted below the
+    // uncapped one on /stats and the two disagreed on screen. Raised well
+    // past any realistic single-sport history while still bounded.
+    take: 1000,
   });
 
   // Always one row per match, newest first — never the legacy duplicate pair.
