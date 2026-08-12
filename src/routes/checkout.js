@@ -15,12 +15,17 @@ const router = express.Router();
  * deploy, and there's no way for the site and the checkout page to
  * disagree about what something costs.
  */
+// Only what's actually sold. The daily/weekly/season tiers were carried
+// over from the Coinbase era and are no longer offered — leaving them
+// here meant the API would still accept and price them even though
+// nothing in the UI offers them, so anyone hitting the endpoint directly
+// could buy a plan that doesn't exist as a product.
+//
+// single_pick stays listed deliberately: it's referenced by older links
+// and is rejected with a clear 501 below rather than silently failing.
 const PLAN_LABELS = {
   single_pick: 'Single Pick',
-  daily_bundle: 'Daily Bundle',
-  weekly_bundle: 'Weekly Bundle',
   monthly_membership: 'Monthly Membership',
-  season_membership: 'Season Membership',
 };
 
 // GET /checkout/plans — which plans are actually purchasable right now.

@@ -37,11 +37,11 @@ if (!process.env.WHOP_WEBHOOK_SECRET) {
 // Plans and prices live in the Whop dashboard now, not in this codebase —
 // that's the point of a merchant of record. Changing a price is a dashboard
 // edit, not a deploy.
+// Matches PLAN_LABELS in routes/checkout.js — only plans actually sold.
+// Add a key here AND there to introduce a new tier; the plan itself is
+// configured in the Whop dashboard.
 const PLAN_ENV_KEYS = {
   monthly_membership: 'WHOP_PLAN_MONTHLY',
-  season_membership: 'WHOP_PLAN_SEASON',
-  daily_bundle: 'WHOP_PLAN_DAILY',
-  weekly_bundle: 'WHOP_PLAN_WEEKLY',
 };
 
 function planIdFor(planKey) {

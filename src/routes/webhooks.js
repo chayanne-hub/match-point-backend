@@ -8,11 +8,9 @@ const router = express.Router();
 // so an incoming webhook can be mapped back to a plan name for display.
 function planKeyFromWhopPlanId(whopPlanId) {
   if (!whopPlanId) return null;
+  // Mirrors PLAN_ENV_KEYS in lib/whop.js — only plans actually sold.
   const pairs = {
     monthly_membership: process.env.WHOP_PLAN_MONTHLY,
-    season_membership: process.env.WHOP_PLAN_SEASON,
-    daily_bundle: process.env.WHOP_PLAN_DAILY,
-    weekly_bundle: process.env.WHOP_PLAN_WEEKLY,
   };
   return Object.keys(pairs).find((key) => pairs[key] && pairs[key] === whopPlanId) || null;
 }

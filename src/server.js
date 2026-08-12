@@ -14,8 +14,11 @@ const app = express();
 
 app.use(cors({ origin: process.env.CORS_ORIGIN || '*' }));
 
-// Stripe webhooks need the raw body for signature verification, so this is
-// mounted BEFORE express.json() runs globally.
+// Whop webhooks need the RAW body for Standard Webhooks signature
+// verification, so this is mounted BEFORE express.json() runs globally.
+// Re-serialising parsed JSON changes byte-for-byte content and the
+// signature would never match. (Previously Stripe, then Coinbase
+// Commerce — same constraint each time.)
 app.use('/webhooks', webhookRoutes);
 
 app.use(express.json());
