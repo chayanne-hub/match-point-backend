@@ -612,6 +612,27 @@ function startScheduled() {
       .finally(() => { isRunning = false; });
   });
   console.log('[pipeline] scheduled to run every 15 minutes.');
+
+  // Run once shortly after boot. cron.schedule only fires on the quarter
+  // hour, so a deploy landing at :16 meant no analysis until :30 — and
+  // deploying again before then reset the clock, so on a day with
+  // frequent deploys the pregame pipeline could go hours without ever
+  // completing a cycle. That's exactly how the board ends up showing
+  // "0 analyzed" with every row stuck on AWAITING ANALYSIS while the
+  // historical stats look perfectly healthy.
+  //
+  // Safe to run on every start: the existing-picks guard in runForSport
+  // skips any match that already has a pick, so this can never pay for
+  // the same analysis twice. The 25s delay lets the DB pool and the
+  // first ESPN poll settle first.
+  setTimeout(() => {
+    if (isRunning) return;
+    isRunning = true;
+    console.log('[pipeline] running initial cycle on startup.');
+    runAll()
+      .catch((err) => console.error('[pipeline] startup run failed:', err))
+      .finally(() => { isRunning = false; });
+  }, 25000);
 }
 
 /**
