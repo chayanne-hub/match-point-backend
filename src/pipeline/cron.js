@@ -640,6 +640,13 @@ async function updateLivePicksForSport(sportSlug) {
   if (liveMatches.length === 0) return 0;
 
   for (const m of liveMatches) {
+   // One match's failure must never abort the whole sport's live run.
+   // A single tennis match with a malformed live-total write used to
+   // throw here and kill the entire cycle — every OTHER match's
+   // moneyline odds and confidence silently stopped updating as a
+   // result, with only one line in the logs to show for it. Isolate
+   // per match so one bad row costs one row.
+   try {
     const match = await db.match.findUnique({ where: { externalId: m.externalId } });
     if (!match) continue; // main pipeline hasn't picked this one up yet
 
@@ -781,7 +788,18 @@ async function updateLivePicksForSport(sportSlug) {
           ? match.period != null && match.clockSeconds != null
           : match.period != null; // baseball: just needs the inning number
 
-    if (TOTAL_FORMULA_SPORTS.includes(sportSlug) && m.total !== null && hasNeededClockData) {
+    // Totals live on the DATABASE match row (populated by the main
+    // pipeline, which fetches the spreads/totals markets). fetchMatches()
+    // here only requests markets=h2h, so m.total / m.overOdds /
+    // m.underOdds are ALWAYS undefined — the old `m.total !== null` gate
+    // passed on undefined and let this whole block run on missing data,
+    // producing `selection: "Under undefined"` and a create with no odds.
+    // Prisma rejected it, which threw and aborted the ENTIRE live run —
+    // taking the moneyline odds updates down with it every cycle.
+    const liveTotalLine = match.total;
+    const liveOverOdds = match.overOdds;
+    const liveUnderOdds = match.underOdds;
+    if (TOTAL_FORMULA_SPORTS.includes(sportSlug) && liveTotalLine != null && hasNeededClockData) {
       const combinedScoreSoFar = (match.homeScore || 0) + (match.awayScore || 0);
       let liveProjection;
       if (SETS_BASED_SPORTS.includes(sportSlug)) {
@@ -832,21 +850,21 @@ async function updateLivePicksForSport(sportSlug) {
             sport: sportSlug,
             competitorA: m.competitorA,
             competitorB: m.competitorB,
-            total: m.total,
+            total: liveTotalLine,
             liveScore: match.liveScore,
             liveProjection,
             priorAnalysis: existingLiveTotal.rationale,
           });
           lastTotalReassessAt.set(existingLiveTotal.id, Date.now());
           if (reassessment) {
-            const freshPrice = reassessment.selection.startsWith('Over') ? m.overOdds : m.underOdds;
+            const freshPrice = reassessment.selection.startsWith('Over') ? liveOverOdds : liveUnderOdds;
             await db.pick.update({
               where: { id: existingLiveTotal.id },
               data: {
                 selection: reassessment.selection,
                 confidence: reassessment.confidence,
                 rationale: reassessment.analysis,
-                ...(freshPrice !== null && { odds: freshPrice }), // only touch odds if this cycle actually has a fresh price — required field, never null it out
+                ...(freshPrice != null && { odds: freshPrice }), // only touch odds if this cycle actually has a fresh price — required field, never null it out
               },
             });
           }
@@ -862,17 +880,17 @@ async function updateLivePicksForSport(sportSlug) {
         // uses projectedFinal, tennisTotalGames.js uses projectedTotal) —
         // normalize here rather than assuming one name everywhere.
         const projectedFinalValue = liveProjection.projectedFinal !== undefined ? liveProjection.projectedFinal : liveProjection.projectedTotal;
-        const seedSelection = projectedFinalValue > m.total ? `Over ${m.total}` : `Under ${m.total}`;
-        const seedPrice = seedSelection.startsWith('Over') ? m.overOdds : m.underOdds;
+        const seedSelection = projectedFinalValue > liveTotalLine ? `Over ${liveTotalLine}` : `Under ${liveTotalLine}`;
+        const seedPrice = seedSelection.startsWith('Over') ? liveOverOdds : liveUnderOdds;
         const paceUnit = SETS_BASED_SPORTS.includes(sportSlug) ? 'games/set' : sportSlug === 'baseball' ? 'runs/inning' : sportSlug === 'soccer' ? 'goals/min' : 'pts/min';
-        if (seedPrice !== null) {
+        if (seedPrice != null) { // != null catches undefined too — a missing price must never reach Prisma as a required Int
           await db.pick.create({
             data: {
               match: { connect: { id: match.id } },
               pickType: 'live',
               market: 'total',
               isLive: true,
-              line: m.total,
+              line: liveTotalLine,
               selection: seedSelection,
               confidence: 55, // neutral starting confidence — first real reassessment cycle refines this with actual judgment, not just the raw formula
               odds: seedPrice,
@@ -882,6 +900,9 @@ async function updateLivePicksForSport(sportSlug) {
         }
       }
     }
+   } catch (err) {
+     console.error(`[live-pipeline] ${sportSlug}: skipping ${m.competitorA} vs ${m.competitorB} — ${err.message}`);
+   }
   }
 
   console.log(`[live-pipeline] ${sportSlug}: refreshed ${liveMatches.length} live match(es).`);
