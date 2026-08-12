@@ -35,6 +35,51 @@ const ESPN_LEAGUES = {
  * Strips accents/diacritics and punctuation so name comparison isn't
  * thrown off by e.g. "Novak Đoković" vs "Novak Djokovic".
  */
+// ---- Name aliases ----------------------------------------------------
+// ESPN and the odds provider transliterate Cyrillic and other non-Latin
+// names differently: "Alexander Shevchenko" vs "Aleksandr Shevchenko",
+// same player, two feeds. Every positional rule in namesLikelyMatch fails
+// on those, and the match then shows up twice on the board.
+//
+// The obvious fix — fuzzy/edit-distance matching — is genuinely unsafe
+// here. "Xiyu Wang" and "Xinyu Wang" are TWO DIFFERENT WTA players
+// separated by one character. Any threshold loose enough to catch
+// Alexander/Aleksandr merges them, and writing one player's live score
+// onto another's match is far worse than a duplicate row.
+//
+// So: an explicit table instead. Precise, no false positives, and it
+// grows as variants are spotted. Applied at the TOKEN level during
+// normalisation, so a single entry fixes every player sharing that given
+// name rather than one pair at a time. Surnames still have to match on
+// their own — aliasing a first name can't merge two different people.
+const TOKEN_ALIASES = {
+  // Russian / Ukrainian given names
+  aleksandr: 'alexander', aleksander: 'alexander', oleksandr: 'alexander', alexandre: 'alexander',
+  aleksei: 'alexei', alexey: 'alexei', oleksii: 'alexei',
+  sergey: 'sergei', serhii: 'sergei',
+  dmitry: 'dmitri', dmytro: 'dmitri', dimitri: 'dmitri',
+  nikolay: 'nikolai', nicolai: 'nikolai', mykola: 'nikolai',
+  andrey: 'andrei', andriy: 'andrei',
+  evgeny: 'evgeni', yevgeny: 'evgeni', evgenii: 'evgeni',
+  mikhail: 'michail',
+  danil: 'daniil',
+  anastasiia: 'anastasia',
+  viktoriia: 'viktoria', victoria: 'viktoria',
+  yekaterina: 'ekaterina',
+  kseniia: 'ksenia', xenia: 'ksenia',
+  iuliia: 'yuliia', yulia: 'yuliia',
+  // Add more here, or without a deploy via NAME_ALIASES (see below).
+};
+
+// NAME_ALIASES env var, for fixing a mismatch in seconds without a code
+// change: "variant=canonical,variant=canonical"
+if (process.env.NAME_ALIASES) {
+  for (const pair of process.env.NAME_ALIASES.split(',')) {
+    const [variant, canonical] = pair.split('=').map((x) => (x || '').trim().toLowerCase());
+    if (variant && canonical) TOKEN_ALIASES[variant] = canonical;
+  }
+}
+
 function normalizeName(name) {
   if (!name) return '';
   return name
@@ -53,7 +98,12 @@ function normalizeName(name) {
     .replace(/[^a-zA-Z0-9\s]/g, '')  // strip punctuation
     .toLowerCase()
     .trim()
-    .replace(/\s+/g, ' ');
+    .replace(/\s+/g, ' ')
+    // Canonicalise each token through the alias table, so every
+    // downstream comparison sees one spelling.
+    .split(' ')
+    .map((tok) => TOKEN_ALIASES[tok] || tok)
+    .join(' ');
 }
 
 /**
@@ -322,4 +372,7 @@ function matchEspnEvent(espnEvent, dbMatches) {
   return null;
 }
 
-module.exports = { fetchEspnLiveScores, matchEspnEvent, normalizeName };
+module.exports = {
+  // exported for testing — see the name-matching test cases
+  namesLikelyMatch,
+  normalizeName, fetchEspnLiveScores, matchEspnEvent, normalizeName };
