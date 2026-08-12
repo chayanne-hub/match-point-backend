@@ -196,8 +196,24 @@ router.get('/today', async (req, res) => {
       // without carrying this through separately there'd be nothing to
       // compare against. This is what the Line Value meter measures:
       // current live price vs. the price when the pick was made.
+      // entryOdds is ONLY meaningful when the live pick is on the same
+      // side as the pregame pick — it's the price of THIS selection when
+      // the call was made. If the two ever disagree (a stale row from
+      // before live picks inherited the pregame side, mid-heal), sending
+      // it anyway would have the Line Value meter compare one player's
+      // price to the other player's price and report a huge bogus
+      // "better price". Withholding it just hides the badge for that row
+      // until the next cycle heals it, which is the safe failure.
+      const sidesAgree = liveOverride && p.selection === liveOverride.selection;
       const displayPick = liveOverride
-        ? { ...p, selection: liveOverride.selection, confidence: liveOverride.confidence, rationale: liveOverride.rationale, odds: liveOverride.odds, entryOdds: p.odds }
+        ? {
+            ...p,
+            selection: liveOverride.selection,
+            confidence: liveOverride.confidence,
+            rationale: liveOverride.rationale,
+            odds: liveOverride.odds,
+            entryOdds: sidesAgree ? p.odds : null,
+          }
         : p;
       shaped.push(await shapePick({ ...displayPick, match: m }, userId));
     } else {
