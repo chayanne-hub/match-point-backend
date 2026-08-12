@@ -84,7 +84,16 @@ router.post('/session', requireAuth, async (req, res) => {
     console.warn(`[checkout] proceeding without metadata for user ${user.id} — webhook will fall back to email matching.`);
   }
 
-  res.json({ url: checkout.url });
+  // planId + sessionId are what the EMBEDDED checkout needs to mount on
+  // our own page (data-whop-checkout-plan-id / -session). url is kept as
+  // a fallback for anything that still wants to hand off to Whop's hosted
+  // page — but the site itself never redirects.
+  res.json({
+    url: checkout.url,
+    planId: planIdFor(plan),
+    sessionId: checkout.sessionId,
+    metadataAttached: checkout.metadataAttached,
+  });
 });
 
 module.exports = router;
