@@ -15,6 +15,7 @@ require('dotenv').config();
 const cron = require('node-cron');
 const db = require('../lib/db');
 const { broadcastScoreUpdate } = require('../lib/liveSocket');
+const { registerHeartbeat, beat, startWatchdog } = require('../lib/watchdog');
 const { recordPregameRun, recordEspnPoll, recordAnalysisRetry, recordAnalysisFailure, recordError, recordLiveCycleStart, recordLiveCycleComplete, recordLiveOverlapSkip } = require('../lib/healthStats');
 
 /**
@@ -265,6 +266,13 @@ async function runForSport(sportSlug, dayFilter = null) {
         total: m.total,
         overOdds: m.overOdds,
         underOdds: m.underOdds,
+        // Best price across all books — refreshed every pull like the
+        // rest of the market data. Display only; BetMGM remains the line
+        // of record for grading.
+        bestOddsA: m.bestOddsA ?? null,
+        bestOddsB: m.bestOddsB ?? null,
+        bestBookA: m.bestBookA ?? null,
+        bestBookB: m.bestBookB ?? null,
       },
       create: {
         externalId: m.externalId,
@@ -274,6 +282,10 @@ async function runForSport(sportSlug, dayFilter = null) {
         competitorB: m.competitorB,
         startTime: m.startTime,
         status: m.status,
+        bestOddsA: m.bestOddsA ?? null,
+        bestOddsB: m.bestOddsB ?? null,
+        bestBookA: m.bestBookA ?? null,
+        bestBookB: m.bestBookB ?? null,
         spread: m.spread,
         spreadOddsA: m.spreadOddsA,
         spreadOddsB: m.spreadOddsB,
@@ -608,9 +620,11 @@ function startScheduled() {
     }
     isRunning = true;
     runAll()
+      .then(() => beat('Pregame analysis'))
       .catch((err) => console.error('[pipeline] scheduled run failed:', err))
       .finally(() => { isRunning = false; });
   });
+  registerHeartbeat('Pregame analysis', 15 * 60 * 1000);
   console.log('[pipeline] scheduled to run every 15 minutes.');
 
   // Run once shortly after boot. cron.schedule only fires on the quarter
@@ -630,6 +644,7 @@ function startScheduled() {
     isRunning = true;
     console.log('[pipeline] running initial cycle on startup.');
     runAll()
+      .then(() => beat('Pregame analysis'))
       .catch((err) => console.error('[pipeline] startup run failed:', err))
       .finally(() => { isRunning = false; });
   }, 25000);
@@ -1030,9 +1045,11 @@ function startLiveScheduled() {
     }
     liveIsRunning = true;
     updateLivePicks()
+      .then(() => beat('Live odds'))
       .catch(err => console.error('[live-pipeline] run failed:', err))
       .finally(() => { liveIsRunning = false; });
   }, intervalMs);
+  registerHeartbeat('Live odds', intervalMs);
   console.log(`[live-pipeline] scheduled to run every ${Math.round(intervalMs / 1000)} seconds.`);
 
   // setInterval doesn't fire until a FULL interval has elapsed, so every
@@ -1048,6 +1065,7 @@ function startLiveScheduled() {
     liveIsRunning = true;
     console.log('[live-pipeline] running initial cycle on startup.');
     updateLivePicks()
+      .then(() => beat('Live odds'))
       .catch(err => console.error('[live-pipeline] startup run failed:', err))
       .finally(() => { liveIsRunning = false; });
   }, 20000);
@@ -1309,4 +1327,4 @@ function startEspnScheduled() {
   console.log('[espn-pipeline] scheduled to run every 15 seconds.');
 }
 
-module.exports = { runAll, startScheduled, startLiveScheduled, startEspnScheduled, triggerManualRun, triggerManualRunTomorrow };
+module.exports = { runAll, startWatchdog, startScheduled, startLiveScheduled, startEspnScheduled, triggerManualRun, triggerManualRunTomorrow };

@@ -145,7 +145,12 @@ async function fetchFromProvider(sport) {
   let combined = [];
 
   for (const sportKey of sportKeys) {
-    const url = `${baseUrl}/sports/${sportKey}/odds?apiKey=${apiKey}&regions=us&markets=h2h&oddsFormat=american&bookmakers=betmgm`;
+    // NO bookmakers filter. The Odds API prices a request by markets ×
+  // regions, NOT by bookmaker — so asking for every US book costs exactly
+  // the same credit as asking for one. We were paying for ~40 books and
+  // discarding all but BetMGM. Line shopping is worth 2-5% on returns,
+  // which is larger than most picks edges.
+  const url = `${baseUrl}/sports/${sportKey}/odds?apiKey=${apiKey}&regions=us&markets=h2h&oddsFormat=american`;
     const response = await fetch(url);
     if (!response.ok) {
       // Log and skip this one key rather than failing the whole sport —
@@ -211,6 +216,11 @@ async function fetchScores(sport) {
 // Normalizes one provider match object into the shape the rest of the
 // pipeline expects. Rewrite this mapping for your actual provider's format.
 function normalizeMatch(sport, raw) {
+  // BetMGM stays the LINE OF RECORD. Every existing pick, grade, ROI and
+  // published win rate was computed against its prices; switching the
+  // recorded line to "best available" would silently change what the
+  // track record means. Best-available is captured alongside, for display
+  // only.
   const bookOdds = raw.bookmakers?.find((b) => b.key === 'betmgm');
   const h2h = bookOdds?.markets?.find((m) => m.key === 'h2h');
   const outcomes = h2h?.outcomes || [];
@@ -237,8 +247,28 @@ function normalizeMatch(sport, raw) {
     oddsB = null;
   }
 
+  // Best price per side across all books. Higher American odds always pay
+  // more for the same stake, whichever side of zero they're on, so a
+  // plain max() is the correct comparison.
+  let bestOddsA = null, bestOddsB = null, bestBookA = null, bestBookB = null;
+  for (const b of raw.bookmakers || []) {
+    const outs = b.markets?.find((mk) => mk.key === 'h2h')?.outcomes || [];
+    const a = outs.find((o) => o.name === raw.home_team)?.price;
+    const bb = outs.find((o) => o.name === raw.away_team)?.price;
+    if (typeof a === 'number' && isPlausibleOdds(a) && (bestOddsA === null || a > bestOddsA)) {
+      bestOddsA = a; bestBookA = b.title || b.key;
+    }
+    if (typeof bb === 'number' && isPlausibleOdds(bb) && (bestOddsB === null || bb > bestOddsB)) {
+      bestOddsB = bb; bestBookB = b.title || b.key;
+    }
+  }
+
   return {
     externalId: raw.id,
+    bestOddsA,
+    bestOddsB,
+    bestBookA,
+    bestBookB,
     sport,
     league: raw.sport_title || sport.toUpperCase(),
     competitorA: raw.home_team,
