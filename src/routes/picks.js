@@ -851,12 +851,26 @@ router.get('/archive/results', async (req, res) => {
   // deleting the underlying data, and restricts to pickType: 'model' so
   // matches that clear the confidence threshold (and therefore get both a
   // "model" and a "winner" pick) don't show up twice in the archive.
+  // ?recent=true — the homepage Activity feed. The default mode above is
+  // the PUBLISHED TRACK RECORD and deliberately shows only 'model' picks
+  // (the ones that cleared the edge threshold), so it stays an honest
+  // record and doesn't double-count matches that produced both a 'model'
+  // and a 'winner' pick.
+  //
+  // That's wrong for an activity feed though: most finished matches only
+  // ever produce a 'winner' pick, so they were invisible here — the feed
+  // looked frozen on old results when it was really just filtering out
+  // nearly everything that had settled since. Recent mode includes both
+  // types and de-duplicates per match (preferring 'model'), so it shows
+  // what actually finished without changing any published number.
+  const recentMode = req.query.recent === 'true';
+
   const results = await db.result.findMany({
     where: {
       pick: {
-        pickType: 'model',
+        ...(recentMode ? { pickType: { in: ['model', 'winner'] } } : { pickType: 'model' }),
         market: 'moneyline', // keep spread/total picks out of the moneyline archive — same reasoning as /stats
-        odds: { gte: -2000, lte: 2000 },
+        ...(recentMode ? {} : { odds: { gte: -2000, lte: 2000 } }),
         ...(sport ? { match: { sport: { slug: sport } } } : {}),
       },
     },
@@ -865,8 +879,25 @@ router.get('/archive/results', async (req, res) => {
     take: 100,
   });
 
+  // One row per MATCH in recent mode — a match that cleared the threshold
+  // has both a 'model' and a 'winner' pick on the same outcome, and the
+  // feed shouldn't list it twice. Prefer 'model' since that's the real
+  // high-conviction call.
+  let shapedResults = results;
+  if (recentMode) {
+    const byMatch = new Map();
+    for (const r of results) {
+      const key = r.pick.matchId;
+      const existing = byMatch.get(key);
+      if (!existing || (existing.pick.pickType !== 'model' && r.pick.pickType === 'model')) {
+        byMatch.set(key, r);
+      }
+    }
+    shapedResults = [...byMatch.values()].sort((a, b) => new Date(b.settledAt) - new Date(a.settledAt));
+  }
+
   res.json({
-    results: results.map((r) => ({
+    results: shapedResults.map((r) => ({
       id: r.pick.id,
       date: r.settledAt,
       matchup: `${r.pick.match.competitorA} vs ${r.pick.match.competitorB}`,
