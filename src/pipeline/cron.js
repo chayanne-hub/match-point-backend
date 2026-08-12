@@ -363,28 +363,34 @@ async function runForSport(sportSlug, dayFilter = null) {
     const pickedOdds = analysis.selection === `${m.competitorA} ML` ? m.oddsA : m.oddsB;
     const factsUsedJson = JSON.stringify(analysis.factors);
 
-    // Every match gets a "winner" pick — a straight who-wins call. Only
-    // picks clearing MODEL_PICK_THRESHOLD also get sold as a "model"
-    // pick (a genuine-edge call), same selection/confidence/analysis,
-    // just a second sellable product on top.
-    const pickTypesToCreate = analysis.confidence >= MODEL_PICK_THRESHOLD
-      ? ['winner', 'model']
-      : ['winner'];
-
-    for (const pickType of pickTypesToCreate) {
-      await db.pick.create({
-        data: {
-          match: { connect: { id: match.id } },
-          pickType,
-          market: 'moneyline',
-          selection: analysis.selection,
-          confidence: analysis.confidence,
-          odds: pickedOdds,
-          rationale: analysis.analysis,
-          factsUsed: factsUsedJson,
-        },
-      });
-    }
+    // ONE pick per match. This used to write TWO identical rows whenever
+    // confidence cleared MODEL_PICK_THRESHOLD — same selection, same
+    // confidence, same odds, same rationale, same factors — differing
+    // only in pickType ('winner' and 'model'), as two sellable tiers of
+    // the same call.
+    //
+    // That duplication forced every stats query to filter to 'model'
+    // alone just to avoid counting one match twice, which in turn made
+    // the published win rate and streak silently ignore every match
+    // BELOW the threshold (those only ever got a 'winner' row). The
+    // headline numbers were computed on a favourable subset while the
+    // site displayed and sold all of them.
+    //
+    // Conviction is already fully expressed by the confidence value
+    // itself — MODEL_PICK_THRESHOLD still marks where a genuine edge
+    // starts, it just no longer needs a duplicate row to say so.
+    await db.pick.create({
+      data: {
+        match: { connect: { id: match.id } },
+        pickType: 'model',
+        market: 'moneyline',
+        selection: analysis.selection,
+        confidence: analysis.confidence,
+        odds: pickedOdds,
+        rationale: analysis.analysis,
+        factsUsed: factsUsedJson,
+      },
+    });
 
     // Spread pick — a separate market/product from moneyline, only
     // created when Claude actually returned one (i.e. a real line

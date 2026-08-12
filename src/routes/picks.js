@@ -14,6 +14,33 @@ const { triggerManualRun, triggerManualRunTomorrow } = require('../pipeline/cron
 
 const router = express.Router();
 
+// One graded result per MATCH.
+//
+// Historically a single call was written as TWO Pick rows — 'winner' and
+// 'model' — with identical selection/confidence/odds whenever it cleared
+// the edge threshold. Picks below the threshold got only a 'winner' row.
+// That's why stats used to filter to pickType:'model': it was the only
+// way to avoid counting one match twice. The side effect was that every
+// below-threshold match vanished from the published win rate and streak,
+// so those numbers described a favourable subset of what the site
+// actually sold.
+//
+// New picks are written once (pickType 'model'), but the historical rows
+// still exist, so every read path takes BOTH types and de-duplicates per
+// match here — preferring 'model' where a legacy pair exists. Same match,
+// counted exactly once, nothing dropped.
+function dedupeResultsByMatch(results) {
+  const byMatch = new Map();
+  for (const r of results) {
+    const key = r.pick.matchId;
+    const existing = byMatch.get(key);
+    if (!existing || (existing.pick.pickType !== 'model' && r.pick.pickType === 'model')) {
+      byMatch.set(key, r);
+    }
+  }
+  return [...byMatch.values()];
+}
+
 // Computes the UTC instant corresponding to midnight in a given IANA
 // timezone, for a given reference date. Used to make "today's picks" roll
 // over at midnight Pacific Time rather than server-local time (Railway
@@ -440,17 +467,16 @@ router.get('/stats', async (req, res) => {
   // these public-facing win-rate/ROI calculations so one bad price snapshot
   // doesn't distort the whole track record.
   //
-  // Also restricted to pickType: 'model' — every match that clears the
-  // confidence threshold gets BOTH a "model" and a "winner" pick (same
-  // selection/confidence/outcome, two separate sellable products). Counting
-  // both here would double-count every one of those matches. "Model" is
-  // the genuine high-conviction product; "winner" exists for every match
-  // regardless of edge, so including it would pad the sample with picks
-  // that were never claimed to have real value.
+  // Covers BOTH legacy pick types, de-duplicated per match (see
+  // dedupeResultsByMatch). This used to be model-only, which avoided
+  // double-counting the legacy duplicate pair but also excluded every
+  // below-threshold match — so the published win rate described only the
+  // high-conviction subset while the site sold every pick. Now it's the
+  // complete record, each match counted once.
   const results = await db.result.findMany({
     where: {
       pick: {
-        pickType: 'model',
+        pickType: { in: ['model', 'winner'] }, // both types, de-duped per match below — see dedupeResultsByMatch
         market: 'moneyline', // spread/total picks are also pickType:'model' now —
                               // excluded here so they don't get mixed into the
                               // published moneyline track record. Worth its own
@@ -463,7 +489,8 @@ router.get('/stats', async (req, res) => {
     include: { pick: { include: { match: true } } },
   });
 
-  const decided = results.filter((r) => r.outcome !== 'push');
+  const uniqueResults = dedupeResultsByMatch(results);
+  const decided = uniqueResults.filter((r) => r.outcome !== 'push');
   const wins = decided.filter((r) => r.outcome === 'win').length;
   const losses = decided.filter((r) => r.outcome === 'loss').length;
   const winRate = decided.length > 0 ? Math.round((wins / decided.length) * 1000) / 10 : null;
@@ -893,11 +920,10 @@ router.get('/:id', async (req, res) => {
 router.get('/archive/results', async (req, res) => {
   const { sport } = req.query;
 
-  // Same exclusions as /stats — see the comment there. Keeps corrupted
+  // Same scoping as /stats — see the comment there. Keeps corrupted
   // -10000-style placeholder-odds rows out of the public archive without
-  // deleting the underlying data, and restricts to pickType: 'model' so
-  // matches that clear the confidence threshold (and therefore get both a
-  // "model" and a "winner" pick) don't show up twice in the archive.
+  // deleting the underlying data, and de-duplicates the legacy
+  // model/winner pair so no match appears twice.
   // ?recent=true — the homepage Activity feed. The default mode above is
   // the PUBLISHED TRACK RECORD and deliberately shows only 'model' picks
   // (the ones that cleared the edge threshold), so it stays an honest
@@ -910,12 +936,17 @@ router.get('/archive/results', async (req, res) => {
   // nearly everything that had settled since. Recent mode includes both
   // types and de-duplicates per match (preferring 'model'), so it shows
   // what actually finished without changing any published number.
+  // recent=true no longer changes WHICH picks are included — both modes
+  // now cover every graded match exactly once. It only relaxes the odds
+  // sanity filter, which exists to keep corrupted price rows out of the
+  // published track record but shouldn't hide a real result from the
+  // activity feed.
   const recentMode = req.query.recent === 'true';
 
   const results = await db.result.findMany({
     where: {
       pick: {
-        ...(recentMode ? { pickType: { in: ['model', 'winner'] } } : { pickType: 'model' }),
+        pickType: { in: ['model', 'winner'] }, // de-duped per match below
         market: 'moneyline', // keep spread/total picks out of the moneyline archive — same reasoning as /stats
         ...(recentMode ? {} : { odds: { gte: -2000, lte: 2000 } }),
         ...(sport ? { match: { sport: { slug: sport } } } : {}),
@@ -926,22 +957,9 @@ router.get('/archive/results', async (req, res) => {
     take: 100,
   });
 
-  // One row per MATCH in recent mode — a match that cleared the threshold
-  // has both a 'model' and a 'winner' pick on the same outcome, and the
-  // feed shouldn't list it twice. Prefer 'model' since that's the real
-  // high-conviction call.
-  let shapedResults = results;
-  if (recentMode) {
-    const byMatch = new Map();
-    for (const r of results) {
-      const key = r.pick.matchId;
-      const existing = byMatch.get(key);
-      if (!existing || (existing.pick.pickType !== 'model' && r.pick.pickType === 'model')) {
-        byMatch.set(key, r);
-      }
-    }
-    shapedResults = [...byMatch.values()].sort((a, b) => new Date(b.settledAt) - new Date(a.settledAt));
-  }
+  // Always one row per match, newest first — never the legacy duplicate pair.
+  const shapedResults = dedupeResultsByMatch(results)
+    .sort((a, b) => new Date(b.settledAt) - new Date(a.settledAt));
 
   res.json({
     results: shapedResults.map((r) => ({
