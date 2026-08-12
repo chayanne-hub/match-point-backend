@@ -23,6 +23,10 @@ model User {
   passwordHash String
   createdAt    DateTime  @default(now())
   isAdmin      Boolean   @default(false)
+  // Whop's user id (user_xxx), captured the first time a purchase of theirs
+  // is seen. Lets later webhooks resolve to this account even when the
+  // checkout metadata is missing and the emails don't match.
+  whopUserId   String?   @unique
 
   subscription Subscription?
   purchases    PurchasedPick[]
@@ -38,9 +42,19 @@ model Subscription {
   id                String   @id @default(uuid())
   userId            String   @unique
   user              User     @relation(fields: [userId], references: [id])
-  lastChargeCode    String   @unique // Coinbase Commerce charge code that most recently renewed this membership
-  plan              String   // "daily_bundle" | "monthly_membership" | "weekly_bundle" | "season_membership"
+  // Kept nullable for the legacy Coinbase Commerce rows — those still carry
+  // a charge code, new Whop-backed rows never will.
+  lastChargeCode    String?  @unique // legacy: Coinbase Commerce charge code
+  // Whop membership id (mem_xxx). This is the source of truth for access
+  // now: Whop owns billing and renewal, and tells us via webhook when a
+  // membership goes valid or invalid.
+  whopMembershipId  String?  @unique
+  whopPlanId        String?
+  plan              String   // plan key, e.g. "monthly_membership"
   status             String   // "active" | "past_due" | "canceled" | "incomplete"
+  // With Whop this mirrors the membership's renewal_period_end. Unlike the
+  // Coinbase flow (one-off charges granting a fixed window), renewal is
+  // genuinely automatic, so this gets refreshed on each payment webhook.
   currentPeriodEnd   DateTime
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
