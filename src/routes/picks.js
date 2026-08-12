@@ -533,6 +533,35 @@ router.get('/stats', async (req, res) => {
     ? Math.round(winRows.reduce((sum, r) => sum + r.pick.confidence, 0) / winRows.length)
     : null;
 
+  // CURRENT STREAK — computed here rather than on the client, for two
+  // real reasons:
+  //
+  //   1. DETERMINISTIC ORDER. Grading runs in 15-second batches, so a
+  //      whole slate of matches often shares an almost identical
+  //      settledAt. Sorting on that alone leaves ties in arbitrary
+  //      order, and a loss landing ahead of wins that actually finished
+  //      after it cuts the streak short. Tie-breaking on the match's own
+  //      start time gives a stable, meaningful sequence.
+  //   2. SAME DATASET AS THE WIN RATE. The client was reading a
+  //      different endpoint that caps at 100 results per sport, so the
+  //      two headline numbers could disagree about the same history.
+  //
+  // Pushes are already excluded from `decided` — they're neutral, so
+  // they neither extend nor break a run.
+  const ordered = [...decided].sort((a, b) => {
+    const bySettled = new Date(b.settledAt) - new Date(a.settledAt);
+    if (bySettled !== 0) return bySettled;
+    return new Date(b.pick.match.startTime) - new Date(a.pick.match.startTime);
+  });
+
+  let streakCount = 0;
+  let streakType = null;
+  for (const r of ordered) {
+    if (streakType === null) { streakType = r.outcome; streakCount = 1; continue; }
+    if (r.outcome === streakType) streakCount++;
+    else break;
+  }
+
   res.json({
     winRate,
     roi,
@@ -541,6 +570,8 @@ router.get('/stats', async (req, res) => {
     sampleSize: decided.length,
     picksLogged: decided.length,
     avgConfidenceWins,
+    streakCount: streakType ? streakCount : null,
+    streakType, // 'win' | 'loss' | null
   });
 });
 
