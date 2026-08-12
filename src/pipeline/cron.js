@@ -890,6 +890,23 @@ function startLiveScheduled() {
       .finally(() => { liveIsRunning = false; });
   }, intervalMs);
   console.log(`[live-pipeline] scheduled to run every ${Math.round(intervalMs / 1000)} seconds.`);
+
+  // setInterval doesn't fire until a FULL interval has elapsed, so every
+  // deploy/restart left live odds and confidence frozen for one whole
+  // cycle (15 minutes on the default) with nothing in the logs to explain
+  // it — which looked exactly like "live odds are broken." Kick one run
+  // off shortly after boot so a restart costs seconds of staleness, not
+  // minutes. The short delay lets the DB pool and the first ESPN poll
+  // settle first; the same liveIsRunning guard prevents it from
+  // overlapping the scheduled cycle.
+  setTimeout(() => {
+    if (liveIsRunning) return;
+    liveIsRunning = true;
+    console.log('[live-pipeline] running initial cycle on startup.');
+    updateLivePicks()
+      .catch(err => console.error('[live-pipeline] startup run failed:', err))
+      .finally(() => { liveIsRunning = false; });
+  }, 20000);
 }
 
 /**
