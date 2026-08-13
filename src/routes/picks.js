@@ -998,7 +998,56 @@ router.get('/admin/diagnose', requireAuth, async (req, res) => {
       });
     }
 
-    res.json({ sport, day: dayOffset ? 'tomorrow' : 'today', window: { from: startOfDay, to: endOfDay }, build, fetched: matches.length, startingInWindow: today.length, tally, rows });
+    // DUPLICATE FIXTURES.
+    //
+    // Everything above looks up matches by externalId, i.e. whatever the
+    // odds feed currently calls them. The BOARD queries the database by
+    // date instead. If the same fixture exists twice — the provider
+    // reissued an event id, or the match moved between tournament keys
+    // (qualifying vs main draw) — the pipeline analyses one row while the
+    // board renders the other, and it shows "Awaiting Analysis" for a
+    // match that is demonstrably analysed. That's invisible to every
+    // check above, because they never see the orphaned row.
+    const dbMatches = await db.match.findMany({
+      where: {
+        startTime: { gte: startOfDay, lte: endOfDay },
+        ...(sport ? { sport: { slug: sport } } : {}),
+      },
+      include: { picks: { where: { market: 'moneyline', pickType: { in: ['model', 'winner', 'live'] } } } },
+    });
+
+    const byFixture = new Map();
+    for (const dm of dbMatches) {
+      const key = `${dm.competitorA} vs ${dm.competitorB}`.toLowerCase();
+      if (!byFixture.has(key)) byFixture.set(key, []);
+      byFixture.get(key).push({
+        externalId: dm.externalId,
+        sportKey: dm.sportKey,
+        status: dm.status,
+        startTime: dm.startTime,
+        moneylinePicks: dm.picks.length,
+      });
+    }
+    const duplicates = [...byFixture.entries()]
+      .filter(([, v]) => v.length > 1)
+      .map(([matchup, entries]) => ({ matchup, entries }));
+
+    res.json({
+      sport,
+      day: dayOffset ? 'tomorrow' : 'today',
+      window: { from: startOfDay, to: endOfDay },
+      build,
+      fetched: matches.length,
+      startingInWindow: today.length,
+      // What the BOARD actually queries — if this exceeds startingInWindow,
+      // the extra rows are what's rendering as unanalysed.
+      matchesInDatabaseWindow: dbMatches.length,
+      databaseRowsWithNoMoneylinePick: dbMatches.filter((dm) => dm.picks.length === 0).length,
+      duplicateFixtures: duplicates.length,
+      duplicates: duplicates.slice(0, 10),
+      tally,
+      rows,
+    });
   } catch (err) {
     console.error('[diagnose] failed:', err);
     res.status(500).json({ error: err.message });
