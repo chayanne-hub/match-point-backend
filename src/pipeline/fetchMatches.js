@@ -33,7 +33,13 @@ const SPORT_KEYS = {
   // error without breaking the other soccer leagues.
   soccer: ['soccer_epl', 'soccer_uefa_champs_league', 'soccer_usa_mls'],
   baseball: ['baseball_mlb'],
-  football: ['americanfootball_nfl'],
+  // Preseason is a SEPARATE key at The Odds API. Requesting only
+  // americanfootball_nfl returns the regular season — 272 games starting
+  // in September, every one of them filtered out by the 14-day window,
+  // so August preseason games showed as unanalysable while BetMGM had
+  // them fully priced. Both keys are needed; the day filter takes care of
+  // which are actually current.
+  football: ['americanfootball_nfl', 'americanfootball_nfl_preseason'],
 };
 
 // Tennis is the one sport where The Odds API keys change constantly — it's
