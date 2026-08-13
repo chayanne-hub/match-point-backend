@@ -18,6 +18,98 @@ const { broadcastScoreUpdate } = require('../lib/liveSocket');
 const { registerHeartbeat, beat, startWatchdog } = require('../lib/watchdog');
 const { recordPregameRun, recordEspnPoll, recordAnalysisRetry, recordAnalysisFailure, recordError, recordLiveCycleStart, recordLiveCycleComplete, recordLiveOverlapSkip } = require('../lib/healthStats');
 
+const MAX_CONCURRENT_ANALYSIS = 3;
+let activeAnalysisCount = 0;
+const analysisWaitQueue = [];
+
+function acquireAnalysisSlot() {
+  return new Promise((resolve) => {
+    if (activeAnalysisCount >= MAX_CONCURRENT_ANALYSIS) {
+      console.log(`[pipeline] concurrency cap reached (${MAX_CONCURRENT_ANALYSIS} in flight) — queueing rather than piling on more load.`);
+    }
+    const tryAcquire = () => {
+      if (activeAnalysisCount < MAX_CONCURRENT_ANALYSIS) {
+        activeAnalysisCount++;
+        resolve();
+      } else {
+        analysisWaitQueue.push(tryAcquire);
+      }
+    };
+    tryAcquire();
+  });
+}
+
+function releaseAnalysisSlot() {
+  activeAnalysisCount--;
+  const next = analysisWaitQueue.shift();
+  if (next) next();
+}
+
+async function analyzeMatchWithRetry(params, context) {
+  // Held across BOTH the first attempt and the retry — a failing match
+  // occupies one slot for its whole up-to-180-second lifetime rather
+  // than releasing and re-queueing between attempts, which keeps the
+  // total concurrent load genuinely capped, not just capped per-attempt.
+  await acquireAnalysisSlot();
+  try {
+    let result = await analyzeMatch(params);
+    if (result) return result;
+    console.warn(`[match-analyst] first attempt failed for ${context} — retrying once before giving up.`);
+    recordAnalysisRetry();
+    result = await analyzeMatch(params);
+    if (!result) {
+      console.error(`[match-analyst] retry also failed for ${context} — skipping this cycle.`);
+      recordAnalysisFailure(context);
+    }
+    return result;
+  } finally {
+    releaseAnalysisSlot();
+  }
+}
+const { fetchMatches, fetchScores } = require('./fetchMatches');
+const { fetchEspnLiveScores, matchEspnEvent } = require('./fetchEspn');
+const { analyzeMatch, reassessLiveMatch, reassessLiveTotal } = require('./matchAnalyst');
+const { computePregameProjectedTotal, computeLiveProjectedTotal, computeLiveProjectedTotalByInnings } = require('./teamTotals');
+const { computePregameProjectedTotalGames, computeLiveProjectedTotalGames } = require('./tennisTotalGames');
+const { computePregameProjectedTotalGoals, computeLiveProjectedTotalGoals, parseElapsedMinutesFromDisplayClock } = require('./soccerGoalsTotal');
+
+// Confidence bar a pick needs to clear to also be sold as a "model" pick
+// (a genuine-edge call) on top of the always-present "winner" pick (a
+// straight who-wins call on every match, regardless of edge size).
+const MODEL_PICK_THRESHOLD = 65;
+
+const SPORTS = ['tennis', 'basketball', 'soccer', 'baseball', 'football'];
+
+// Sports with a real, computed pregame/live total formula.
+const TOTAL_FORMULA_SPORTS = ['basketball', 'football', 'baseball', 'tennis', 'soccer'];
+
+// Of those, which actually have quarters/periods with a countdown clock
+// (as opposed to baseball's innings or tennis's sets, both discrete units
+// with no clock at all) — used to decide whether the "Q{period} {clock}"
+// liveClock display format is valid for a given sport.
+const QUARTER_BASED_SPORTS = ['basketball', 'football'];
+
+// Tennis's live-total formula is sets-based, not innings-based — needs
+// its own branch (match format + set score) rather than treating it as
+// a variant of either the quarter-clock or innings model.
+const SETS_BASED_SPORTS = ['tennis'];
+
+// Soccer runs on a real clock, but COUNTS UP with variable stoppage time
+// — the opposite convention from basketball/football's countdown clock.
+// Needs its own branch: ESPN's displayClock string ("72'", "45+2'") is
+// parsed directly rather than reused through the countdown-clock math.
+const COUNT_UP_CLOCK_SPORTS = ['soccer'];
+
+async function ensureSportRows() {
+  for (const slug of SPORTS) {
+    await db.sport.upsert({
+      where: { slug },
+      update: {},
+      create: { slug, name: slug[0].toUpperCase() + slug.slice(1) },
+    });
+  }
+}
+
 // (freshOddsForPick removed — it existed only to rewrite pregame pick
 // prices with live odds, which corrupted the entry price used for
 // grading. Live prices live on the live pick instead.)
