@@ -5,6 +5,7 @@ const { fetchEspnNews } = require('../pipeline/fetchEspnNews');
 const { getRecentPosts } = require('../pipeline/fetchXTimeline');
 const { getStandings, getRecordMap } = require('../pipeline/fetchEspnStandings');
 const { fetchMatches } = require('../pipeline/fetchMatches');
+const { namesLikelyMatch } = require('../pipeline/fetchEspn');
 const { getHealthSnapshot } = require('../lib/healthStats');
 const { isAdminEmail } = require('./auth');
 const { fetchBasketballPlayerProps } = require('../pipeline/fetchPlayerProps');
@@ -239,7 +240,39 @@ router.get('/today', async (req, res) => {
   // below), so a genuinely delayed match is never hidden.
   const STALE_UNANALYSED_MS = 45 * 60 * 1000;
   const staleCutoff = Date.now() - STALE_UNANALYSED_MS;
-  const visibleMatches = matches.filter((m) => {
+  // COLLAPSE DUPLICATE FIXTURES.
+  //
+  // The same match can exist as two rows. The odds feed reissues an event
+  // id when it renames a player ("Daniel Merida" -> "Daniel Merida
+  // Aguilar") or moves an event between tournament keys, and externalId
+  // is what identifies a row — so a second row gets created, the pipeline
+  // analyses whichever one the feed currently lists, and the board renders
+  // BOTH. The orphan has no pick and shows "Awaiting Analysis" next to its
+  // own analysed twin.
+  //
+  // Grouping on the exact matchup string missed this completely, because
+  // the whole point is that the names differ slightly. namesLikelyMatch
+  // already handles those variants for ESPN matching; reused here.
+  //
+  // Keeps the row WITH a pick. If neither has one, keeps the newest —
+  // that's the row the feed currently references.
+  const deduped = [];
+  for (const m of matches) {
+    const twin = deduped.find((d) =>
+      Math.abs(new Date(d.startTime).getTime() - new Date(m.startTime).getTime()) < 6 * 60 * 60 * 1000 &&
+      namesLikelyMatch(d.competitorA, m.competitorA) &&
+      namesLikelyMatch(d.competitorB, m.competitorB)
+    );
+    if (!twin) { deduped.push(m); continue; }
+    const twinHasPick = twin.picks.some((pk) => pk.pickType !== 'live');
+    const thisHasPick = m.picks.some((pk) => pk.pickType !== 'live');
+    if (thisHasPick && !twinHasPick) deduped[deduped.indexOf(twin)] = m;
+  }
+  if (deduped.length !== matches.length) {
+    console.log(`[today] collapsed ${matches.length - deduped.length} duplicate fixture row(s) for ${sport || 'all sports'}.`);
+  }
+
+  const visibleMatches = deduped.filter((m) => {
     const hasPregamePick = m.picks.some((pk) => pk.pickType !== 'live');
     if (hasPregamePick) return true;
     if (m.status !== 'scheduled') return true;
