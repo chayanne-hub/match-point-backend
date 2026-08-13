@@ -212,8 +212,34 @@ router.get('/today', async (req, res) => {
     },
   });
 
+  // Drop stale, unanalysable rows.
+  //
+  // A match can sit in the database long after the odds feed has stopped
+  // listing it — books pull a market, a qualifier gets rescheduled, an
+  // event id is reissued. If such a row never received a pick, it never
+  // will: there's no price left to analyse against. It then renders as
+  // "Awaiting Analysis" indefinitely, and since the start time has passed
+  // the countdown shows a permanent "Starting…".
+  //
+  // Measured in production: 47 database rows for today's window against
+  // 30 matches actually in the feed, 13 of them pickless. Those 13 were
+  // the entire unexplained block on the board.
+  //
+  // Only rows that are ALL of: unanalysed, still 'scheduled' (ESPN never
+  // saw them start), and more than two hours past their start time. A
+  // genuine delay stays visible; two hours is well beyond any real tennis
+  // session slip.
+  const STALE_UNANALYSED_MS = 2 * 60 * 60 * 1000;
+  const staleCutoff = Date.now() - STALE_UNANALYSED_MS;
+  const visibleMatches = matches.filter((m) => {
+    const hasPregamePick = m.picks.some((pk) => pk.pickType !== 'live');
+    if (hasPregamePick) return true;
+    if (m.status !== 'scheduled') return true;
+    return new Date(m.startTime).getTime() >= staleCutoff;
+  });
+
   const shaped = [];
-  for (const m of matches) {
+  for (const m of visibleMatches) {
     const pregamePicks = m.picks.filter((pk) => pk.pickType !== 'live');
     if (pregamePicks.length > 0) {
       // One representative pick per match, not every tier — 'winner' and
