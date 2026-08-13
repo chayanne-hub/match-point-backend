@@ -18,148 +18,9 @@ const { broadcastScoreUpdate } = require('../lib/liveSocket');
 const { registerHeartbeat, beat, startWatchdog } = require('../lib/watchdog');
 const { recordPregameRun, recordEspnPoll, recordAnalysisRetry, recordAnalysisFailure, recordError, recordLiveCycleStart, recordLiveCycleComplete, recordLiveOverlapSkip } = require('../lib/healthStats');
 
-/**
- * Wraps analyzeMatch() with exactly ONE full retry if the first attempt
- * returns null (total failure — unparseable JSON even after the cheap
- * repair pass, or a response missing required fields). Previously a
- * single bad response meant the match was silently skipped for the
- * entire cycle and cost a real API call for nothing. This costs one
- * more real call on the (uncommon) failure path, but recovers matches
- * that would otherwise need to wait for the next 15-minute cycle to
- * even be attempted again — and by then they may have started, missing
- * the window for a pregame pick entirely.
- */
-
-// Global concurrency cap across ALL sports combined — the 5-sports-
-// concurrent design (Promise.all in runAll, below) already bounds
-// simultaneous calls to roughly 5 (one per sport's sequential queue),
-// but during a backlog catch-up (e.g. after Anthropic balance ran out
-// for a while and many matches are all newly eligible at once), that's
-// 5 SUSTAINED concurrent long-running calls for as long as the backlog
-// lasts, not a brief burst. This caps it lower and makes it explicit,
-// so a big backlog queues instead of piling on load that can push every
-// in-flight request past its timeout together — real cost for zero
-// picks, the exact failure mode this is meant to prevent.
-const MAX_CONCURRENT_ANALYSIS = 3;
-let activeAnalysisCount = 0;
-const analysisWaitQueue = [];
-
-function acquireAnalysisSlot() {
-  return new Promise((resolve) => {
-    if (activeAnalysisCount >= MAX_CONCURRENT_ANALYSIS) {
-      console.log(`[pipeline] concurrency cap reached (${MAX_CONCURRENT_ANALYSIS} in flight) — queueing rather than piling on more load.`);
-    }
-    const tryAcquire = () => {
-      if (activeAnalysisCount < MAX_CONCURRENT_ANALYSIS) {
-        activeAnalysisCount++;
-        resolve();
-      } else {
-        analysisWaitQueue.push(tryAcquire);
-      }
-    };
-    tryAcquire();
-  });
-}
-
-function releaseAnalysisSlot() {
-  activeAnalysisCount--;
-  const next = analysisWaitQueue.shift();
-  if (next) next();
-}
-
-async function analyzeMatchWithRetry(params, context) {
-  // Held across BOTH the first attempt and the retry — a failing match
-  // occupies one slot for its whole up-to-180-second lifetime rather
-  // than releasing and re-queueing between attempts, which keeps the
-  // total concurrent load genuinely capped, not just capped per-attempt.
-  await acquireAnalysisSlot();
-  try {
-    let result = await analyzeMatch(params);
-    if (result) return result;
-    console.warn(`[match-analyst] first attempt failed for ${context} — retrying once before giving up.`);
-    recordAnalysisRetry();
-    result = await analyzeMatch(params);
-    if (!result) {
-      console.error(`[match-analyst] retry also failed for ${context} — skipping this cycle.`);
-      recordAnalysisFailure(context);
-    }
-    return result;
-  } finally {
-    releaseAnalysisSlot();
-  }
-}
-const { fetchMatches, fetchScores } = require('./fetchMatches');
-const { fetchEspnLiveScores, matchEspnEvent } = require('./fetchEspn');
-const { analyzeMatch, reassessLiveTotal } = require('./matchAnalyst');
-const { marketImpliedFactor } = require('./scoreModel');
-const { computePregameProjectedTotal, computeLiveProjectedTotal, computeLiveProjectedTotalByInnings } = require('./teamTotals');
-const { computePregameProjectedTotalGames, computeLiveProjectedTotalGames } = require('./tennisTotalGames');
-const { computePregameProjectedTotalGoals, computeLiveProjectedTotalGoals, parseElapsedMinutesFromDisplayClock } = require('./soccerGoalsTotal');
-
-// Confidence bar a pick needs to clear to also be sold as a "model" pick
-// (a genuine-edge call) on top of the always-present "winner" pick (a
-// straight who-wins call on every match, regardless of edge size).
-const MODEL_PICK_THRESHOLD = 65;
-
-const SPORTS = ['tennis', 'basketball', 'soccer', 'baseball', 'football'];
-
-// Sports with a real, computed pregame/live total formula.
-const TOTAL_FORMULA_SPORTS = ['basketball', 'football', 'baseball', 'tennis', 'soccer'];
-
-// Of those, which actually have quarters/periods with a countdown clock
-// (as opposed to baseball's innings or tennis's sets, both discrete units
-// with no clock at all) — used to decide whether the "Q{period} {clock}"
-// liveClock display format is valid for a given sport.
-const QUARTER_BASED_SPORTS = ['basketball', 'football'];
-
-// Tennis's live-total formula is sets-based, not innings-based — needs
-// its own branch (match format + set score) rather than treating it as
-// a variant of either the quarter-clock or innings model.
-const SETS_BASED_SPORTS = ['tennis'];
-
-// Soccer runs on a real clock, but COUNTS UP with variable stoppage time
-// — the opposite convention from basketball/football's countdown clock.
-// Needs its own branch: ESPN's displayClock string ("72'", "45+2'") is
-// parsed directly rather than reused through the countdown-clock math.
-const COUNT_UP_CLOCK_SPORTS = ['soccer'];
-
-async function ensureSportRows() {
-  for (const slug of SPORTS) {
-    await db.sport.upsert({
-      where: { slug },
-      update: {},
-      create: { slug, name: slug[0].toUpperCase() + slug.slice(1) },
-    });
-  }
-}
-
-/**
- * Given an existing pick and the freshly-fetched match data for this
- * cycle, returns the current price for whichever side/selection that
- * pick actually made — or null if it can't be determined (unrecognized
- * selection format, or that market's fresh price isn't available this
- * cycle). Never guesses; a missing fresh price just means the caller
- * leaves the pick's existing odds alone rather than overwriting with a
- * fabricated number.
- */
-function freshOddsForPick(pick, m) {
-  if (pick.market === 'moneyline') {
-    if (pick.selection.startsWith(m.competitorA)) return m.oddsA;
-    if (pick.selection.startsWith(m.competitorB)) return m.oddsB;
-    return null;
-  }
-  if (pick.market === 'spread') {
-    if (pick.selection.startsWith(m.competitorA)) return m.spreadOddsA;
-    if (pick.selection.startsWith(m.competitorB)) return m.spreadOddsB;
-    return null;
-  }
-  if (pick.market === 'total') {
-    if (pick.selection.startsWith('Over')) return m.overOdds;
-    if (pick.selection.startsWith('Under')) return m.underOdds;
-    return null;
-  }
-  return null;
-}
+// (freshOddsForPick removed — it existed only to rewrite pregame pick
+// prices with live odds, which corrupted the entry price used for
+// grading. Live prices live on the live pick instead.)
 
 // Same timezone day-boundary logic picks.js already uses for "today's"
 // picks — duplicated here rather than shared across a routes/pipeline
@@ -407,20 +268,26 @@ async function runForSport(sportSlug, dayFilter = null) {
       where: { matchId: match.id, pickType: { in: ['model', 'winner'] } },
     });
     if (existingPicks.length > 0) {
-      // Same correction as the live pipeline's filter: m.status is the
-      // odds provider's guess and no longer ever says 'live'. `match` is
-      // the database row, which carries ESPN's observed state.
-      if (['live', 'in_progress'].includes(match.status)) {
-        for (const pick of existingPicks) {
-          const freshOdds = freshOddsForPick(pick, m);
-          // Never overwrite with null — a book briefly pulling a line
-          // (common late in a blowout) shouldn't blank out the last
-          // known real price.
-          if (freshOdds !== null && freshOdds !== pick.odds) {
-            await db.pick.update({ where: { id: pick.id }, data: { odds: freshOdds } });
-          }
-        }
-      }
+      // A PREGAME pick's odds are the price the call was made at. They are
+      // never rewritten.
+      //
+      // This block used to overwrite them with live in-play prices while a
+      // match was running, which broke two things at once:
+      //
+      //  1. GRADING. pick.odds is what profit is computed from. A pick
+      //     taken at -150 that got rewritten to +1900 during a blowout was
+      //     then graded at +1900 — a price nobody could have taken. Every
+      //     ROI figure and the whole equity curve inherited that.
+      //  2. THE BOARD. Confidence stays frozen at the pregame value (as it
+      //     should — it's research, not a market read), so a row ended up
+      //     showing 62% confidence next to 20.00 odds: two numbers from
+      //     different moments, sitting side by side as if they agreed.
+      //
+      // Live prices belong on the separate live pick, which is created and
+      // updated by the live pipeline and carries its own confidence
+      // derived from those same prices. If a sport isn't covered by
+      // LIVE_ODDS_SPORTS it simply has no live pick, and the board shows
+      // the pregame call unchanged — which is honest.
       continue;
     }
 
