@@ -247,6 +247,13 @@ router.get('/today', async (req, res) => {
             rationale: liveOverride.rationale,
             odds: liveOverride.odds,
             entryOdds: sidesAgree ? p.odds : null,
+            // When the live price was last actually refreshed. Books close
+            // in-play markets as a match nears its end, and when that
+            // happens the meter keeps showing its last value — which looks
+            // identical to the pipeline being broken. Exposing the age lets
+            // the board say "this price is stale" instead of presenting a
+            // dead number as live.
+            liveUpdatedAt: liveOverride.updatedAt,
           }
         : p;
       shaped.push(await shapePick({ ...displayPick, match: m }, userId));
@@ -350,7 +357,8 @@ async function shapePick(p, userId) {
     confidence: unlocked ? p.confidence : null,
     rationale: unlocked ? p.rationale : null,
     odds: p.odds,
-    entryOdds: p.entryOdds ?? null, // pregame price for this same pick, when the match is live — powers the Line Value meter
+    entryOdds: p.entryOdds ?? null,
+    liveUpdatedAt: p.liveUpdatedAt ?? null, // pregame price for this same pick, when the match is live — powers the Line Value meter
     // Raw market lines, not model analysis — shown to everyone, same
     // as odds above. Null whenever a book hasn't posted that market
     // yet, never a fabricated number.
