@@ -958,6 +958,81 @@ router.get('/admin/diagnose', requireAuth, async (req, res) => {
   }
 });
 
+// GET /api/picks/admin/diagnose-live — why isn't the live meter moving?
+//
+// Walks the exact gates updateLivePicksForSport walks, in order, and
+// reports which one each live match stops at. Read-only.
+router.get('/admin/diagnose-live', requireAuth, async (req, res) => {
+  try {
+    const user = await db.user.findUnique({ where: { id: req.userId } });
+    if (!user || !isAdminEmail(user.email)) return res.status(403).json({ error: 'Admin access required.' });
+
+    const sport = req.query.sport || 'tennis';
+    const liveOddsSports = (process.env.LIVE_ODDS_SPORTS || 'tennis').split(',').map((x) => x.trim());
+
+    const config = {
+      LIVE_ODDS_SPORTS: liveOddsSports,
+      sportIsCovered: liveOddsSports.includes(sport),
+      LIVE_PIPELINE_INTERVAL_MS: process.env.LIVE_PIPELINE_INTERVAL_MS || '(unset — defaults to 900000, i.e. 15 minutes)',
+      LIVE_REACTIVE_COOLDOWN_MS: process.env.LIVE_REACTIVE_COOLDOWN_MS || '(unset — defaults to 45000)',
+    };
+
+    // Gate 1: does the DATABASE think anything is live?
+    const liveDb = await db.match.findMany({
+      where: { sport: { slug: sport }, status: { in: ['live', 'in_progress'] } },
+      include: { picks: { where: { pickType: 'live', market: 'moneyline' }, take: 1 } },
+    });
+
+    // Gate 2: does the odds provider still return those matches, with prices?
+    let fetched = [];
+    let fetchError = null;
+    try {
+      fetched = await fetchMatches(sport);
+    } catch (err) {
+      fetchError = err.message;
+    }
+    const byExternalId = new Map(fetched.map((m) => [m.externalId, m]));
+
+    const now = Date.now();
+    const rows = liveDb.map((match) => {
+      const m = byExternalId.get(match.externalId);
+      const livePick = match.picks[0] || null;
+      const ageSec = livePick ? Math.round((now - new Date(livePick.updatedAt).getTime()) / 1000) : null;
+
+      let stopsAt;
+      if (!config.sportIsCovered) stopsAt = 'SPORT_NOT_IN_LIVE_ODDS_SPORTS';
+      else if (!m) stopsAt = 'ODDS_PROVIDER_NO_LONGER_LISTS_THIS_MATCH';
+      else if (m.oddsA === null || m.oddsB === null) {
+        stopsAt = (m.bookCount ?? 0) === 0 ? 'MARKET_CLOSED_NO_BOOKS' : 'BOOKS_PRESENT_BUT_NO_USABLE_PRICE';
+      } else if (!livePick) stopsAt = 'NO_LIVE_PICK_YET_WILL_BE_CREATED';
+      else stopsAt = 'SHOULD_BE_UPDATING';
+
+      return {
+        matchup: `${match.competitorA} vs ${match.competitorB}`,
+        dbStatus: match.status,
+        inOddsFeed: !!m,
+        oddsA: m?.oddsA ?? null,
+        oddsB: m?.oddsB ?? null,
+        oddsBook: m?.oddsBook ?? null,
+        bookCount: m?.bookCount ?? null,
+        livePickConfidence: livePick?.confidence ?? null,
+        livePickOdds: livePick?.odds ?? null,
+        // The number that actually answers the question.
+        secondsSinceLivePickUpdated: ageSec,
+        stopsAt,
+      };
+    });
+
+    const tally = {};
+    rows.forEach((r) => { tally[r.stopsAt] = (tally[r.stopsAt] || 0) + 1; });
+
+    res.json({ sport, config, liveInDatabase: liveDb.length, fetchedFromProvider: fetched.length, fetchError, tally, rows });
+  } catch (err) {
+    console.error('[diagnose-live] failed:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/picks/timing/:pickId — "should I bet this now, or wait?"
 //
 // This is the honest version of that question. It does NOT predict where

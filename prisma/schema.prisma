@@ -175,6 +175,11 @@ model Pick {
   isLive       Boolean  @default(false)
   price        Int      @default(900)
   createdAt    DateTime @default(now())
+  /// Last write of any kind. Without this there was no way to tell a live
+  /// pick that's being refreshed every cycle from one that silently
+  /// stopped updating — both look identical in the database, which is
+  /// exactly why "the meter is frozen" kept needing guesswork.
+  updatedAt    DateTime @updatedAt
 
   result       Result?
   purchases    PurchasedPick[]
