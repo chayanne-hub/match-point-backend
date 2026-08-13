@@ -179,7 +179,14 @@ model Pick {
   /// pick that's being refreshed every cycle from one that silently
   /// stopped updating — both look identical in the database, which is
   /// exactly why "the meter is frozen" kept needing guesswork.
-  updatedAt    DateTime @updatedAt
+  ///
+  /// @default(now()) is required, not cosmetic: adding a bare @updatedAt
+  /// to a table that already has rows fails, because Postgres has no
+  /// value to put in the existing ones. The default backfills them at
+  /// migration time. Those backfilled timestamps are the migration
+  /// moment, not a real write — the field only becomes meaningful from
+  /// the next update onward.
+  updatedAt    DateTime @updatedAt @default(now())
 
   result       Result?
   purchases    PurchasedPick[]
