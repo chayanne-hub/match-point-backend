@@ -174,6 +174,20 @@ router.get('/today', async (req, res) => {
   const includeFinal = req.query.includeFinal === 'true';
   const statusFilter = includeFinal ? { in: ['scheduled', 'live', 'final'] } : { in: ['scheduled', 'live'] };
 
+  // ?includeTomorrow=true — extends the board's window through tomorrow.
+  //
+  // Showing a fixture costs nothing; ANALYSING one costs a paid research
+  // call. Those two are deliberately decoupled: the pregame pipeline stays
+  // strictly today-only (analysis is frozen once written, so a pick made a
+  // day early is built on stale team news), while the board can show
+  // tomorrow's slate as upcoming with no pick attached yet.
+  //
+  // Not applied to the "analysed today" counter, which must stay bounded
+  // to today or it starts counting tomorrow's fixtures.
+  const windowEnd = req.query.includeTomorrow === 'true'
+    ? new Date(endOfDay.getTime() + 24 * 60 * 60 * 1000)
+    : endOfDay;
+
   // Default moneyline mode: ONE query on Match (with its picks included),
   // not two separate queries against Pick and Match — this endpoint
   // already polls every 20 seconds from the frontend, so doubling its
@@ -183,7 +197,7 @@ router.get('/today', async (req, res) => {
   // in JS below instead of via a second round-trip to the database.
   const matches = await db.match.findMany({
     where: {
-      startTime: { gte: startOfDay, lte: endOfDay },
+      startTime: { gte: startOfDay, lte: windowEnd },
       status: statusFilter,
       // skipAnalysis only matters for matches the pipeline might still
       // attempt — irrelevant (and could wrongly hide a real final match)
@@ -288,7 +302,7 @@ router.get('/today', async (req, res) => {
         // today; this supplemental path never was.
         ev.eventDate &&
         new Date(ev.eventDate).getTime() >= startOfDay.getTime() &&
-        new Date(ev.eventDate).getTime() <= endOfDay.getTime() &&
+        new Date(ev.eventDate).getTime() <= windowEnd.getTime() &&
         // Future-round bracket slots ESPN lists before the actual
         // players are determined — not a real, bettable matchup yet.
         // Confirmed happening in production (15+ of these in one
