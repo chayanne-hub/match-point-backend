@@ -108,7 +108,13 @@ async function userHasAccess(userId, pickId) {
   // subscription lifecycle events (unlike Stripe's customer.subscription.*
   // webhooks), so nothing ever flips status away from 'active' on its own.
   // Without this check, one payment would grant access forever.
-  return !!sub && sub.status === 'active' && sub.currentPeriodEnd > new Date();
+  // 'canceling' still has access. Someone who cancels a weekly plan on
+  // day 2 paid for the week and keeps the week — the flag only stops the
+  // renewal. currentPeriodEnd is what actually ends access, and Whop
+  // fires membership.went_invalid at that point to close it out.
+  // Requiring 'active' alone would have revoked access the instant they
+  // hit cancel, which is both wrong and the fastest route to a chargeback.
+  return !!sub && ['active', 'canceling'].includes(sub.status) && sub.currentPeriodEnd > new Date();
 }
 
 // Resolves the requester from an optional Authorization header without

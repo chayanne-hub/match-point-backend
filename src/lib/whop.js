@@ -129,6 +129,26 @@ async function createCheckout({ planKey, userId, redirectUrl }) {
 }
 
 /**
+ * Cancels a membership. This exists so a customer never has to visit
+ * whop.com to manage their subscription — a merchant of record normally
+ * means handing that off to the provider's dashboard, which breaks the
+ * "you never leave nitepicks.com" promise at the worst possible moment.
+ *
+ * Default mode keeps access until the end of the paid period, which is
+ * what someone cancelling a weekly plan expects: they've paid for the
+ * week, they keep the week. 'immediate' is for refunds/abuse only.
+ */
+const CANCEL_PATH = process.env.WHOP_CANCEL_PATH || '/api/v2/memberships/{id}/cancel';
+
+async function cancelMembership(membershipId, { immediate = false } = {}) {
+  const path = CANCEL_PATH.replace('{id}', encodeURIComponent(membershipId));
+  return whopRequest(path, {
+    method: 'POST',
+    body: { cancellation_mode: immediate ? 'immediate' : 'at_period_end' },
+  });
+}
+
+/**
  * Reads a membership back from Whop. Used to confirm state rather than
  * trusting a webhook body alone for anything consequential.
  */
@@ -190,6 +210,7 @@ function verifyWebhookSignature(rawBody, headers) {
 
 module.exports = {
   createCheckout,
+  cancelMembership,
   getMembership,
   verifyWebhookSignature,
   planIdFor,

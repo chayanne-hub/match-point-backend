@@ -1,5 +1,5 @@
 const express = require('express');
-const { createCheckout, planIdFor, availablePlans } = require('../lib/whop');
+const { createCheckout, cancelMembership, planIdFor, availablePlans } = require('../lib/whop');
 const db = require('../lib/db');
 const { requireAuth } = require('../lib/auth');
 
@@ -98,6 +98,43 @@ router.post('/session', requireAuth, async (req, res) => {
     planId: planIdFor(plan),
     sessionId: checkout.sessionId,
     metadataAttached: checkout.metadataAttached,
+  });
+});
+
+// POST /checkout/cancel — end the caller's own subscription, in-app.
+//
+// Without this the only way to cancel is whop.com, which means the one
+// moment a customer is most annoyed is also the moment they get sent to
+// a domain they don't recognise. Keeping it here also means we see the
+// cancellation immediately rather than waiting on a webhook.
+router.post('/cancel', requireAuth, async (req, res) => {
+  const sub = await db.subscription.findUnique({ where: { userId: req.userId } });
+  if (!sub) return res.status(404).json({ error: 'No active subscription found.' });
+  if (!sub.whopMembershipId) {
+    // Legacy Coinbase rows have no membership to cancel — those simply
+    // lapse on their own at currentPeriodEnd.
+    return res.status(409).json({ error: 'This plan expires on its own and does not need cancelling.' });
+  }
+
+  try {
+    await cancelMembership(sub.whopMembershipId);
+  } catch (err) {
+    console.error('[checkout] cancel failed:', err.message);
+    return res.status(502).json({ error: 'Could not cancel right now — please try again.' });
+  }
+
+  // Access is NOT revoked here. They paid for the current period and keep
+  // it; Whop fires membership.went_invalid at period end and the webhook
+  // closes it out. Marking it canceled now only stops it renewing.
+  await db.subscription.update({
+    where: { id: sub.id },
+    data: { status: 'canceling' },
+  });
+
+  res.json({
+    canceled: true,
+    accessUntil: sub.currentPeriodEnd,
+    message: 'Your subscription will not renew. You keep access until the end of the period you have already paid for.',
   });
 });
 
