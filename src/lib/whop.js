@@ -41,7 +41,7 @@ if (!process.env.WHOP_WEBHOOK_SECRET) {
 // Add a key here AND there to introduce a new tier; the plan itself is
 // configured in the Whop dashboard.
 const PLAN_ENV_KEYS = {
-  monthly_membership: 'WHOP_PLAN_MONTHLY',
+  weekly_membership: 'WHOP_PLAN_WEEKLY',
 };
 
 function planIdFor(planKey) {

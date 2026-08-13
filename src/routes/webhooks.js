@@ -10,7 +10,7 @@ function planKeyFromWhopPlanId(whopPlanId) {
   if (!whopPlanId) return null;
   // Mirrors PLAN_ENV_KEYS in lib/whop.js — only plans actually sold.
   const pairs = {
-    monthly_membership: process.env.WHOP_PLAN_MONTHLY,
+    weekly_membership: process.env.WHOP_PLAN_WEEKLY,
   };
   return Object.keys(pairs).find((key) => pairs[key] && pairs[key] === whopPlanId) || null;
 }
@@ -124,9 +124,11 @@ router.post('/whop', express.raw({ type: 'application/json' }), async (req, res)
         // Whop drives renewal, so this date is informational rather than
         // the gate. If we can't determine it, fall back to a month out —
         // membership.went_invalid is what actually revokes access.
-        if (!renewalEnd) renewalEnd = new Date(Date.now() + 31 * 24 * 60 * 60 * 1000);
+        // Weekly plan — a month-long fallback would hand out 4x the access
+        // that was paid for if Whop's membership read ever fails.
+        if (!renewalEnd) renewalEnd = new Date(Date.now() + 8 * 24 * 60 * 60 * 1000);
 
-        const planKey = planKeyFromWhopPlanId(whopPlanId) || 'monthly_membership';
+        const planKey = planKeyFromWhopPlanId(whopPlanId) || 'weekly_membership';
 
         await db.subscription.upsert({
           where: { userId: user.id },

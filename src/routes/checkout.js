@@ -25,7 +25,7 @@ const router = express.Router();
 // and is rejected with a clear 501 below rather than silently failing.
 const PLAN_LABELS = {
   single_pick: 'Single Pick',
-  monthly_membership: 'Monthly Membership',
+  weekly_membership: 'Weekly Membership',
 };
 
 // GET /checkout/plans — which plans are actually purchasable right now.
