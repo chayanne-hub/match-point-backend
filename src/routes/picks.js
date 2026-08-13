@@ -229,7 +229,15 @@ router.get('/today', async (req, res) => {
   // saw them start), and more than two hours past their start time. A
   // genuine delay stays visible; two hours is well beyond any real tennis
   // session slip.
-  const STALE_UNANALYSED_MS = 2 * 60 * 60 * 1000;
+  // 45 minutes, not 2 hours. If a match's start time has passed, ESPN
+  // hasn't reported it in progress, and it still has no pick, it isn't
+  // going to get one — the odds feed has already dropped it. Two hours
+  // meant a screen full of permanently "Starting…" rows in the meantime.
+  //
+  // Still comfortably longer than a real tennis session slip, and a match
+  // ESPN DOES see start is exempt regardless of age (the status check
+  // below), so a genuinely delayed match is never hidden.
+  const STALE_UNANALYSED_MS = 45 * 60 * 1000;
   const staleCutoff = Date.now() - STALE_UNANALYSED_MS;
   const visibleMatches = matches.filter((m) => {
     const hasPregamePick = m.picks.some((pk) => pk.pickType !== 'live');
