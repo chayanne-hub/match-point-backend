@@ -924,6 +924,11 @@ router.get('/admin/diagnose', requireAuth, async (req, res) => {
 
     const sport = req.query.sport || 'tennis';
     const MAX_CYCLE_FAILURES = 3;
+    // ?day=tomorrow — the pregame pipeline can be run manually for the
+    // next day, so the diagnostic has to be able to look at that window
+    // too. Otherwise "I ran it for tomorrow and nothing happened" is
+    // unanswerable.
+    const dayOffset = req.query.day === 'tomorrow' ? 1 : 0;
 
     const matches = await fetchMatches(sport);
     const sample = matches[0] || {};
@@ -934,7 +939,9 @@ router.get('/admin/diagnose', requireAuth, async (req, res) => {
       bookCountFieldPresent: Object.prototype.hasOwnProperty.call(sample, 'bookCount'),
     };
 
-    const { startOfDay, endOfDay } = getTimezoneDayBounds('America/Los_Angeles');
+    const base = getTimezoneDayBounds('America/Los_Angeles');
+    const startOfDay = new Date(base.startOfDay.getTime() + dayOffset * 86400000);
+    const endOfDay = new Date(base.endOfDay.getTime() + dayOffset * 86400000);
     const today = matches.filter((m) => {
       const t = new Date(m.startTime).getTime();
       return t >= startOfDay.getTime() && t < endOfDay.getTime();
@@ -973,7 +980,7 @@ router.get('/admin/diagnose', requireAuth, async (req, res) => {
       });
     }
 
-    res.json({ sport, build, fetched: matches.length, startingToday: today.length, tally, rows });
+    res.json({ sport, day: dayOffset ? 'tomorrow' : 'today', window: { from: startOfDay, to: endOfDay }, build, fetched: matches.length, startingInWindow: today.length, tally, rows });
   } catch (err) {
     console.error('[diagnose] failed:', err);
     res.status(500).json({ error: err.message });
