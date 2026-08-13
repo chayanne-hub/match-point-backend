@@ -609,21 +609,22 @@ async function updateLiveScores(sportSlug, sportId) {
 // runForSport.
 let analysisSuccessesThisRun = 0;
 
-async function runAll() {
-  analysisSuccessesThisRun = 0;
-
-  // Clear failure counters on matches that are still upcoming and still
-  // have no pick. Those counters exist to stop hammering one genuinely
-  // broken match — but they're permanent, so any outage (no API credit,
-  // a bad key, a provider hiccup) silently blacklists the whole slate
-  // forever. A process start is a sensible "try again" boundary: the
-  // per-cycle cap still applies within a run, so the retry cost stays
-  // bounded, but a fixed outage no longer leaves matches unanalysable.
+async function clearStaleFailureCounters() {
   try {
-    const { startOfDay, endOfDay } = getPacificDayBounds(0);
+    // TODAY AND TOMORROW. This used to clear only today's window, which
+    // left tomorrow's matches permanently blacklisted: they hit the
+    // failure cap during an outage, nothing ever reset them, and the
+    // manual "run for tomorrow" then skipped every one. Confirmed in
+    // production — 15 of 29 of tomorrow's tennis matches were stuck at
+    // failCycles 3 while the other 14 analysed normally.
+    //
+    // Both days are cleared regardless of which run is executing, because
+    // a counter set during an outage says nothing about the match.
+    const { startOfDay } = getPacificDayBounds(0);
+    const { endOfDay: endOfTomorrow } = getPacificDayBounds(1);
     const cleared = await db.match.updateMany({
       where: {
-        startTime: { gte: startOfDay, lte: endOfDay },
+        startTime: { gte: startOfDay, lte: endOfTomorrow },
         analysisFailCycles: { gt: 0 },
         status: { in: ['scheduled', 'live', 'in_progress'] },
         picks: { none: { pickType: { in: ['model', 'winner'] } } },
@@ -636,6 +637,19 @@ async function runAll() {
   } catch (err) {
     console.warn('[pipeline] could not clear failure counters:', err.message);
   }
+}
+
+async function runAll() {
+  analysisSuccessesThisRun = 0;
+
+  // Clear failure counters on matches that are still upcoming and still
+  // have no pick. Those counters exist to stop hammering one genuinely
+  // broken match — but they're permanent, so any outage (no API credit,
+  // a bad key, a provider hiccup) silently blacklists the whole slate
+  // forever. A process start is a sensible "try again" boundary: the
+  // per-cycle cap still applies within a run, so the retry cost stays
+  // bounded, but a fixed outage no longer leaves matches unanalysable.
+  await clearStaleFailureCounters();
   await ensureSportRows();
   // Concurrent, not sequential — SPORTS order used to double as processing
   // order, which meant a heavy day for one sport (30 tennis matches, each
@@ -658,6 +672,10 @@ async function runAll() {
 
 async function runAllTomorrow() {
   await ensureSportRows();
+  // Same reset as the daily run. Without this a manual "run for tomorrow"
+  // silently skipped every match still carrying an outage-era failure
+  // counter — which is exactly what happened.
+  await clearStaleFailureCounters();
   await Promise.all(
     SPORTS.map((sport) =>
       runForSport(sport, 'tomorrow').catch((err) => {
