@@ -952,12 +952,25 @@ router.get('/admin/diagnose', requireAuth, async (req, res) => {
     for (const m of today) {
       const match = await db.match.findUnique({
         where: { externalId: m.externalId },
-        include: { picks: { where: { pickType: { in: ['model', 'winner'] } }, take: 1 } },
+        // ALL picks, unfiltered. The board attaches picks with a narrower
+        // filter than this diagnostic used, so "analysed" here and
+        // "analysed" on screen could disagree — which is exactly the
+        // situation this is meant to explain rather than reproduce.
+        include: { picks: true },
       });
+
+      // Mirror the board's own filter exactly: /today only attaches picks
+      // that are pickType model/winner/live AND market 'moneyline'. A
+      // match can hold a spread or total pick and still render as
+      // "Awaiting Analysis" if no moneyline pick exists.
+      const boardVisiblePicks = (match?.picks || []).filter(
+        (pk) => ['model', 'winner', 'live'].includes(pk.pickType) && pk.market === 'moneyline'
+      );
 
       let verdict;
       if (!match) verdict = 'NOT_IN_DB';
-      else if (match.picks.length > 0) verdict = 'OK_ALREADY_ANALYSED';
+      else if (boardVisiblePicks.length > 0) verdict = 'OK_ALREADY_ANALYSED';
+      else if (match.picks.length > 0) verdict = 'HAS_PICKS_BUT_NONE_THE_BOARD_SHOWS';
       else if (match.skipAnalysis) verdict = 'BLOCKED_SKIP_FLAG';
       else if (m.oddsA === null || m.oddsB === null) {
         verdict = (m.bookCount ?? 0) === 0 ? 'BLOCKED_NO_BOOK_PRICES_IT' : 'BLOCKED_BOOKS_PRESENT_BUT_UNUSABLE';
@@ -976,6 +989,11 @@ router.get('/admin/diagnose', requireAuth, async (req, res) => {
         inDb: !!match,
         skipAnalysis: match?.skipAnalysis ?? null,
         failCycles: match?.analysisFailCycles ?? null,
+        // Every pick on this match, so a mismatch between "analysed" and
+        // what the board shows is visible rather than inferred.
+        picks: (match?.picks || []).map((pk) => `${pk.pickType}/${pk.market}`),
+        matchStatus: match?.status ?? null,
+        matchStartTime: match?.startTime ?? null,
         verdict,
       });
     }
