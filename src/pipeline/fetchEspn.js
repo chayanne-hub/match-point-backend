@@ -118,7 +118,19 @@ function normalizeName(name) {
     .replace(/\u00d8/g, 'O').replace(/\u00f8/g, 'o')    // Ø ø
     .replace(/\u0141/g, 'L').replace(/\u0142/g, 'l')    // Ł ł
     .replace(/\u00df/g, 'ss')                          // ß
-    .replace(/[^a-zA-Z0-9\s]/g, '')  // strip punctuation
+    // Hyphens and apostrophes need OPPOSITE treatment, which is why a
+    // single punctuation strip got both wrong:
+    //   - Hyphen joins two given names, so it becomes a SPACE.
+    //     "Elena-Gabriela Ruse" -> "elena gabriela ruse", matching ESPN's
+    //     unhyphenated spelling. Stripping it produced "elenagabriela",
+    //     which matched nothing and duplicated the fixture.
+    //   - An apostrophe sits INSIDE one name, so it's removed.
+    //     "O'Connell" -> "oconnell", matching a feed that writes
+    //     "OConnell". Turning it into a space would split one surname in
+    //     two and break the match instead.
+    .replace(/[-–—]/g, ' ')
+    .replace(/['’`]/g, '')
+    .replace(/[^a-zA-Z0-9\s]/g, '')  // strip remaining punctuation
     .toLowerCase()
     .trim()
     .replace(/\s+/g, ' ')
@@ -192,6 +204,23 @@ function namesLikelyMatch(a, b) {
   // Trailing-token match, for team short forms: "Blue Jays" is the tail of
   // "Toronto Blue Jays". Mirrors the leading-token rule above.
   if (shorter.length >= 2 && shorter.every((tok, i) => longer[longer.length - shorter.length + i] === tok)) return true;
+
+  // CONTAINED NAME. Spanish and Portuguese compound names get truncated
+  // differently by each feed, and the shared part isn't always at the
+  // start or end: ESPN says "Camila Osorio" while the odds feed says
+  // "Maria Camila Osorio Serrano" — the match sits in the MIDDLE, so both
+  // the prefix and suffix rules above miss it and the fixture appears
+  // twice on the board.
+  //
+  // Requires the shorter name's tokens to appear in the longer one in
+  // ORDER and consecutively, and at least two of them. Consecutive rather
+  // than a loose subsequence matters: "maria lopez" would otherwise match
+  // "maria fernanda garcia lopez", which is a different person.
+  if (shorter.length >= 2 && longer.length > shorter.length) {
+    const joinedShort = shorter.join(' ');
+    const joinedLong = longer.join(' ');
+    if (joinedLong.includes(joinedShort)) return true;
+  }
 
   // Bare mascot/surname fallback — ONLY when one side is a single token
   // ("Dodgers" vs "Los Angeles Dodgers").
