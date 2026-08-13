@@ -1364,6 +1364,12 @@ async function updateEspnScoresForSport(sportSlug) {
         liveScore: `${event.homeScore} - ${event.awayScore}`,
         ...(event.setScore && { setScore: event.setScore }),
         ...(event.periodScores && { periodScores: event.periodScores }),
+        // R/H/E for baseball. Written whenever ESPN reports them; null
+        // stays null so an unknown value never renders as a real zero.
+        ...(event.homeHits !== null && event.homeHits !== undefined && { homeHits: event.homeHits }),
+        ...(event.awayHits !== null && event.awayHits !== undefined && { awayHits: event.awayHits }),
+        ...(event.homeErrors !== null && event.homeErrors !== undefined && { homeErrors: event.homeErrors }),
+        ...(event.awayErrors !== null && event.awayErrors !== undefined && { awayErrors: event.awayErrors }),
         ...(event.period != null && { period: event.period }),
         ...(event.clockSeconds != null && { clockSeconds: event.clockSeconds }),
         ...(newLiveClock !== null && { liveClock: newLiveClock }),

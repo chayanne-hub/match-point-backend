@@ -282,8 +282,34 @@ function parseTeamCompetition(competition) {
   }
   const periodScores = periodParts.length ? periodParts.join(', ') : null;
 
+  // HITS and ERRORS — the H and E of a baseball box score. Runs alone
+  // give "5-2", which is a score, not a scoreboard; R/H/E is how the
+  // sport is actually read.
+  //
+  // ESPN puts these in two different shapes depending on the endpoint:
+  // sometimes directly on the competitor, sometimes inside a statistics
+  // array. Both are checked, and anything missing stays null rather than
+  // rendering a fabricated zero — a real 0 errors and "we don't know"
+  // must not look identical.
+  const statOf = (competitor, name) => {
+    if (competitor?.[name] !== undefined && competitor[name] !== null) return Number(competitor[name]);
+    const fromStats = (competitor?.statistics || []).find(
+      (st) => (st.name || st.abbreviation || '').toLowerCase() === name
+    );
+    return fromStats?.displayValue !== undefined ? Number(fromStats.displayValue) : null;
+  };
+
+  const homeHits = statOf(home, 'hits');
+  const awayHits = statOf(away, 'hits');
+  const homeErrors = statOf(home, 'errors');
+  const awayErrors = statOf(away, 'errors');
+
   return {
     competitorAName: home.team?.displayName || home.team?.shortDisplayName,
+    homeHits,
+    awayHits,
+    homeErrors,
+    awayErrors,
     competitorBName: away.team?.displayName || away.team?.shortDisplayName,
     completed: !!competition.status?.type?.completed,
     inProgress: competition.status?.type?.state === 'in',

@@ -104,7 +104,14 @@ model Match {
   homeScore    Int?     // structured final/current score for competitorA — needed to
   awayScore    Int?     // compute recent-form factors once matches complete
   setScore     String?  // tennis only — set-by-set games score, e.g. "6-4, 3-2"
-  periodScores String?  // basketball/football — quarter-by-quarter score, e.g. "25-28, 20-21, 20-24, 22-25"
+  periodScores String?  // per-period score — quarters for basketball/football, innings for baseball, e.g. "25-28, 20-21, 20-24, 22-25"
+  /// Baseball box-score line: hits and errors alongside the runs already
+  /// held in periodScores. Nullable on purpose — a real 0 and "ESPN
+  /// didn't report it" must stay distinguishable.
+  homeHits     Int?
+  awayHits     Int?
+  homeErrors   Int?
+  awayErrors   Int?
   // Best price across every US book, captured alongside the BetMGM line of
   // record. Display only — grading and the published track record stay on
   // BetMGM so historical numbers keep meaning the same thing.
