@@ -68,6 +68,29 @@ const TOKEN_ALIASES = {
   yekaterina: 'ekaterina',
   kseniia: 'ksenia', xenia: 'ksenia',
   iuliia: 'yuliia', yulia: 'yuliia',
+  // Nicknames. Feeds disagree on these the same way they disagree on
+  // transliterations: the odds provider lists "Caty McNally" while ESPN
+  // says "Catherine McNally", and the match then appears twice on the
+  // board — once with odds, once as a schedule-only row.
+  //
+  // Only confirmed pairs go here. A nickname map is riskier than a
+  // transliteration map because two different players really can be
+  // "Alex" and "Alexander" — the surname still has to match on its own,
+  // which is what keeps this safe.
+  caty: 'catherine',
+  cat: 'catherine',
+  katie: 'katherine',
+  kate: 'katherine',
+  nick: 'nicholas',
+  mike: 'michael',
+  matt: 'matthew',
+  chris: 'christopher',
+  dan: 'daniel',
+  danny: 'daniel',
+  tom: 'thomas',
+  tommy: 'thomas',
+  ben: 'benjamin',
+  sam: 'samuel',
   // Add more here, or without a deploy via NAME_ALIASES (see below).
 };
 
