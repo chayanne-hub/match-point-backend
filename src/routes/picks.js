@@ -500,7 +500,18 @@ router.get('/stats', async (req, res) => {
       pick: {
         pickType: { in: ['model', 'winner'] }, // both types, de-duped per match below — see dedupeResultsByMatch
         market: { in: ['moneyline', 'spread', 'total'] },
-        odds: { gte: -2000, lte: 2000 },
+        // Sanity bound only. This used to be ±2000, which was written when
+        // corrupted "suspended market" placeholder prices could reach the
+        // database. That source was fixed upstream (fetchMatches now
+        // validates a market by whether its two sides form a coherent
+        // two-way price), so the narrow cap no longer protects anything —
+        // it just silently drops legitimate heavy favourites from the
+        // published record.
+        //
+        // It also had to go because the Activity feed doesn't apply it, so
+        // the same day's results were counted differently in two places on
+        // one screen. Widened to a genuine corruption bound.
+        odds: { gte: -100000, lte: 100000 },
         ...(sport ? { match: { sport: { slug: sport } } } : {}),
       },
     },
@@ -1147,31 +1158,22 @@ router.get('/archive/results', async (req, res) => {
   // -10000-style placeholder-odds rows out of the public archive without
   // deleting the underlying data, and de-duplicates the legacy
   // model/winner pair so no match appears twice.
-  // ?recent=true — the homepage Activity feed. The default mode above is
-  // the PUBLISHED TRACK RECORD and deliberately shows only 'model' picks
-  // (the ones that cleared the edge threshold), so it stays an honest
-  // record and doesn't double-count matches that produced both a 'model'
-  // and a 'winner' pick.
-  //
-  // That's wrong for an activity feed though: most finished matches only
-  // ever produce a 'winner' pick, so they were invisible here — the feed
-  // looked frozen on old results when it was really just filtering out
-  // nearly everything that had settled since. Recent mode includes both
-  // types and de-duplicates per match (preferring 'model'), so it shows
-  // what actually finished without changing any published number.
-  // recent=true no longer changes WHICH picks are included — both modes
-  // now cover every graded match exactly once. It only relaxes the odds
-  // sanity filter, which exists to keep corrupted price rows out of the
-  // published track record but shouldn't hide a real result from the
-  // activity feed.
-  const recentMode = req.query.recent === 'true';
+  // NOTE: ?recent=true is still accepted (the Activity feed sends it) but
+  // no longer changes anything. It used to relax the odds filter, which
+  // meant the Activity feed and the Win Rate Tracker counted the same
+  // day's results differently — the feed showed picks the tracker had
+  // silently excluded. One scoping for every caller now, so the numbers
+  // on screen can't disagree.
 
   const results = await db.result.findMany({
     where: {
       pick: {
         pickType: { in: ['model', 'winner'] }, // de-duped per match below
         market: 'moneyline', // keep spread/total picks out of the moneyline archive — same reasoning as /stats
-        ...(recentMode ? {} : { odds: { gte: -2000, lte: 2000 } }),
+        // Identical bound in both modes — recent mode used to skip this
+        // entirely, which is exactly why the Activity feed and the Win
+        // Rate Tracker reported different totals for the same day.
+        odds: { gte: -100000, lte: 100000 },
         ...(sport ? { match: { sport: { slug: sport } } } : {}),
       },
     },
