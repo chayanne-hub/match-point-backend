@@ -500,12 +500,12 @@ async function shapePick(p, userId) {
       // unconditionally would name the wrong book whenever the pick is on
       // side B, which is exactly when a user would act on it.
       const m = p.match || {};
-      const pickedA = displayPick.selection && displayPick.selection.startsWith(m.competitorA);
+      const pickedA = p.selection && p.selection.startsWith(m.competitorA);
       const bestOdds = pickedA ? m.bestOddsA : m.bestOddsB;
       const bestBook = pickedA ? m.bestBookA : m.bestBookB;
       const per100 = (o) => (o > 0 ? o : (100 / Math.abs(o)) * 100);
-      const gain = (typeof bestOdds === 'number' && typeof displayPick.odds === 'number')
-        ? Math.round(per100(bestOdds) - per100(displayPick.odds))
+      const gain = (typeof bestOdds === 'number' && typeof p.odds === 'number')
+        ? Math.round(per100(bestOdds) - per100(p.odds))
         : null;
       return { bestOdds: bestOdds ?? null, bestBook: bestBook ?? null, shopGain: gain };
     })(),
