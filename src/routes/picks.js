@@ -1224,6 +1224,15 @@ router.get('/admin/winners', requireAuth, async (req, res) => {
     // stands behind from ones it was forced to make. Legacy picks created
     // before this field existed have conviction null and are excluded,
     // rather than being assumed strong.
+    // Price band, so the whole day's heavy favourites can be pulled up as
+    // a group — the set worth shopping hardest for, since at -250 the
+    // required win rate is ~71% and every point of price matters.
+    const band = req.query.band || 'all';
+    const bandFilter = band === 'heavy' ? { odds: { lte: -200 } }
+      : band === 'favourites' ? { odds: { lte: -125 } }
+      : band === 'shortish' ? { odds: { lte: -125, gte: -249 } }
+      : {};
+
     const conviction = req.query.conviction || 'strong';
     const convictionFilter = conviction === 'all'
       ? {}
@@ -1245,6 +1254,7 @@ router.get('/admin/winners', requireAuth, async (req, res) => {
             confidence: { gte: minConfidence },
             odds: { lte: maxOdds },
             ...convictionFilter,
+            ...bandFilter,
           },
         },
       },
@@ -1257,6 +1267,7 @@ router.get('/admin/winners', requireAuth, async (req, res) => {
             confidence: { gte: minConfidence },
             odds: { lte: maxOdds },
             ...convictionFilter,
+            ...bandFilter,
           },
           include: { result: true },
           orderBy: { createdAt: 'asc' },
@@ -1279,7 +1290,26 @@ router.get('/admin/winners', requireAuth, async (req, res) => {
         conviction: pick?.conviction ?? null,
         confidence: pick?.confidence ?? null,
         odds: pick?.odds ?? null,
-        oddsBook: m.bestBookA || null,
+        // BEST AVAILABLE PRICE for the side actually picked.
+        //
+        // This was reading bestBookA unconditionally — side A's book even
+        // when the model picked side B, which made the whole column
+        // useless for the one thing it's for: knowing where to get the
+        // number. Resolved against the selection instead.
+        //
+        // recordedOdds is the price the pick was logged at; bestOdds is
+        // the best across every book right now. The gap between them is
+        // the money left on the table by not shopping.
+        ...(function () {
+          const pickedA = pick && pick.selection.startsWith(m.competitorA);
+          const bestOdds = pickedA ? m.bestOddsA : m.bestOddsB;
+          const bestBook = pickedA ? m.bestBookA : m.bestBookB;
+          const profitPer100 = (o) => (o > 0 ? o : (100 / Math.abs(o)) * 100);
+          const gain = (typeof bestOdds === 'number' && typeof pick?.odds === 'number')
+            ? Math.round(profitPer100(bestOdds) - profitPer100(pick.odds))
+            : null;
+          return { bestOdds: bestOdds ?? null, bestBook: bestBook ?? null, shopGain: gain };
+        })(),
         // What actually happened, when it's known.
         outcome: result?.outcome ?? null,
         actualWinner: m.homeScore !== null && m.awayScore !== null
@@ -1295,7 +1325,7 @@ router.get('/admin/winners', requireAuth, async (req, res) => {
 
     res.json({
       day: dayOffset === 1 ? 'tomorrow' : dayOffset === -1 ? 'yesterday' : 'today',
-      filters: { minConfidence, maxOdds, conviction },
+      filters: { minConfidence, maxOdds, conviction, band },
       total: rows.length,
       graded: decided.length,
       correct,
