@@ -249,6 +249,12 @@ Tennis-specific process:
 `.trim(),
 
   basketball: `
+- Named sources to prefer: the OFFICIAL league injury report for
+  availability (this is the decisive input and it updates late — a star
+  ruled out an hour before tip moves a line more than anything else),
+  Cleaning the Glass or Basketball Reference for efficiency and lineup
+  data, and the team beat writers on the day for rotation and rest
+  intentions that never reach an injury report.
 Basketball-specific process (NBA & WNBA):
 - Research real per-possession offensive/defensive efficiency and pace for
   both teams, not just win-loss record — record alone hides a lot of noise
@@ -271,6 +277,12 @@ Basketball-specific process (NBA & WNBA):
 `.trim(),
 
   soccer: `
+- Named sources to prefer: FBref or Understat for underlying performance
+  (xG and shot quality tell you far more than the table), Transfermarkt
+  for squad status, injuries and suspensions, and the club's own channels
+  or a reliable local beat source for PREDICTED LINEUPS on the day — with
+  rotation being the biggest factor in this sport, a confirmed XI an hour
+  before kick-off is worth more than any season-long statistic.
 THE DRAW IS THE DEFINING FEATURE OF THIS MARKET — read this first.
 This is a THREE-WAY market: home win, draw, away win. Your pick is one
 team to WIN, and a draw counts as a LOSS. Around a quarter of matches in
@@ -311,6 +323,13 @@ Soccer-specific process (any league/tier, not just top divisions):
 `.trim(),
 
   baseball: `
+- Named sources to prefer: Baseball Savant for pitcher and hitter
+  underlying data (velocity, spin, expected stats — these turn before
+  results do, so a struggling starter shows up here first), FanGraphs for
+  projections, park factors and bullpen usage, and Baseball Reference for
+  splits and historical matchups. Check the official team feeds or
+  MLB.com for the confirmed starting pitcher — a probable can change on
+  the morning of, and it's the single biggest input in this sport.
 Baseball-specific process (MLB):
 - Research the starting pitcher matchup in real detail: recent form,
   velocity trend, and — where you can find it — how each pitcher's
