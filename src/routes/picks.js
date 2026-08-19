@@ -5,6 +5,7 @@ const { fetchEspnNews } = require('../pipeline/fetchEspnNews');
 const { getRecentPosts } = require('../pipeline/fetchXTimeline');
 const { getStandings, getRecordMap } = require('../pipeline/fetchEspnStandings');
 const { fetchMatches } = require('../pipeline/fetchMatches');
+const { reanalyzeUpcoming } = require('../pipeline/cron');
 const { getWeights, canonicalLabel } = require('../pipeline/factorWeights');
 const { namesLikelyMatch } = require('../pipeline/fetchEspn');
 const { getHealthSnapshot } = require('../lib/healthStats');
@@ -1263,6 +1264,32 @@ router.get('/admin/loss-review', requireAuth, async (req, res) => {
     });
   } catch (err) {
     console.error('[admin/loss-review] failed:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/picks/admin/reanalyze  { sport, limit, dryRun }
+//
+// Re-runs analysis on upcoming matches that already have a pick, so the
+// queue reflects the current model after a process change.
+//
+// dryRun defaults to TRUE. Each match is a paid research call, so the
+// count is reported before anything is spent — an accidental full-slate
+// re-run is real money.
+router.post('/admin/reanalyze', requireAuth, async (req, res) => {
+  try {
+    const user = await db.user.findUnique({ where: { id: req.userId } });
+    if (!user || !isAdminEmail(user.email)) return res.status(403).json({ error: 'Admin access required.' });
+
+    const { sport = 'tennis', limit = 50, dryRun = true, mode = 'existing' } = req.body || {};
+    const result = await reanalyzeUpcoming(sport, {
+      limit: Math.min(Number(limit) || 50, 200),
+      dryRun: dryRun !== false,
+      mode: mode === 'missing' ? 'missing' : 'existing',
+    });
+    res.json(result);
+  } catch (err) {
+    console.error('[admin/reanalyze] failed:', err);
     res.status(500).json({ error: err.message });
   }
 });

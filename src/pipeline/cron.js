@@ -659,19 +659,29 @@ async function clearStaleFailureCounters() {
  * The old pick is only deleted once the new analysis has returned, so a
  * failure leaves the existing pick intact rather than blanking the board.
  */
-async function reanalyzeUpcoming(sportSlug, { limit = 50, dryRun = true } = {}) {
+async function reanalyzeUpcoming(sportSlug, { limit = 50, dryRun = true, mode = 'existing' } = {}) {
   const sportRow = await db.sport.findUnique({ where: { slug: sportSlug } });
   if (!sportRow) return { sport: sportSlug, error: 'unknown sport' };
+
+  // mode 'missing'  — matches sitting in Upcoming with NO pick at all.
+  //                   These are the ones the scheduled run couldn't do:
+  //                   no price at the time, or an outage blacklisted them.
+  // mode 'existing' — matches that already have a pick, re-run against
+  //                   the current process.
+  const pickFilter = mode === 'missing'
+    ? { none: { pickType: { in: ['model', 'winner'] }, market: 'moneyline' } }
+    : {
+        some: { pickType: { in: ['model', 'winner'] }, market: 'moneyline' },
+        none: { result: { isNot: null } }, // never a graded match
+      };
 
   const candidates = await db.match.findMany({
     where: {
       sportId: sportRow.id,
       status: 'scheduled',
       startTime: { gt: new Date() },      // not started
-      picks: {
-        some: { pickType: { in: ['model', 'winner'] }, market: 'moneyline' },
-        none: { result: { isNot: null } }, // never a graded match
-      },
+      skipAnalysis: false,
+      picks: pickFilter,
     },
     include: { picks: { where: { pickType: { in: ['model', 'winner', 'live'] } } } },
     orderBy: { startTime: 'asc' },
@@ -712,6 +722,12 @@ async function reanalyzeUpcoming(sportSlug, { limit = 50, dryRun = true } = {}) 
       }, `${m.competitorA} vs ${m.competitorB} (reanalyse)`);
 
       if (!analysis) { failed++; continue; }
+
+      // A forced run should not be blocked next cycle by a counter left
+      // over from whatever originally stopped this match.
+      if (match.analysisFailCycles > 0) {
+        await db.match.update({ where: { id: match.id }, data: { analysisFailCycles: 0 } }).catch(() => {});
+      }
 
       const pickedOdds = analysis.selection.startsWith(m.competitorA) ? m.oddsA : m.oddsB;
 
