@@ -5,6 +5,7 @@ const { fetchEspnNews } = require('../pipeline/fetchEspnNews');
 const { getRecentPosts } = require('../pipeline/fetchXTimeline');
 const { getStandings, getRecordMap } = require('../pipeline/fetchEspnStandings');
 const { fetchMatches } = require('../pipeline/fetchMatches');
+const { getWeights, canonicalLabel } = require('../pipeline/factorWeights');
 const { namesLikelyMatch } = require('../pipeline/fetchEspn');
 const { getHealthSnapshot } = require('../lib/healthStats');
 const { isAdminEmail } = require('./auth');
@@ -1196,9 +1197,12 @@ router.get('/admin/loss-review', requireAuth, async (req, res) => {
 
       let factors = [];
       try { factors = JSON.parse(r.pick.factsUsed || '[]'); } catch { factors = []; }
+      // Same canonicalisation the weight model uses. Without it the same
+      // concept splits across several labels and nothing ever reaches a
+      // readable sample.
       const labels = new Set(
         (Array.isArray(factors) ? factors : [])
-          .map((f) => (f && typeof f.label === 'string' ? f.label.trim() : null))
+          .map((f) => canonicalLabel(f && f.label))
           .filter(Boolean)
       );
       for (const label of labels) {
@@ -1218,13 +1222,31 @@ router.get('/admin/loss-review', requireAuth, async (req, res) => {
       .filter((x) => x.n >= minSample)
       .sort((a, b) => a.winRate - b.winRate);
 
+    // Weight alongside measured performance, so the assumed weighting can
+    // be checked against what actually happened. A factor weighted 16 that
+    // performs below the overall baseline across a real sample is the
+    // clearest signal available that the weight is wrong.
+    // Live, data-derived weights — the same ones the analyst prompt uses.
+    const wk = await getWeights(sport || 'tennis');
+    const weights = wk.weights || {};
+    const factorRows = shape(byFactor, 15).map((f) => ({
+      ...f,
+      weight: weights[f.name] ?? null,
+      vsBaseline: unique.length
+        ? f.winRate - Math.round((unique.filter((r) => r.outcome === 'win').length / unique.length) * 100)
+        : null,
+    }));
+
     res.json({
+      weights,
+      weightSource: wk.source,       // 'measured' | 'seed' — never let an assumed
+      weightDetail: wk.detail || [], // weight be mistaken for a measured one
       graded: unique.length,
       overallWinRate: unique.length
         ? Math.round((unique.filter((r) => r.outcome === 'win').length / unique.length) * 100)
         : null,
       byLeague: shape(byLeague, 8),
-      byFactor: shape(byFactor, 15),
+      byFactor: factorRows,
       recentLosses: unique.filter((r) => r.outcome === 'loss').slice(0, 25).map((r) => {
         let factors = [];
         try { factors = JSON.parse(r.pick.factsUsed || '[]'); } catch { factors = []; }

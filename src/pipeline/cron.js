@@ -644,6 +644,105 @@ async function clearStaleFailureCounters() {
   }
 }
 
+/**
+ * Re-analyse matches that already have a pick — used after a change to
+ * the analysis process (a new factor list, new weighting) so the queue
+ * reflects the current model rather than a mix of old and new.
+ *
+ * STRICTLY UPCOMING ONLY. A match that has started or been graded is
+ * never touched:
+ *   - Rewriting a pick on a graded match would change the pick the track
+ *     record was computed from, after the outcome is known. That silently
+ *     rewrites history and makes every published number meaningless.
+ *   - A match already in play can't be bet at the analysed price anyway.
+ *
+ * The old pick is only deleted once the new analysis has returned, so a
+ * failure leaves the existing pick intact rather than blanking the board.
+ */
+async function reanalyzeUpcoming(sportSlug, { limit = 50, dryRun = true } = {}) {
+  const sportRow = await db.sport.findUnique({ where: { slug: sportSlug } });
+  if (!sportRow) return { sport: sportSlug, error: 'unknown sport' };
+
+  const candidates = await db.match.findMany({
+    where: {
+      sportId: sportRow.id,
+      status: 'scheduled',
+      startTime: { gt: new Date() },      // not started
+      picks: {
+        some: { pickType: { in: ['model', 'winner'] }, market: 'moneyline' },
+        none: { result: { isNot: null } }, // never a graded match
+      },
+    },
+    include: { picks: { where: { pickType: { in: ['model', 'winner', 'live'] } } } },
+    orderBy: { startTime: 'asc' },
+    take: limit,
+  });
+
+  if (dryRun) {
+    return {
+      sport: sportSlug,
+      wouldReanalyse: candidates.length,
+      estimatedCalls: candidates.length,
+      matches: candidates.slice(0, 20).map((m) => `${m.competitorA} vs ${m.competitorB}`),
+      note: 'dryRun — nothing changed. Re-run with dryRun:false to execute.',
+    };
+  }
+
+  let done = 0, failed = 0;
+  for (const match of candidates) {
+    try {
+      const fresh = await fetchMatches(sportSlug);
+      const m = fresh.find((x) => x.externalId === match.externalId);
+      if (!m || m.oddsA === null || m.oddsB === null) { failed++; continue; }
+
+      const analysis = await analyzeMatchWithRetry({
+        sport: sportSlug,
+        competitorA: m.competitorA,
+        competitorB: m.competitorB,
+        oddsA: m.oddsA,
+        oddsB: m.oddsB,
+        startTime: m.startTime,
+        spread: m.spread,
+        spreadOddsA: m.spreadOddsA,
+        spreadOddsB: m.spreadOddsB,
+        total: m.total,
+        overOdds: m.overOdds,
+        underOdds: m.underOdds,
+        sportKey: m.sportKey,
+      }, `${m.competitorA} vs ${m.competitorB} (reanalyse)`);
+
+      if (!analysis) { failed++; continue; }
+
+      const pickedOdds = analysis.selection.startsWith(m.competitorA) ? m.oddsA : m.oddsB;
+
+      // Replace only AFTER a successful analysis.
+      await db.pick.deleteMany({
+        where: { matchId: match.id, pickType: { in: ['model', 'winner'] } },
+      });
+      await db.pick.create({
+        data: {
+          match: { connect: { id: match.id } },
+          pickType: 'model',
+          market: 'moneyline',
+          selection: analysis.selection,
+          confidence: analysis.confidence,
+          conviction: analysis.conviction || 'guess',
+          odds: pickedOdds,
+          rationale: analysis.analysis,
+          factsUsed: JSON.stringify(analysis.factors || []),
+        },
+      });
+      done++;
+      console.log(`[reanalyse] ${m.competitorA} vs ${m.competitorB} -> ${analysis.selection} ${analysis.confidence}% (${analysis.conviction})`);
+    } catch (err) {
+      failed++;
+      console.warn(`[reanalyse] ${match.competitorA} vs ${match.competitorB} failed: ${err.message}`);
+    }
+  }
+
+  return { sport: sportSlug, reanalysed: done, failed, considered: candidates.length };
+}
+
 async function runAll() {
   analysisSuccessesThisRun = 0;
 
@@ -1664,4 +1763,4 @@ function startEspnScheduled() {
   console.log('[espn-pipeline] scheduled to run every 15 seconds.');
 }
 
-module.exports = { runAll, startWatchdog, startReactiveOdds, startScheduled, startLiveScheduled, startEspnScheduled, triggerManualRun, triggerManualRunTomorrow };
+module.exports = { runAll, reanalyzeUpcoming, startWatchdog, startReactiveOdds, startScheduled, startLiveScheduled, startEspnScheduled, triggerManualRun, triggerManualRunTomorrow };
