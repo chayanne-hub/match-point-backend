@@ -979,6 +979,40 @@ const lastTotalReassessAt = new Map();
 // leading a set by TWO OR MORE GAMES must have broken serve at least
 // once, because holding alone can never produce more than a one-game
 // lead. So "4-2" is proof of a break without knowing who served.
+/**
+ * Market-implied lean, as a signed factor from -1 to +1.
+ *
+ * Converts both American prices to implied probabilities, strips the
+ * bookmaker's overround so they sum to 1, and returns how far the market
+ * leans toward side A: +1 is a certainty on A, -1 a certainty on B, 0 a
+ * true coin flip. Live confidence is derived from this, which is why
+ * every live match was skipped while it was missing.
+ *
+ * Returns null when either price is absent or implausible, so a bad quote
+ * leaves the existing confidence untouched rather than overwriting it
+ * with a number derived from garbage.
+ */
+function marketImpliedFactor(oddsA, oddsB) {
+  if (typeof oddsA !== 'number' || typeof oddsB !== 'number') return null;
+  if (!Number.isFinite(oddsA) || !Number.isFinite(oddsB)) return null;
+
+  const implied = (o) => {
+    if (o === 0) return null;
+    return o > 0 ? 100 / (o + 100) : -o / (-o + 100);
+  };
+
+  const pA = implied(oddsA);
+  const pB = implied(oddsB);
+  if (pA === null || pB === null) return null;
+
+  const total = pA + pB;
+  if (!(total > 0)) return null;
+
+  // De-vig: normalise so the two sides sum to 1 before comparing them.
+  const fairA = pA / total;
+  return Math.max(-1, Math.min(1, (fairA - 0.5) * 2));
+}
+
 function tennisSignals(setScore, oursIsA) {
   if (!setScore || typeof setScore !== 'string') return [];
   const sets = setScore.split(',').map((x) => x.trim()).filter(Boolean)
