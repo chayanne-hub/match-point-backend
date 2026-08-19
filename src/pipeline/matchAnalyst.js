@@ -22,6 +22,7 @@
  */
 
 const fetch = require('node-fetch');
+const { weightGuidanceFor, FACTOR_LIST } = require('./factorWeights');
 
 const ANTHROPIC_MODEL = process.env.MATCH_ANALYST_MODEL || 'claude-sonnet-5';
 // Used only for fixing a broken JSON response — the content/reasoning is
@@ -380,11 +381,15 @@ does NOT apply. Override the process above where they conflict:
   regular-season team strength is a guess wearing a suit.
 `.trim();
 
-function buildSystemPrompt(sport, opts = {}) {
+async function buildSystemPrompt(sport, opts = {}) {
   const process = SPORT_PROCESS[sport];
   if (!process) return null;
 
   const preseasonNote = opts.isPreseason ? `\n\n${NFL_PRESEASON_PROCESS}` : '';
+  // Relative factor weights — so a crowd note isn't treated as comparable
+  // evidence to an injury report.
+  const weighting = await weightGuidanceFor(sport);
+  const weightNote = weighting ? `\n\n${weighting}` : '';
 
   return `
 You are an experienced sports betting analyst doing independent handicapping
@@ -393,7 +398,7 @@ research real, current information about this match before forming a view.
 
 ${SHARED_PRINCIPLES}
 
-${process}${preseasonNote}
+${process}${preseasonNote}${weightNote}
 `.trim();
 }
 
@@ -410,7 +415,7 @@ async function analyzeMatch({ sport, competitorA, competitorB, oddsA, oddsB, sta
   // The preseason sport key is how we know regular-season logic doesn't
   // apply. Without it the model reasons about playoff seeding in August.
   const isPreseason = typeof sportKey === 'string' && sportKey.includes('preseason');
-  const systemPrompt = buildSystemPrompt(sport, { isPreseason });
+  const systemPrompt = await buildSystemPrompt(sport, { isPreseason });
   if (!systemPrompt) {
     console.error(`[match-analyst] no process defined for sport: ${sport}`);
     return null;
@@ -524,13 +529,28 @@ ${spreadInstructionBlock}
 ${totalInstructionBlock}
 
 The "factors" field is an array of the specific things you actually
-checked that meaningfully informed your MONEYLINE pick — do not include a
-factor you didn't really look into. Each entry needs:
-  - "label": a short category name (e.g. "Recent Form", "Injury Report",
-    "Surface Fit", "Rest & Travel", "Matchup Style")
-  - "tag": exactly "Favors ${competitorA}", "Favors ${competitorB}", or
-    "Neutral"
+the FIXED FACTOR LIST below. Return EVERY factor on the list, in order,
+every time — no additions, no omissions, no renaming.
+
+FACTORS TO REPORT:
+${(FACTOR_LIST[sport] || []).map((f, i) => `  ${i + 1}. ${f}`).join('\n')}
+
+Each entry needs:
+  - "label": copied VERBATIM from the list above
+  - "tag": exactly "Favors ${competitorA}", "Favors ${competitorB}",
+    "Neutral", or "No data"
   - "body": one sentence stating the specific finding
+
+Use the tags precisely — they are what the weighting model learns from:
+  * "Favors X" — you found real, current information and it points to X.
+  * "Neutral" — you found information and it genuinely doesn't separate
+    these two competitors.
+  * "No data" — you could not find usable information on this factor.
+    Use this honestly and often; it is not a failure. Marking something
+    Neutral when you actually found nothing corrupts the measurement,
+    because Neutral claims you looked and the factor didn't matter, while
+    No data says you couldn't look. Those are different, and only one of
+    them should ever influence confidence.
 
 CONVICTION — classify your own call honestly. This is the single most
 important field. It separates calls worth acting on from calls you were
@@ -720,6 +740,34 @@ ${JSON_VALIDITY_REMINDER}
     // becomes 'guess'. Defaulting UP would let a malformed response
     // masquerade as a high-conviction call, which is precisely the
     // failure this field exists to prevent.
+    // FIXED FACTOR LIST enforcement. A response that drops factors would
+    // quietly bias the measurement — a factor only ever reported when it
+    // was interesting would look far more predictive than it is. Missing
+    // entries are filled in as "No data", which is the truthful reading:
+    // it wasn't reported, so nothing was established.
+    const required = FACTOR_LIST[sport] || [];
+    if (required.length) {
+      const byLabel = new Map(
+        (Array.isArray(parsed.factors) ? parsed.factors : [])
+          .filter((f) => f && typeof f.label === 'string')
+          .map((f) => [f.label.trim(), f])
+      );
+      const missing = [];
+      parsed.factors = required.map((label) => {
+        const found = byLabel.get(label);
+        if (found) {
+          const tag = String(found.tag || '').trim();
+          const validTag = /^Favou?rs /i.test(tag) || tag === 'Neutral' || tag === 'No data';
+          return { label, tag: validTag ? tag : 'No data', body: String(found.body || '').trim() };
+        }
+        missing.push(label);
+        return { label, tag: 'No data', body: 'Not reported by the analyst for this match.' };
+      });
+      if (missing.length) {
+        console.warn(`[match-analyst] ${competitorA} vs ${competitorB}: ${missing.length} factor(s) missing, filled as No data — ${missing.join(', ')}`);
+      }
+    }
+
     const VALID_CONVICTION = ['strong', 'lean', 'guess'];
     if (!VALID_CONVICTION.includes(parsed.conviction)) {
       if (parsed.conviction) {
