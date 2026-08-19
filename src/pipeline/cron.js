@@ -812,6 +812,123 @@ async function triggerManualRunTomorrow() {
 // is fine since a fresh reassessment on restart is harmless.
 const lastTotalReassessAt = new Map();
 
+// FAVOURITE DOWN — the alert for the strategy of backing the model's
+// favourite once they drop a set and the price lengthens.
+//
+// Three conditions, all required:
+//   1. The pregame pick was a FAVOURITE (negative odds). A dog going
+//      further behind is not this trade.
+//   2. They are now BEHIND — a set down in tennis, trailing on score
+//      elsewhere. Price drift alone isn't enough; the alert is about the
+//      market overreacting to a specific event.
+//   3. The live price is materially longer than the pregame entry.
+//
+// Fires once per match per band so a long match can't spam. Sent to
+// ALERT_WEBHOOK_URL, the same channel the pipeline watchdog uses.
+// Tennis distress signals, derived from the set score alone.
+//
+// No serve data is needed for any of these, which matters because ESPN's
+// scoreboard doesn't carry first-serve percentage or break points — only
+// games and sets.
+//
+// The break detection is exact rather than a guess: in tennis a player
+// leading a set by TWO OR MORE GAMES must have broken serve at least
+// once, because holding alone can never produce more than a one-game
+// lead. So "4-2" is proof of a break without knowing who served.
+function tennisSignals(setScore, oursIsA) {
+  if (!setScore || typeof setScore !== 'string') return [];
+  const sets = setScore.split(',').map((x) => x.trim()).filter(Boolean)
+    .map((sc) => {
+      const [a, b] = sc.split('-').map((n) => parseInt(n, 10));
+      return Number.isFinite(a) && Number.isFinite(b) ? { ours: oursIsA ? a : b, theirs: oursIsA ? b : a } : null;
+    })
+    .filter(Boolean);
+  if (!sets.length) return [];
+
+  const signals = [];
+  const setIsOver = (s) => (s.ours >= 6 || s.theirs >= 6) && Math.abs(s.ours - s.theirs) >= 2
+    || s.ours === 7 || s.theirs === 7; // 7-5 and 7-6 both close a set
+
+  // Opening set — the single biggest live-price mover in tennis.
+  const first = sets[0];
+  if (setIsOver(first) && first.theirs > first.ours) signals.push('lost the opening set');
+
+  // Sets won so far.
+  const setsWonOurs = sets.filter((s) => setIsOver(s) && s.ours > s.theirs).length;
+  const setsWonTheirs = sets.filter((s) => setIsOver(s) && s.theirs > s.ours).length;
+  if (setsWonTheirs > setsWonOurs) signals.push(`down ${setsWonTheirs}-${setsWonOurs} on sets`);
+
+  // Current set, if one is in progress.
+  const current = sets[sets.length - 1];
+  if (!setIsOver(current)) {
+    const gap = current.theirs - current.ours;
+    if (gap >= 2) {
+      const setNo = sets.length;
+      signals.push(`broken in set ${setNo} (${current.ours}-${current.theirs})`);
+    }
+  }
+  return signals;
+}
+
+const favouriteDownAlerted = new Map(); // matchId -> highest band already sent
+
+async function maybeAlertFavouriteDown({ match, m, existingLive, lockedSideIsA, lockedOdds }) {
+  try {
+    const pregame = await db.pick.findFirst({
+      where: { matchId: match.id, market: 'moneyline', pickType: { in: ['model', 'winner'] } },
+      orderBy: { createdAt: 'asc' },
+    });
+    if (!pregame || typeof pregame.odds !== 'number' || pregame.odds >= 0) return; // favourites only
+    if (pregame.selection !== existingLive.selection) return; // sides disagree — say nothing
+
+    // WHAT went wrong, not just that something did. For tennis these come
+    // from the set score; other sports fall back to the running score.
+    const signals = tennisSignals(match.setScore, lockedSideIsA);
+
+    const ourScore = lockedSideIsA ? match.homeScore : match.awayScore;
+    const theirScore = lockedSideIsA ? match.awayScore : match.homeScore;
+    const behindOnScore = ourScore != null && theirScore != null && ourScore < theirScore;
+
+    // A tennis signal is enough on its own — being broken early in set one
+    // moves the price well before the set count changes, which is exactly
+    // the window worth acting in. Non-tennis still needs a scoreline.
+    if (!signals.length && !behindOnScore) return;
+
+    // Price improvement, in profit per $100 staked — the only measure of
+    // "better odds" that means anything across the +/- boundary.
+    const profitPer100 = (o) => (o > 0 ? o : (100 / Math.abs(o)) * 100);
+    const gainPct = Math.round(((profitPer100(lockedOdds) - profitPer100(pregame.odds)) / profitPer100(pregame.odds)) * 100);
+    if (gainPct < 25) return;
+
+    const band = gainPct >= 100 ? 100 : gainPct >= 50 ? 50 : 25;
+    if ((favouriteDownAlerted.get(match.id) || 0) >= band) return;
+    favouriteDownAlerted.set(match.id, band);
+
+    const fmt = (o) => (o > 0 ? `+${o}` : `${o}`);
+    const what = signals.length
+      ? signals.join(' · ')
+      : `trailing ${ourScore}-${theirScore}`;
+    const msg = `📉 *Favourite down* — ${match.competitorA} vs ${match.competitorB}\n` +
+      `${pregame.selection} — ${what}\n` +
+      `Entry ${fmt(pregame.odds)} → now ${fmt(lockedOdds)} (**+${gainPct}%** better price)` +
+      (match.setScore ? `\nSets: ${match.setScore}` : '');
+
+    console.log(`[favourite-down] ${match.competitorA} vs ${match.competitorB}: ${pregame.selection} — ${what} — ${fmt(pregame.odds)} -> ${fmt(lockedOdds)} (+${gainPct}%)`);
+
+    const url = process.env.ALERT_WEBHOOK_URL;
+    if (url) {
+      await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: msg, text: msg }),
+      }).catch((err) => console.warn('[favourite-down] alert delivery failed:', err.message));
+    }
+  } catch (err) {
+    // Never let an alert break the live pipeline.
+    console.warn('[favourite-down] check failed:', err.message);
+  }
+}
+
 async function updateLivePicksForSport(sportSlug, onlyKeys) {
   // Live odds are a paid, per-sport decision — see LIVE_ODDS_SPORTS.
   if (!LIVE_ODDS_SPORTS.includes(sportSlug)) return 0;
@@ -933,6 +1050,8 @@ async function updateLivePicksForSport(sportSlug, onlyKeys) {
             where: { id: existingLive.id },
             data: { confidence, odds: lockedOdds }, // selection intentionally untouched — locked
           });
+
+          await maybeAlertFavouriteDown({ match, m, existingLive, lockedSideIsA, lockedOdds });
         }
       }
       // No live odds this cycle — leave confidence/odds exactly as they
