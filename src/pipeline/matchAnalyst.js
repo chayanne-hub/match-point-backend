@@ -194,6 +194,50 @@ Tennis-specific process:
 - Consider motivation/level mismatch — a higher-ranked player might be
   treating a lower-tier event without full focus, or nursing an injury
   through it.
+- VENUE HISTORY. Check each player's career record AT THIS SPECIFIC
+  EVENT, not just on this surface. Players repeatedly over- or
+  under-perform at particular tournaments — conditions, altitude, ball
+  type, crowd, court speed and even scheduling habits are consistent
+  year to year, and a player who is 14-3 lifetime somewhere is telling
+  you something rank alone doesn't. Weight it by sample: six career
+  matches at an event is a hint, twenty is evidence.
+- COURT SPEED AT THIS VENUE, and how it interacts with each player's
+  game. Fast hard courts compress the gap between a higher-ranked
+  all-court player and a big server, which makes upsets more common and
+  makes ranking/Elo LESS predictive than usual. Slow courts do the
+  opposite. If this venue plays notably fast, say so and shade
+  confidence down on the favourite accordingly.
+- CROWD. Tennis is played alone with no bench, no substitutions and long
+  gaps between points, which makes it unusually exposed to atmosphere.
+  Two things to check:
+    * Is either player effectively at home — same country, or a large
+      diaspora crowd in this city? That support is worth real points in
+      tight sets.
+    * How does each player HISTORICALLY handle a hostile or partisan
+      crowd? Some visibly feed off it and raise their level; others
+      tighten, argue with the chair, or drop serve after a bad call.
+      This is a documented, commented-on trait for many players — look
+      for it rather than assuming it cuts one way.
+    * POPULARITY. Fan followings differ enormously and don't track
+      ranking: a charismatic or veteran player outside the top 50 can
+      draw a far louder crowd than a higher-ranked opponent, and against
+      a divisive or disliked player the room can turn actively hostile.
+      Scheduling reflects this too — a marquee draw gets the main show
+      court in the evening session, which is a different environment
+      from an outside court at 11am. Where you can establish it, this
+      matters MOST in the situation that decides matches: a tight third
+      set, where an underdog with the room behind them holds serve they
+      would otherwise lose.
+  Only cite this when you find something specific about THESE players.
+  "Crowd will favour the home player" with nothing behind it is filler,
+  and it is the kind of soft factor that quietly inflates confidence
+  without adding information.
+- TRAVEL AND ADAPTATION. Where was each player last week, and what did
+  it cost them to get here? Intercontinental travel with a large time-zone
+  shift, altitude changes, and a switch of continent between consecutive
+  events all show up in early-round results. A player who went deep in
+  last week's event on another continent is carrying both fatigue and jet
+  lag; one who arrived early or skipped the previous week is fresher.
 - Named sources to prefer: tennisabstract.com (including its ATP/WTA Elo
   ratings page as the standard Elo source — it renders reliably where
   wheeloratings and the tour's own stats pages return nothing),
