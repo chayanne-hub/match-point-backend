@@ -1,6 +1,7 @@
 const express = require('express');
 const db = require('../lib/db');
 const { requireAuth } = require('../lib/auth');
+const { getEntitlement } = require('../lib/requireAccess');
 const { fetchEspnNews } = require('../pipeline/fetchEspnNews');
 const { getRecentPosts } = require('../pipeline/fetchXTimeline');
 const { getStandings, getRecordMap } = require('../pipeline/fetchEspnStandings');
@@ -122,23 +123,24 @@ async function userHasAccess(userId, pickId) {
   const user = await db.user.findUnique({ where: { id: userId }, select: { isAdmin: true } });
   if (user?.isAdmin) return true;
 
-  const purchased = await db.purchasedPick.findUnique({
-    where: { userId_pickId: { userId, pickId } },
-  });
-  if (purchased) return true;
+  // Legacy single-pick buys from the Coinbase era. No longer sold, but
+  // rows still exist and those people paid for that pick.
+  if (pickId) {
+    const purchased = await db.purchasedPick.findUnique({
+      where: { userId_pickId: { userId, pickId } },
+    });
+    if (purchased) return true;
+  }
 
-  const sub = await db.subscription.findUnique({ where: { userId } });
-  // Must check expiration explicitly — Coinbase Commerce has no
-  // subscription lifecycle events (unlike Stripe's customer.subscription.*
-  // webhooks), so nothing ever flips status away from 'active' on its own.
-  // Without this check, one payment would grant access forever.
-  // 'canceling' still has access. Someone who cancels a weekly plan on
-  // day 2 paid for the week and keeps the week — the flag only stops the
-  // renewal. currentPeriodEnd is what actually ends access, and Whop
-  // fires membership.went_invalid at that point to close it out.
-  // Requiring 'active' alone would have revoked access the instant they
-  // hit cancel, which is both wrong and the fastest route to a chargeback.
-  return !!sub && ['active', 'canceling'].includes(sub.status) && sub.currentPeriodEnd > new Date();
+  // Subscription access is decided in exactly one place now. This used to
+  // be an inline status check listing ['active', 'canceling'] — which was
+  // wrong in both directions after the Whop migration: 'canceling' is
+  // never written by any code path (a Coinbase-era leftover), while
+  // 'past_due' IS written on every failed renewal charge and was being
+  // rejected. That locked paying members out mid-card-retry, which is the
+  // precise outcome the webhook handler's comment says it is avoiding.
+  const { entitled } = await getEntitlement(userId);
+  return entitled;
 }
 
 // Resolves the requester from an optional Authorization header without
@@ -1623,6 +1625,16 @@ router.get('/timing/:pickId', async (req, res) => {
       include: { match: true },
     });
     if (!pick) return res.status(404).json({ error: 'Pick not found.' });
+
+    // This endpoint returns pick.selection. Without this check it was a
+    // complete paywall bypass: GET /today hands out pick ids publicly, so
+    // two unauthenticated calls returned the whole slate. No settled-pick
+    // exception like GET /:id has — timing guidance on a finished match
+    // is meaningless, so there is nothing to open up.
+    const requesterId = resolveOptionalUser(req);
+    if (!(await userHasAccess(requesterId, pick.id))) {
+      return res.status(402).json({ error: 'This needs an active membership.', checkoutUrl: '/checkout.html' });
+    }
 
     const history = await db.oddsSnapshot.findMany({
       where: { matchId: pick.matchId },
