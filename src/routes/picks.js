@@ -1121,6 +1121,116 @@ router.get('/admin/diagnose', requireAuth, async (req, res) => {
   }
 });
 
+// GET /api/picks/admin/winners?sport=&day= — the model's predicted winner
+// for every analysed match, admin only.
+//
+// This is the "winner picks" view from the original framework: not a
+// recommended-bet list, just who the model thinks wins each match, across
+// the whole slate. Kept behind the admin gate deliberately — it's an
+// internal accuracy check, and publishing a call on every match invites
+// judging the model on games it never claimed an edge on.
+//
+// Graded results are attached where they exist, so the same screen shows
+// what was predicted and what happened.
+router.get('/admin/winners', requireAuth, async (req, res) => {
+  try {
+    const user = await db.user.findUnique({ where: { id: req.userId } });
+    if (!user || !isAdminEmail(user.email)) return res.status(403).json({ error: 'Admin access required.' });
+
+    const sport = req.query.sport && req.query.sport !== 'all' ? req.query.sport : null;
+    const dayOffset = req.query.day === 'tomorrow' ? 1 : req.query.day === 'yesterday' ? -1 : 0;
+
+    // HIGH-CONVICTION ONLY. This view is for calls the model actually
+    // stands behind, not a print-out of every match.
+    //
+    // Two separate filters, because they exclude different things:
+    //   - minConfidence removes matches the model isn't sure about.
+    //   - maxOdds removes LONGSHOTS. A pick can carry high confidence and
+    //     still be priced +400, which means the market strongly disagrees;
+    //     those are exactly the picks that don't belong on a "winners"
+    //     list even when the model likes them.
+    // Both are query-tunable so the thresholds can be tested rather than
+    // baked in.
+    const minConfidence = Number(req.query.minConfidence) || 65;
+    const maxOdds = req.query.maxOdds !== undefined ? Number(req.query.maxOdds) : 110;
+    const base = getTimezoneDayBounds('America/Los_Angeles');
+    const startOfDay = new Date(base.startOfDay.getTime() + dayOffset * 86400000);
+    const endOfDay = new Date(base.endOfDay.getTime() + dayOffset * 86400000);
+
+    const matches = await db.match.findMany({
+      where: {
+        startTime: { gte: startOfDay, lte: endOfDay },
+        ...(sport ? { sport: { slug: sport } } : {}),
+        picks: {
+          some: {
+            pickType: { in: ['model', 'winner'] },
+            market: 'moneyline',
+            confidence: { gte: minConfidence },
+            odds: { lte: maxOdds },
+          },
+        },
+      },
+      include: {
+        sport: true,
+        picks: {
+          where: {
+            pickType: { in: ['model', 'winner'] },
+            market: 'moneyline',
+            confidence: { gte: minConfidence },
+            odds: { lte: maxOdds },
+          },
+          include: { result: true },
+          orderBy: { createdAt: 'asc' },
+        },
+      },
+      orderBy: { startTime: 'asc' },
+    });
+
+    const rows = matches.map((m) => {
+      const pick = m.picks[0];
+      const result = pick?.result || null;
+      return {
+        matchId: m.id,
+        sport: m.sport.slug,
+        league: m.league,
+        matchup: `${m.competitorA} vs ${m.competitorB}`,
+        startTime: m.startTime,
+        status: m.status,
+        predictedWinner: pick?.selection ?? null,
+        confidence: pick?.confidence ?? null,
+        odds: pick?.odds ?? null,
+        oddsBook: m.bestBookA || null,
+        // What actually happened, when it's known.
+        outcome: result?.outcome ?? null,
+        actualWinner: m.homeScore !== null && m.awayScore !== null
+          ? (m.homeScore > m.awayScore ? m.competitorA : m.awayScore > m.homeScore ? m.competitorB : null)
+          : null,
+        homeScore: m.homeScore,
+        awayScore: m.awayScore,
+      };
+    });
+
+    const decided = rows.filter((r) => r.outcome === 'win' || r.outcome === 'loss');
+    const correct = decided.filter((r) => r.outcome === 'win').length;
+
+    res.json({
+      day: dayOffset === 1 ? 'tomorrow' : dayOffset === -1 ? 'yesterday' : 'today',
+      filters: { minConfidence, maxOdds },
+      total: rows.length,
+      graded: decided.length,
+      correct,
+      // Straight hit rate on graded matches — no odds weighting. This is an
+      // accuracy check, not a profitability one; ROI lives on the Win Rate
+      // Tracker where the prices are.
+      accuracy: decided.length ? Math.round((correct / decided.length) * 100) : null,
+      rows,
+    });
+  } catch (err) {
+    console.error('[admin/winners] failed:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/picks/admin/diagnose-live — why isn't the live meter moving?
 //
 // Walks the exact gates updateLivePicksForSport walks, in order, and
