@@ -488,11 +488,32 @@ factor you didn't really look into. Each entry needs:
     "Neutral"
   - "body": one sentence stating the specific finding
 
+CONVICTION — classify your own call honestly. This is the single most
+important field. It separates calls worth acting on from calls you were
+forced to make, and it is judged on the QUALITY OF INFORMATION you found,
+not on how lopsided the matchup looks:
+  - "strong": you found specific, current, decision-relevant information
+    (injury/participation news, surface or matchup fit, rest/travel,
+    recent form with real data behind it) and it points one way.
+  - "lean": some real signal, but thin, mixed, or partly stale. A
+    reasonable call you would not stake much on.
+  - "guess": you could not find meaningful current information on these
+    competitors and are reasoning mostly from ranking, name recognition,
+    or the market price. Lower-tier events with little coverage belong
+    here by default.
+
+Mark it "guess" whenever that is true. It is far more useful than a
+confident-sounding pick built on nothing — a wrong "guess" costs nothing,
+while a wrong "strong" is what destroys trust in the whole model. Do not
+upgrade conviction because the favourite is heavy; a one-sided match you
+know nothing about is still a guess.
+
 Respond with ONLY a raw JSON object, no markdown fences, no preamble, in
 this exact shape:
 {
   "selection": "${competitorA} ML" or "${competitorB} ML",
   "confidence": <integer 0-100>,
+  "conviction": "strong" | "lean" | "guess",
   "analysis": "2-4 sentence writeup citing the specific findings that drove this pick",
   "factors": [ { "label": "...", "tag": "...", "body": "..." }, ... ]${hasSpread ? `,
   "spreadPick": {
@@ -648,6 +669,19 @@ ${JSON_VALIDITY_REMINDER}
       }
     } else {
       parsed.totalPick = null;
+    }
+
+    // Conviction must be one of the three values. Anything else — a
+    // missing field, an invented tier, a sentence instead of a label —
+    // becomes 'guess'. Defaulting UP would let a malformed response
+    // masquerade as a high-conviction call, which is precisely the
+    // failure this field exists to prevent.
+    const VALID_CONVICTION = ['strong', 'lean', 'guess'];
+    if (!VALID_CONVICTION.includes(parsed.conviction)) {
+      if (parsed.conviction) {
+        console.warn(`[match-analyst] unexpected conviction "${parsed.conviction}" for ${competitorA} vs ${competitorB} — treating as guess.`);
+      }
+      parsed.conviction = 'guess';
     }
 
     return parsed;

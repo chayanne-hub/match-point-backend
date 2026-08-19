@@ -1153,6 +1153,23 @@ router.get('/admin/winners', requireAuth, async (req, res) => {
     // baked in.
     const minConfidence = Number(req.query.minConfidence) || 65;
     const maxOdds = req.query.maxOdds !== undefined ? Number(req.query.maxOdds) : 110;
+
+    // CONVICTION is the primary filter now. The model classifies each call
+    // as strong / lean / guess based on the quality of information it
+    // actually found, which a confidence number can't express — a 68%
+    // built on real injury news and a 68% built on nothing but ranking
+    // look identical otherwise.
+    //
+    // Default 'strong' only: this view is the model separating calls it
+    // stands behind from ones it was forced to make. Legacy picks created
+    // before this field existed have conviction null and are excluded,
+    // rather than being assumed strong.
+    const conviction = req.query.conviction || 'strong';
+    const convictionFilter = conviction === 'all'
+      ? {}
+      : conviction === 'strong+lean'
+        ? { conviction: { in: ['strong', 'lean'] } }
+        : { conviction };
     const base = getTimezoneDayBounds('America/Los_Angeles');
     const startOfDay = new Date(base.startOfDay.getTime() + dayOffset * 86400000);
     const endOfDay = new Date(base.endOfDay.getTime() + dayOffset * 86400000);
@@ -1167,6 +1184,7 @@ router.get('/admin/winners', requireAuth, async (req, res) => {
             market: 'moneyline',
             confidence: { gte: minConfidence },
             odds: { lte: maxOdds },
+            ...convictionFilter,
           },
         },
       },
@@ -1178,6 +1196,7 @@ router.get('/admin/winners', requireAuth, async (req, res) => {
             market: 'moneyline',
             confidence: { gte: minConfidence },
             odds: { lte: maxOdds },
+            ...convictionFilter,
           },
           include: { result: true },
           orderBy: { createdAt: 'asc' },
@@ -1197,6 +1216,7 @@ router.get('/admin/winners', requireAuth, async (req, res) => {
         startTime: m.startTime,
         status: m.status,
         predictedWinner: pick?.selection ?? null,
+        conviction: pick?.conviction ?? null,
         confidence: pick?.confidence ?? null,
         odds: pick?.odds ?? null,
         oddsBook: m.bestBookA || null,
@@ -1215,7 +1235,7 @@ router.get('/admin/winners', requireAuth, async (req, res) => {
 
     res.json({
       day: dayOffset === 1 ? 'tomorrow' : dayOffset === -1 ? 'yesterday' : 'today',
-      filters: { minConfidence, maxOdds },
+      filters: { minConfidence, maxOdds, conviction },
       total: rows.length,
       graded: decided.length,
       correct,

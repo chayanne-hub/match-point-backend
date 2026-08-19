@@ -169,6 +169,11 @@ model Pick {
                          // move before the match settles; null for moneyline
   selection    String
   confidence   Int
+  /// The model's own classification of the call: "strong" | "lean" | "guess".
+  /// Confidence alone can't distinguish a 68% built on real injury news from
+  /// a 68% built on nothing but ranking — this can. Defaults to guess when
+  /// the model didn't return a valid value, never up.
+  conviction   String?
   odds         Int
   rationale    String
   factsUsed    String?  // JSON array of {label, tag, body} — the real facts behind this pick, for the detail page's factor breakdown

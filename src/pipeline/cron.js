@@ -487,6 +487,7 @@ async function runForSport(sportSlug, dayFilter = null) {
         market: 'moneyline',
         selection: analysis.selection,
         confidence: analysis.confidence,
+        conviction: analysis.conviction || 'guess',
         odds: pickedOdds,
         rationale: analysis.analysis,
         factsUsed: factsUsedJson,
