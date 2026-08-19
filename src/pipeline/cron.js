@@ -660,6 +660,25 @@ async function clearStaleFailureCounters() {
  * failure leaves the existing pick intact rather than blanking the board.
  */
 async function reanalyzeUpcoming(sportSlug, { limit = 50, dryRun = true, mode = 'existing' } = {}) {
+  // 'all' — the board's default filter. Previously this fell back to
+  // tennis, so a button pressed with no sport filter silently ignored
+  // every other sport and reported nothing to do.
+  if (sportSlug === 'all' || !sportSlug) {
+    const parts = [];
+    for (const sp of SPORTS) {
+      parts.push(await reanalyzeUpcoming(sp, { limit, dryRun, mode }));
+    }
+    return {
+      sport: 'all',
+      wouldReanalyse: parts.reduce((n, p) => n + (p.wouldReanalyse || 0), 0),
+      estimatedCalls: parts.reduce((n, p) => n + (p.estimatedCalls || 0), 0),
+      reanalysed: parts.reduce((n, p) => n + (p.reanalysed || 0), 0),
+      failed: parts.reduce((n, p) => n + (p.failed || 0), 0),
+      matches: parts.flatMap((p) => p.matches || []).slice(0, 20),
+      bySport: parts,
+    };
+  }
+
   const sportRow = await db.sport.findUnique({ where: { slug: sportSlug } });
   if (!sportRow) return { sport: sportSlug, error: 'unknown sport' };
 
