@@ -271,6 +271,24 @@ Basketball-specific process (NBA & WNBA):
 `.trim(),
 
   soccer: `
+THE DRAW IS THE DEFINING FEATURE OF THIS MARKET — read this first.
+This is a THREE-WAY market: home win, draw, away win. Your pick is one
+team to WIN, and a draw counts as a LOSS. Around a quarter of matches in
+most leagues end level, so identifying the better side correctly is not
+enough on its own.
+- Estimate draw probability explicitly before setting confidence, and
+  subtract it. If you think Team A is clearly better but the match has a
+  35% chance of ending level, your confidence in "Team A wins" cannot be
+  70% no matter how one-sided the sides look.
+- Low-scoring leagues, defensive sides, derbies, and matches where a
+  point suits both teams all raise draw risk sharply. Two attacking sides
+  with nothing to play for lower it.
+- Confidence above 65% should be rare here and needs a genuinely large
+  gap PLUS a reason the match is unlikely to finish level. A 50-60%
+  confidence on a clear favourite is often the honest number in soccer,
+  and marking it higher just to look decisive is what turns a sound read
+  into a losing pick.
+
 Soccer-specific process (any league/tier, not just top divisions):
 - Research team strength using something more informative than table
   position or recent W/L alone — underlying performance quality (chances

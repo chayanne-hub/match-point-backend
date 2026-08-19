@@ -67,6 +67,34 @@ const SEED_WEIGHTS = {
     'Situational Motivation': 6,
     'Recent Form': 5,
   },
+  baseball: {
+    'Starting Pitcher Matchup': 32,
+    'Bullpen Status': 16,
+    'Lineup & Handedness': 14,
+    'Park Factors': 10,
+    'Weather / Wind': 9,
+    'Injury / Roster': 9,
+    'Rest & Travel': 5,
+    'Recent Form': 5,
+  },
+  basketball: {
+    'Injury / Availability': 30,
+    'Rest / Back-to-Back': 18,
+    'Efficiency Matchup': 17,
+    'Pace & Style': 13,
+    'Home Court': 9,
+    'Motivation / Standings': 8,
+    'Recent Form': 5,
+  },
+  soccer: {
+    'Lineup & Rotation Risk': 26,
+    'Injury / Suspension': 20,
+    'Fixture Congestion': 15,
+    'Home Advantage': 14,
+    'Style Matchup': 11,
+    'Motivation / Table Position': 8,
+    'Recent Form': 6,
+  },
 };
 
 /**
@@ -101,6 +129,19 @@ const LABEL_PATTERNS = [
   [/efficien|dvoa|unit matchup/i, 'Unit Efficiency Matchup'],
   [/weather|wind|rain|temperature/i, 'Weather'],
   [/offensive line|o.?line|pressure rate/i, 'Offensive Line'],
+  [/starting pitcher|pitching matchup|\bsp\b|starter/i, 'Starting Pitcher Matchup'],
+  [/bullpen|relief|closer/i, 'Bullpen Status'],
+  [/lineup|handed|platoon|batting order/i, 'Lineup & Handedness'],
+  [/park|ballpark|stadium dimension/i, 'Park Factors'],
+  [/wind/i, 'Weather / Wind'],
+  [/availability|load management|scratch|questionable/i, 'Injury / Availability'],
+  [/back.?to.?back|days? rest/i, 'Rest / Back-to-Back'],
+  [/pace|tempo/i, 'Pace & Style'],
+  [/home court|home advantage|home field/i, 'Home Court'],
+  [/rotation|squad rotation|team selection|starting xi/i, 'Lineup & Rotation Risk'],
+  [/suspension|red card|booking/i, 'Injury / Suspension'],
+  [/congestion|midweek|fixture pile|europa|champions league schedule/i, 'Fixture Congestion'],
+  [/table position|relegation|title race|standings/i, 'Motivation / Table Position'],
 ];
 
 function canonicalLabel(raw) {
@@ -153,6 +194,41 @@ const FACTOR_LIST = {
     'Weather',
     'Offensive Line',
     'Situational Motivation',
+    'Recent Form',
+  ],
+  // Baseball is the most starting-pitcher-dependent sport there is — a
+  // single player decides a large share of the outcome, which is why it
+  // leads here and team form trails badly.
+  baseball: [
+    'Starting Pitcher Matchup',
+    'Bullpen Status',
+    'Lineup & Handedness',
+    'Park Factors',
+    'Weather / Wind',
+    'Injury / Roster',
+    'Rest & Travel',
+    'Recent Form',
+  ],
+  // Basketball outcomes hinge on WHO PLAYS. Load management and late
+  // scratches move lines more than any efficiency metric.
+  basketball: [
+    'Injury / Availability',
+    'Rest / Back-to-Back',
+    'Efficiency Matchup',
+    'Pace & Style',
+    'Home Court',
+    'Motivation / Standings',
+    'Recent Form',
+  ],
+  // Soccer's decisive factor is selection: European sides rotate heavily
+  // around midweek competition, and a rotated XI is a different team.
+  soccer: [
+    'Lineup & Rotation Risk',
+    'Injury / Suspension',
+    'Fixture Congestion',
+    'Home Advantage',
+    'Style Matchup',
+    'Motivation / Table Position',
     'Recent Form',
   ],
 };
