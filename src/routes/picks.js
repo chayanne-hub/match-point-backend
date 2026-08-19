@@ -1147,6 +1147,104 @@ router.get('/admin/diagnose', requireAuth, async (req, res) => {
   }
 });
 
+// GET /api/picks/admin/loss-review?sport=&minConfidence= — why do picks lose?
+//
+// Every pick stores the factors the model actually cited. Individually
+// those explain one match; aggregated across hundreds of graded results
+// they show which reasoning holds up and which doesn't.
+//
+// Three losses in a day is noise at a 70% hit rate. This is the view that
+// can tell the difference between a bad run and a real pattern, because
+// it's computed over the whole record rather than the last thing that hurt.
+router.get('/admin/loss-review', requireAuth, async (req, res) => {
+  try {
+    const user = await db.user.findUnique({ where: { id: req.userId } });
+    if (!user || !isAdminEmail(user.email)) return res.status(403).json({ error: 'Admin access required.' });
+
+    const sport = req.query.sport && req.query.sport !== 'all' ? req.query.sport : null;
+    const minConfidence = Number(req.query.minConfidence) || 0;
+
+    const results = await db.result.findMany({
+      where: {
+        outcome: { in: ['win', 'loss'] },
+        pick: {
+          market: 'moneyline',
+          pickType: { in: ['model', 'winner'] },
+          confidence: { gte: minConfidence },
+          ...(sport ? { match: { sport: { slug: sport } } } : {}),
+        },
+      },
+      include: { pick: { include: { match: { include: { sport: true } } } } },
+      orderBy: { settledAt: 'desc' },
+    });
+
+    const unique = dedupeResultsByMatch(results);
+
+    // Accuracy grouped by the FACTOR LABELS the model cited. A label that
+    // appears far more often in losses than wins is reasoning that isn't
+    // carrying its weight.
+    const byFactor = {};
+    // And by league — "our tennis is 75%" can hide a league inside it that
+    // is well under water.
+    const byLeague = {};
+
+    for (const r of unique) {
+      const won = r.outcome === 'win';
+      const league = r.pick.match.league || r.pick.match.sport.slug;
+      byLeague[league] = byLeague[league] || { wins: 0, losses: 0 };
+      byLeague[league][won ? 'wins' : 'losses']++;
+
+      let factors = [];
+      try { factors = JSON.parse(r.pick.factsUsed || '[]'); } catch { factors = []; }
+      const labels = new Set(
+        (Array.isArray(factors) ? factors : [])
+          .map((f) => (f && typeof f.label === 'string' ? f.label.trim() : null))
+          .filter(Boolean)
+      );
+      for (const label of labels) {
+        byFactor[label] = byFactor[label] || { wins: 0, losses: 0 };
+        byFactor[label][won ? 'wins' : 'losses']++;
+      }
+    }
+
+    const shape = (obj, minSample) => Object.entries(obj)
+      .map(([k, v]) => ({
+        name: k, wins: v.wins, losses: v.losses, n: v.wins + v.losses,
+        winRate: Math.round((v.wins / (v.wins + v.losses)) * 100),
+      }))
+      // Small samples produce meaningless extremes — a 0% on two picks
+      // isn't a finding, and surfacing it invites exactly the overfitting
+      // this view is meant to prevent.
+      .filter((x) => x.n >= minSample)
+      .sort((a, b) => a.winRate - b.winRate);
+
+    res.json({
+      graded: unique.length,
+      overallWinRate: unique.length
+        ? Math.round((unique.filter((r) => r.outcome === 'win').length / unique.length) * 100)
+        : null,
+      byLeague: shape(byLeague, 8),
+      byFactor: shape(byFactor, 15),
+      recentLosses: unique.filter((r) => r.outcome === 'loss').slice(0, 25).map((r) => {
+        let factors = [];
+        try { factors = JSON.parse(r.pick.factsUsed || '[]'); } catch { factors = []; }
+        return {
+          matchup: `${r.pick.match.competitorA} vs ${r.pick.match.competitorB}`,
+          league: r.pick.match.league,
+          selection: r.pick.selection,
+          confidence: r.pick.confidence,
+          odds: r.pick.odds,
+          settledAt: r.settledAt,
+          factors: (Array.isArray(factors) ? factors : []).map((f) => ({ label: f.label, tag: f.tag, body: f.body })),
+        };
+      }),
+    });
+  } catch (err) {
+    console.error('[admin/loss-review] failed:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // POST /api/picks/admin/reset-sport-results  { sport, confirm }
 //
 // Deletes graded results for one sport, so its win rate starts from zero.
