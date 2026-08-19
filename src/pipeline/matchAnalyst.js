@@ -194,6 +194,10 @@ Tennis-specific process:
 - Consider motivation/level mismatch — a higher-ranked player might be
   treating a lower-tier event without full focus, or nursing an injury
   through it.
+- Named sources to prefer: tennisabstract.com (including its ATP/WTA Elo
+  ratings page as the standard Elo source — it renders reliably where
+  wheeloratings and the tour's own stats pages return nothing),
+  TennisStats.com, and itftennis.com for ITF/Futures-level matches.
 - Check the current moneyline price for this match as one data point
   (context on what the market already thinks), but your confidence should
   come from your own research, not from the price itself.
@@ -283,17 +287,60 @@ NFL-specific process:
   may be resting starters or is effectively out of contention.
 - Check weather for outdoor games — wind in particular suppresses passing
   and total points more than temperature does.
-- Check matchup-specific efficiency metrics where you can find them (e.g.
-  offensive/defensive efficiency splits, pressure rate vs. offensive line
-  performance) rather than just season record or point differential.
+- Check matchup-specific efficiency metrics BY UNIT, not team-level
+  averages: this offense's pass game vs that defense's secondary, this
+  run game vs that front seven, pressure rate vs offensive line
+  performance. Team record and point differential are the weakest
+  possible inputs — use them last, not first.
+- Named sources to prefer, in order: Pro Football Reference for core and
+  situational stats, FTN/Football Outsiders for DVOA-style efficiency
+  data, and the OFFICIAL NFL injury report (not aggregator summaries)
+  for participation status.
+- Weight injuries by POSITIONAL IMPACT rather than counting bodies. A
+  starting quarterback, left tackle or top cornerback out is worth more
+  than three missing rotational players, and the market prices QB news
+  faster than it prices line and secondary news.
 - Check the current moneyline price for this match as one data point, but
   your confidence should come from your own research, not from the price.
 `.trim(),
 };
 
-function buildSystemPrompt(sport) {
+// NFL PRESEASON is a different sport for handicapping purposes, and most
+// of the regular-season process above is not just useless here but
+// actively misleading. Playoff seeding, division rivalry and season
+// records mean nothing in August; the thing that decides these games —
+// how long the starters play — isn't in the regular-season list at all.
+//
+// Applied when the match came from the preseason sport key, so the model
+// stops reasoning about standings that don't exist yet.
+const NFL_PRESEASON_PROCESS = `
+THIS IS AN NFL PRESEASON GAME. Regular-season handicapping logic mostly
+does NOT apply. Override the process above where they conflict:
+- Playing time is the whole game. Find out how long each coach plans to
+  play starters — many announce it in the week's press conferences, and
+  it moves outcomes more than any talent gap. Starters often play a
+  series or two, sometimes none at all.
+- Preseason week matters: week 1 is heavily backups, week 2 usually the
+  most starter snaps, week 3 varies by coach and has trended toward
+  resting starters entirely in recent years.
+- Season records, standings, playoff implications and division rivalry
+  are IRRELEVANT. Do not reason from them.
+- Depth quality decides these games — QB2/QB3 play, roster-bubble
+  players competing for jobs, and how many veterans are being held out.
+- Coaching intent varies enormously: some coaches openly don't care
+  about the result, others treat it as evaluation. Prior preseason
+  behaviour by the same coach is more predictive than team quality.
+- Home-field advantage is materially smaller than in the regular season.
+- If you cannot establish playing-time intentions, say so and lower your
+  confidence accordingly. A confident preseason pick built on
+  regular-season team strength is a guess wearing a suit.
+`.trim();
+
+function buildSystemPrompt(sport, opts = {}) {
   const process = SPORT_PROCESS[sport];
   if (!process) return null;
+
+  const preseasonNote = opts.isPreseason ? `\n\n${NFL_PRESEASON_PROCESS}` : '';
 
   return `
 You are an experienced sports betting analyst doing independent handicapping
@@ -302,7 +349,7 @@ research real, current information about this match before forming a view.
 
 ${SHARED_PRINCIPLES}
 
-${process}
+${process}${preseasonNote}
 `.trim();
 }
 
@@ -315,8 +362,11 @@ ${process}
  * fallback plan (e.g. skip creating a pick this cycle) rather than crash
  * the pipeline over one bad match.
  */
-async function analyzeMatch({ sport, competitorA, competitorB, oddsA, oddsB, startTime, spread, spreadOddsA, spreadOddsB, total, overOdds, underOdds, pregameProjectedTotal }) {
-  const systemPrompt = buildSystemPrompt(sport);
+async function analyzeMatch({ sport, competitorA, competitorB, oddsA, oddsB, startTime, spread, spreadOddsA, spreadOddsB, total, overOdds, underOdds, pregameProjectedTotal, sportKey }) {
+  // The preseason sport key is how we know regular-season logic doesn't
+  // apply. Without it the model reasons about playoff seeding in August.
+  const isPreseason = typeof sportKey === 'string' && sportKey.includes('preseason');
+  const systemPrompt = buildSystemPrompt(sport, { isPreseason });
   if (!systemPrompt) {
     console.error(`[match-analyst] no process defined for sport: ${sport}`);
     return null;

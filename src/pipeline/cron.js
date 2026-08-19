@@ -428,6 +428,10 @@ async function runForSport(sportSlug, dayFilter = null) {
       overOdds: m.overOdds,
       underOdds: m.underOdds,
       pregameProjectedTotal,
+      // Tells the analyst this is an NFL PRESEASON game, where
+      // regular-season reasoning (standings, playoff seeding, division
+      // rivalry) is wrong and playing-time intent is what matters.
+      sportKey: m.sportKey,
     }, `${m.competitorA} vs ${m.competitorB} (pregame)`);
     if (!analysis) {
       // Only count this against the MATCH if analysis is demonstrably
