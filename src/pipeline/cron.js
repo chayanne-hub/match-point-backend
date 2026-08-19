@@ -694,11 +694,21 @@ async function reanalyzeUpcoming(sportSlug, { limit = 50, dryRun = true, mode = 
         none: { result: { isNot: null } }, // never a graded match
       };
 
+  // Bound to the SAME window the board shows: today plus tomorrow.
+  //
+  // Without this the count came from every upcoming analysed match in the
+  // database, including fixtures days out that were analysed before the
+  // today-only rule existed and never appear on screen. The button then
+  // offered to re-run 70 when the column showed 44 — technically true,
+  // but it should act on what you're looking at, and the difference is
+  // real money.
+  const { endOfDay: endOfTomorrow } = getPacificDayBounds(1);
+
   const candidates = await db.match.findMany({
     where: {
       sportId: sportRow.id,
       status: 'scheduled',
-      startTime: { gt: new Date() },      // not started
+      startTime: { gt: new Date(), lte: endOfTomorrow },
       skipAnalysis: false,
       picks: pickFilter,
     },
