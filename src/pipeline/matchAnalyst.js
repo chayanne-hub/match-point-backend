@@ -243,9 +243,11 @@ Tennis-specific process:
   ratings page as the standard Elo source — it renders reliably where
   wheeloratings and the tour's own stats pages return nothing),
   TennisStats.com, and itftennis.com for ITF/Futures-level matches.
-- Check the current moneyline price for this match as one data point
-  (context on what the market already thinks), but your confidence should
-  come from your own research, not from the price itself.
+- Your confidence is YOUR probability that this player wins, formed from
+  the research above. The market price is deliberately not shown; do not
+  try to infer it. Where your number and the market's differ is the only
+  place value can exist, so an estimate reverse-engineered from the price
+  is worth nothing.
 `.trim(),
 
   basketball: `
@@ -462,9 +464,34 @@ async function analyzeMatch({ sport, competitorA, competitorB, oddsA, oddsB, sta
     return null;
   }
 
-  const oddsContext = (oddsA !== null && oddsB !== null)
-    ? `Current moneyline price: ${competitorA} ${oddsA > 0 ? '+' + oddsA : oddsA}, ${competitorB} ${oddsB > 0 ? '+' + oddsB : oddsB} (BetMGM).`
-    : 'Current moneyline price: not available.';
+  // ANCHORING — why the moneyline price is withheld by default.
+  //
+  // Showing the price before the model forms a view is the likeliest
+  // cause of the pattern in the results: the model beats the market on
+  // near pick-em matches, where the price is ambiguous, and matches or
+  // loses to it everywhere the price states a clear opinion. Modest
+  // favourites (-125 to -174) hit 53% against a 59% implied — 120 picks,
+  // -$1,406.
+  //
+  // That is what anchoring looks like. Shown "-150", the model produces a
+  // number near 60% and the edge is zero by construction — it isn't
+  // handicapping the match, it's paraphrasing the price and paying vig
+  // for the privilege. Instructing it not to anchor doesn't work;
+  // anchoring isn't a rule, it's what happens when a number is present.
+  //
+  // With the price withheld, confidence becomes a genuinely independent
+  // estimate, and "edge" becomes a real comparison between two opinions
+  // instead of a number compared against itself.
+  //
+  // Set SHOW_PRICE_TO_ANALYST=true to restore the old behaviour — the
+  // by-edge table on the tracker is how you tell which produces better
+  // picks, rather than taking my word for it.
+  const showPrice = process.env.SHOW_PRICE_TO_ANALYST === 'true';
+  const oddsContext = !showPrice
+    ? 'Current moneyline price: WITHHELD ON PURPOSE. Form your own probability from research alone. Do not guess at or reason backwards from what the market price might be — an estimate that merely reproduces the market has no value.'
+    : (oddsA !== null && oddsB !== null)
+      ? `Current moneyline price: ${competitorA} ${oddsA > 0 ? '+' + oddsA : oddsA}, ${competitorB} ${oddsB > 0 ? '+' + oddsB : oddsB} (BetMGM).`
+      : 'Current moneyline price: not available.';
 
   // Spread/total lines are optional — a book may not have posted them yet.
   // Only ask Claude for a view on a market that actually exists; never
