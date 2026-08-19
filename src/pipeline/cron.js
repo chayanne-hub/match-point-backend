@@ -968,7 +968,7 @@ const lastTotalReassessAt = new Map();
 //   3. The live price is materially longer than the pregame entry.
 //
 // Fires once per match per band so a long match can't spam. Sent to
-// ALERT_WEBHOOK_URL, the same channel the pipeline watchdog uses.
+// Surfaced on the board itself — the row highlights and flashes.
 // Tennis distress signals, derived from the set score alone.
 //
 // No serve data is needed for any of these, which matters because ESPN's
@@ -1052,21 +1052,13 @@ async function maybeAlertFavouriteDown({ match, m, existingLive, lockedSideIsA, 
     const what = signals.length
       ? signals.join(' · ')
       : `trailing ${ourScore}-${theirScore}`;
-    const msg = `📉 *Favourite down* — ${match.competitorA} vs ${match.competitorB}\n` +
-      `${pregame.selection} — ${what}\n` +
-      `Entry ${fmt(pregame.odds)} → now ${fmt(lockedOdds)} (**+${gainPct}%** better price)` +
-      (match.setScore ? `\nSets: ${match.setScore}` : '');
 
     console.log(`[favourite-down] ${match.competitorA} vs ${match.competitorB}: ${pregame.selection} — ${what} — ${fmt(pregame.odds)} -> ${fmt(lockedOdds)} (+${gainPct}%)`);
 
-    const url = process.env.ALERT_WEBHOOK_URL;
-    if (url) {
-      await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content: msg, text: msg }),
-      }).catch((err) => console.warn('[favourite-down] alert delivery failed:', err.message));
-    }
+    // No outbound delivery. This signal now lives on the board itself —
+    // the row highlights and flashes — which reaches every user rather
+    // than only whoever configured a webhook. The log line above is for
+    // debugging, not notification.
   } catch (err) {
     // Never let an alert break the live pipeline.
     console.warn('[favourite-down] check failed:', err.message);

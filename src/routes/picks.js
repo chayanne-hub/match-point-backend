@@ -462,7 +462,12 @@ async function shapePick(p, userId) {
     rationale: unlocked ? p.rationale : null,
     odds: p.odds,
     entryOdds: p.entryOdds ?? null,
-    liveUpdatedAt: p.liveUpdatedAt ?? null, // pregame price for this same pick, when the match is live — powers the Line Value meter
+    liveUpdatedAt: p.liveUpdatedAt ?? null,
+    // Best price across all books for the side actually picked, plus what
+    // shopping is worth. Powers the Best Price board column.
+    bestOdds: p.bestOdds ?? null,
+    bestBook: p.bestBook ?? null,
+    shopGain: p.shopGain ?? null, // pregame price for this same pick, when the match is live — powers the Line Value meter
     // Raw market lines, not model analysis — shown to everyone, same
     // as odds above. Null whenever a book hasn't posted that market
     // yet, never a fabricated number.
@@ -490,6 +495,20 @@ async function shapePick(p, userId) {
     liveClock: p.match.liveClock,
     unlocked,
     hasPick: true,
+    ...(function () {
+      // Resolve best price to the SIDE THE MODEL PICKED — reading side A
+      // unconditionally would name the wrong book whenever the pick is on
+      // side B, which is exactly when a user would act on it.
+      const m = p.match || {};
+      const pickedA = displayPick.selection && displayPick.selection.startsWith(m.competitorA);
+      const bestOdds = pickedA ? m.bestOddsA : m.bestOddsB;
+      const bestBook = pickedA ? m.bestBookA : m.bestBookB;
+      const per100 = (o) => (o > 0 ? o : (100 / Math.abs(o)) * 100);
+      const gain = (typeof bestOdds === 'number' && typeof displayPick.odds === 'number')
+        ? Math.round(per100(bestOdds) - per100(displayPick.odds))
+        : null;
+      return { bestOdds: bestOdds ?? null, bestBook: bestBook ?? null, shopGain: gain };
+    })(),
   };
 }
 

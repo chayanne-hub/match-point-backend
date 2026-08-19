@@ -11,9 +11,8 @@
  *
  * This watches the pipelines' own heartbeats and shouts when one stops.
  *
- * ALERT_WEBHOOK_URL — a Discord or Slack incoming webhook. If unset,
- * alerts still go to the logs and the /admin/health endpoint; the webhook
- * is what turns "visible if you look" into "arrives on your phone".
+ * Alerts surface IN-APP on the Health tab. Nothing is sent anywhere
+ * external — no Discord, no Slack, no email.
  */
 
 const fetch = require('node-fetch');
@@ -45,21 +44,14 @@ function beat(name) {
   }
 }
 
+// Alerts stay in-app: logged here and surfaced on the Health tab via
+// getWatchdogStatus(). Nothing is pushed to an external service.
+const recentAlerts = [];
+
 async function send(text) {
   console.error(`[watchdog] ${text}`);
-  const url = process.env.ALERT_WEBHOOK_URL;
-  if (!url) return; // logs only — still recorded, just not pushed
-  try {
-    // Discord expects { content }, Slack expects { text }. Sending both
-    // keys works for either without needing to know which one it is.
-    await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content: text, text }),
-    });
-  } catch (err) {
-    console.error('[watchdog] could not deliver alert:', err.message);
-  }
+  recentAlerts.unshift({ at: new Date().toISOString(), text });
+  if (recentAlerts.length > 20) recentAlerts.length = 20;
 }
 
 function check() {
@@ -86,9 +78,6 @@ function check() {
 function startWatchdog() {
   setInterval(check, 60 * 1000);
   console.log('[watchdog] monitoring pipeline heartbeats.');
-  if (!process.env.ALERT_WEBHOOK_URL) {
-    console.warn('[watchdog] ALERT_WEBHOOK_URL is not set — alerts will only appear in the logs.');
-  }
 }
 
 /** Snapshot for the Health tab. */
@@ -104,7 +93,7 @@ function getWatchdogStatus() {
       stalled: overdueBy >= hb.intervalMs * STALL_MULTIPLIER,
     };
   }
-  return out;
+  return { pipelines: out, recentAlerts };
 }
 
 module.exports = { registerHeartbeat, beat, startWatchdog, getWatchdogStatus };
