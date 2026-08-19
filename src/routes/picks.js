@@ -467,7 +467,10 @@ async function shapePick(p, userId) {
     // shopping is worth. Powers the Best Price board column.
     bestOdds: p.bestOdds ?? null,
     bestBook: p.bestBook ?? null,
-    shopGain: p.shopGain ?? null, // pregame price for this same pick, when the match is live — powers the Line Value meter
+    shopGain: p.shopGain ?? null,
+    openingOdds: p.openingOdds ?? null,
+    currentOdds: p.currentOdds ?? null,
+    moveGain: p.moveGain ?? null, // pregame price for this same pick, when the match is live — powers the Line Value meter
     // Raw market lines, not model analysis — shown to everyone, same
     // as odds above. Null whenever a book hasn't posted that market
     // yet, never a fabricated number.
@@ -504,10 +507,31 @@ async function shapePick(p, userId) {
       const bestOdds = pickedA ? m.bestOddsA : m.bestOddsB;
       const bestBook = pickedA ? m.bestBookA : m.bestBookB;
       const per100 = (o) => (o > 0 ? o : (100 / Math.abs(o)) * 100);
-      const gain = (typeof bestOdds === 'number' && typeof p.odds === 'number')
+
+      // CURRENT market price for the side we picked. p.odds is the OPENING
+      // price — frozen when the pick was made — so these two together are
+      // what the BUY alert compares: has the number moved in our favour
+      // since we posted it?
+      const currentOdds = pickedA ? m.oddsA : m.oddsB;
+
+      const moveGain = (typeof currentOdds === 'number' && typeof p.odds === 'number')
+        ? Math.round(per100(currentOdds) - per100(p.odds))
+        : null;
+
+      // Cross-book gain kept separately — a different question (is another
+      // book paying more right now) and no longer what BUY reports.
+      const shopGain = (typeof bestOdds === 'number' && typeof p.odds === 'number')
         ? Math.round(per100(bestOdds) - per100(p.odds))
         : null;
-      return { bestOdds: bestOdds ?? null, bestBook: bestBook ?? null, shopGain: gain };
+
+      return {
+        openingOdds: typeof p.odds === 'number' ? p.odds : null,
+        currentOdds: currentOdds ?? null,
+        moveGain,
+        bestOdds: bestOdds ?? null,
+        bestBook: bestBook ?? null,
+        shopGain,
+      };
     })(),
   };
 }
