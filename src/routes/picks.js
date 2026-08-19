@@ -16,6 +16,27 @@ const { triggerManualRun, triggerManualRunTomorrow } = require('../pipeline/cron
 
 const router = express.Router();
 
+// Sports still in development, excluded from the PUBLISHED record.
+//
+// Not deleted — excluded. Deleting results to make a track record look
+// better is the one thing that would undermine a product whose whole
+// pitch is published accuracy, and it also destroys the baseline you need
+// to tell whether a model change actually helped.
+//
+// These sports still get analysed, still get graded, and still appear in
+// the Win Rate Tracker's per-sport table (clearly marked). They just
+// don't feed the headline win rate, the streak, or the equity curve.
+//
+// Set DEVELOPING_SPORTS in the environment to change the list without a
+// deploy; empty string re-includes everything.
+const DEVELOPING_SPORTS = (process.env.DEVELOPING_SPORTS ?? 'football,soccer')
+  .split(',').map((x) => x.trim()).filter(Boolean);
+
+function developingSportsFilter(includeDeveloping) {
+  if (includeDeveloping || DEVELOPING_SPORTS.length === 0) return {};
+  return { match: { sport: { slug: { notIn: DEVELOPING_SPORTS } } } };
+}
+
 // One graded result per MATCH.
 //
 // Historically a single call was written as TWO Pick rows — 'winner' and
@@ -593,6 +614,8 @@ router.get('/stats', async (req, res) => {
       pick: {
         pickType: { in: ['model', 'winner'] }, // both types, de-duped per match below — see dedupeResultsByMatch
         market: { in: ['moneyline', 'spread', 'total'] },
+        // Developing sports don't count toward the published figures.
+        ...(sport ? {} : developingSportsFilter(req.query.includeDeveloping === 'true')),
         // Sanity bound only. This used to be ±2000, which was written when
         // corrupted "suspended market" placeholder prices could reach the
         // database. That source was fixed upstream (fetchMatches now
@@ -764,6 +787,9 @@ router.get('/stats', async (req, res) => {
     avgConfidenceWins,
     streakCount: streakType ? streakCount : null,
     streakType, // 'win' | 'loss' | null
+    // So the UI can label these rather than hardcoding a list that would
+    // drift out of sync with the server.
+    developingSports: DEVELOPING_SPORTS,
     byMarket, // { moneyline, spread, total } — each { winRate, wins, losses, pushes, sampleSize, roi }
   });
 });
@@ -1117,6 +1143,40 @@ router.get('/admin/diagnose', requireAuth, async (req, res) => {
     });
   } catch (err) {
     console.error('[diagnose] failed:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/picks/admin/reset-sport-results  { sport, confirm }
+//
+// Deletes graded results for one sport, so its win rate starts from zero.
+// The picks and matches stay; only the Result rows go, which is what the
+// win rate, streak and equity curve are computed from.
+//
+// Irreversible. Requires an explicit confirm matching the sport slug so a
+// stray request can't wipe a record.
+router.post('/admin/reset-sport-results', requireAuth, async (req, res) => {
+  try {
+    const user = await db.user.findUnique({ where: { id: req.userId } });
+    if (!user || !isAdminEmail(user.email)) return res.status(403).json({ error: 'Admin access required.' });
+
+    const { sport, confirm } = req.body || {};
+    if (!sport) return res.status(400).json({ error: 'sport is required.' });
+    if (confirm !== sport) {
+      return res.status(400).json({ error: `Pass confirm:"${sport}" to proceed — this permanently deletes graded results.` });
+    }
+
+    const sportRow = await db.sport.findUnique({ where: { slug: sport } });
+    if (!sportRow) return res.status(404).json({ error: `Unknown sport: ${sport}` });
+
+    const deleted = await db.result.deleteMany({
+      where: { pick: { match: { sportId: sportRow.id } } },
+    });
+
+    console.log(`[admin] reset ${deleted.count} graded result(s) for ${sport} (by ${user.email}).`);
+    res.json({ sport, deletedResults: deleted.count });
+  } catch (err) {
+    console.error('[admin/reset-sport-results] failed:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -1542,6 +1602,10 @@ router.get('/archive/results', async (req, res) => {
       pick: {
         pickType: { in: ['model', 'winner'] }, // de-duped per match below
         market: 'moneyline', // keep spread/total picks out of the moneyline archive — same reasoning as /stats
+        // Per-sport callers (the tracker's own table) pass
+        // includeDeveloping=true so those sports stay visible there,
+        // labelled, while the headline figures exclude them.
+        ...(sport ? {} : developingSportsFilter(req.query.includeDeveloping === 'true')),
         // Identical bound in both modes — recent mode used to skip this
         // entirely, which is exactly why the Activity feed and the Win
         // Rate Tracker reported different totals for the same day.
