@@ -1227,9 +1227,17 @@ router.get('/admin/backtest', requireAuth, async (req, res) => {
         marketProb: p.marketProb,
         conviction: p.conviction || 'guess',
         clvPercent: p.clvPercent,
+        closingOdds: p.closingOdds,
+        isLive: p.isLive,
         market: p.market,
         sport: p.match?.sport?.slug || 'unknown',
         tourLevel: p.match?.tourLevel,
+        matchId: p.matchId,
+        createdAt: p.createdAt,
+        // Which side the pick is on. cron.js writes selection as
+        // `${competitorA} ML`, so a prefix test resolves it.
+        sideIsA: !!(p.match?.competitorA &&
+          String(p.selection || '').startsWith(p.match.competitorA)),
       }));
 
     if (!rows.length) return res.json({ n: 0, message: 'No graded picks match those filters.' });
@@ -1332,8 +1340,144 @@ router.get('/admin/backtest', requireAuth, async (req, res) => {
       'confidence 65%+ and > -200': summarise(rows.filter((r) => r.confidence >= 65 && Number(r.odds) > -200)),
     };
 
+    /* PRICE INTEGRITY — is the equity curve built on bettable numbers?
+     *
+     * Every figure here assumes pick.odds was a price you could actually
+     * have taken. Two reasons that may not hold:
+     *
+     *  1. LIVE picks record the price mid-match. Real, but it existed for
+     *     seconds while a match was in play — not something a member
+     *     could act on. Mixed into the same curve as pregame picks, it
+     *     makes the record describe a bet nobody placed.
+     *
+     *  2. Suspended-market placeholders. /stats once bounded odds to
+     *     +/-2000 to exclude corrupted rows, then widened to +/-100000
+     *     because the upstream cause was fixed — but rows written BEFORE
+     *     that fix are still stored and now pass the wider filter. A
+     *     -10000 winner pays $1 and drags the average payout down.
+     *
+     * Reported, not silently filtered: the decision about what belongs in
+     * a published record is not one this endpoint should make quietly. */
+    const pctl = (arr, q) => {
+      if (!arr.length) return null;
+      const a = [...arr].sort((x, y) => x - y);
+      return a[Math.min(a.length - 1, Math.floor(q * a.length))];
+    };
+    const allOdds = decidedRows.map((r) => Number(r.odds)).filter(Number.isFinite);
+    const liveRows = decidedRows.filter((r) => r.isLive);
+    const pregameRows = decidedRows.filter((r) => !r.isLive);
+    const extreme = (limit) => decidedRows.filter((r) => Number(r.odds) <= limit);
+
+    const priceIntegrity = {
+      oddsRange: { min: Math.min(...allOdds), max: Math.max(...allOdds) },
+      percentiles: { p5: pctl(allOdds, 0.05), median: pctl(allOdds, 0.5), p95: pctl(allOdds, 0.95) },
+      live: { ...summarise(liveRows), what: 'price recorded mid-match — not bettable by a member' },
+      pregame: { ...summarise(pregameRows), what: 'price frozen at analysis time, single book, never re-validated' },
+      shorterThan1000: summarise(extreme(-1000)),
+      shorterThan2000: { ...summarise(extreme(-2000)), what: 'the old sanity bound — these were excluded before it was widened' },
+      withClosingOdds: decidedRows.filter((r) => Number.isFinite(r.closingOdds)).length,
+      note: 'A curve mixing live and pregame prices is not a record a member could have replicated. Compare the two rows above.',
+    };
+
+
+    /* ================= LATENCY RE-PRICING =================
+     *
+     * The curve above grades every pick at the price stamped the instant
+     * it was posted. Nobody bets at that instant. A member sees the
+     * alert, opens their book, finds the match, places the bet — a minute
+     * or two later — and in-play tennis reprices on every point.
+     *
+     * The drift is not random, which is what makes this worth measuring.
+     * A player is 4.0 BECAUSE he is losing; the moment he breaks back,
+     * 4.0 becomes 3.2. So the exact situation that makes a live price
+     * attractive is the one where it decays fastest once the model turns
+     * out to be right. The recorded price is systematically better than
+     * the achievable one — not through any dishonesty, just physics.
+     *
+     * OddsSnapshot already stores repeated captures per match, with BOTH
+     * the line-of-record book (bookOddsA/B) and the best across books
+     * (bestOddsA/B). So the honest question — "what could a member
+     * actually have got N minutes after we posted?" — is answerable from
+     * data already on disk.
+     *
+     * Reported at several delays at once, because the SHAPE of the decay
+     * is the finding. Flat means live alerts are genuinely valuable.
+     * Steep means the alert has to fire faster or not at all.
+     */
+    const LATENCIES = [0, 1, 2, 5, 10];
+    let latency = null;
+
+    const matchIds = [...new Set(rows.map((r) => r.matchId).filter(Boolean))];
+    if (matchIds.length) {
+      const snaps = await db.oddsSnapshot.findMany({
+        where: { matchId: { in: matchIds } },
+        orderBy: { capturedAt: 'asc' },
+        select: { matchId: true, capturedAt: true, bestOddsA: true, bestOddsB: true,
+                  bookOddsA: true, bookOddsB: true },
+      });
+
+      const byMatch = new Map();
+      for (const sn of snaps) {
+        if (!byMatch.has(sn.matchId)) byMatch.set(sn.matchId, []);
+        byMatch.get(sn.matchId).push(sn);
+      }
+
+      /* First capture at or after the deadline. Deliberately NOT the
+       * nearest one — a snapshot from before the member could have acted
+       * is exactly the optimistic price we are trying to stop counting. */
+      const priceAfter = (row, minutes) => {
+        const list = byMatch.get(row.matchId);
+        if (!list || !row.createdAt) return null;
+        const deadline = new Date(row.createdAt).getTime() + minutes * 60000;
+        const sn = list.find((x) => new Date(x.capturedAt).getTime() >= deadline);
+        if (!sn) return null;
+        const book = row.sideIsA ? sn.bookOddsA : sn.bookOddsB;
+        const best = row.sideIsA ? sn.bestOddsA : sn.bestOddsB;
+        return {
+          book: Number.isFinite(book) ? book : null,
+          best: Number.isFinite(best) ? best : null,
+          waitedMs: new Date(sn.capturedAt).getTime() - new Date(row.createdAt).getTime(),
+        };
+      };
+
+      const repriced = (minutes, field) => {
+        const out = [];
+        let covered = 0;
+        for (const r of rows) {
+          const px = priceAfter(r, minutes);
+          const odds = px && px[field];
+          if (!Number.isFinite(odds)) continue;
+          covered++;
+          out.push({ ...r, odds });
+        }
+        return { ...summarise(out), covered };
+      };
+
+      const atRecorded = summarise(rows.filter((r) => byMatch.has(r.matchId)));
+      const curve = {};
+      for (const m of LATENCIES) {
+        curve[`${m}min`] = {
+          atBookOfRecord: repriced(m, 'book'),
+          withLineShopping: repriced(m, 'best'),
+        };
+      }
+
+      /* Coverage matters: picks with no snapshot after the deadline are
+       * silently absent from the re-priced rows, so a shrinking sample
+       * across delays is itself information about polling frequency. */
+      latency = {
+        picksWithSnapshots: rows.filter((r) => byMatch.has(r.matchId)).length,
+        picksTotal: rows.length,
+        asRecorded: atRecorded,
+        curve,
+        howToRead: 'Compare atBookOfRecord across delays. Flat decay = live alerts are worth publishing. Steep decay = the recorded price was never achievable. withLineShopping shows what best-price would have added on top.',
+      };
+    }
+
     res.json({
       filters: { sport, days: days || 'all', market, stake: STAKE },
+      priceIntegrity,
+      latency,
       /* Reconciliation against /stats. Note /stats ALSO excludes
        * DEVELOPING_SPORTS (football, soccer) from its published figures,
        * which this endpoint deliberately does not — internal analysis
