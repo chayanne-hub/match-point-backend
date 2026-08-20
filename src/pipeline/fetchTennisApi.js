@@ -175,6 +175,77 @@ async function fetchH2H(tourType, player1, player2, { full = true } = {}) {
   return apiGet(`h2h/profile/${tourType}/${p1}/${p2}/${full ? 'false' : 'true'}`);
 }
 
+/**
+ * PREGAME / OPENING ODDS.
+ *
+ * Lives under the `upcoming` group, not `extend/api` — which is why every
+ * probe of /extend/api/odds/* came back empty. Takes the four ids as QUERY
+ * parameters rather than a composite path segment:
+ *
+ *   /upcoming/matchodds/{atp|wta}
+ *     ?player1Id=&player2Id=&tournamentId=&roundId=
+ *
+ * Response is one entry per bookmaker, confirmed live:
+ *   { id_b_o: "1", k1: 1.45, k2: 2.74, ... }
+ *
+ *   id_b_o   bookmaker id (matches /extend/api/bookmakers/all)
+ *   k1 / k2  DECIMAL moneyline for player1 / player2
+ *   f1,kf1   handicap line and price; ktb/ktm over/under; k20..k03 set score
+ *
+ * Only the moneyline is taken here — that is what the pipeline grades on.
+ */
+const PREFERRED_BOOKS = (process.env.TENNIS_ODDS_BOOKS || '19,1,11,20')
+  .split(',').map((s) => s.trim()).filter(Boolean); // Pinnacle, Bet365, DraftKings, Marathon
+
+function decToAmerican(dec) {
+  const d = Number(dec);
+  if (!Number.isFinite(d) || d <= 1) return null;
+  return d >= 2 ? Math.round((d - 1) * 100) : Math.round(-100 / (d - 1));
+}
+
+/**
+ * Opening moneyline for one fixture. Returns null when no book has priced
+ * it — a real state for a fixture posted before the market opens, not an
+ * error.
+ */
+async function fetchMatchOdds({ tour = 'atp', player1Id, player2Id, tournamentId, roundId }) {
+  if (!player1Id || !player2Id || !tournamentId || roundId === undefined || roundId === null) return null;
+
+  const qs = `player1Id=${player1Id}&player2Id=${player2Id}&tournamentId=${tournamentId}&roundId=${roundId}`;
+  let body;
+  try {
+    body = await apiGet(`upcoming/matchodds/${tour}?${qs}`);
+  } catch (err) {
+    return null; // no price yet, or the tour/round combination isn't carried
+  }
+
+  const rows = Array.isArray(body?.odds) ? body.odds.filter(Boolean) : [];
+  if (!rows.length) return null;
+
+  // Prefer a sharp book when present. Pinnacle first: its price is the
+  // best available read on true probability, which is what the blend
+  // wants to weigh the model against.
+  let chosen = null;
+  for (const want of PREFERRED_BOOKS) {
+    chosen = rows.find((r) => String(r.id_b_o) === want);
+    if (chosen) break;
+  }
+  if (!chosen) chosen = rows[0];
+
+  const oddsA = decToAmerican(chosen.k1);
+  const oddsB = decToAmerican(chosen.k2);
+  if (oddsA === null || oddsB === null) return null;
+
+  return {
+    oddsA,
+    oddsB,
+    decimalA: Number(chosen.k1),
+    decimalB: Number(chosen.k2),
+    bookmakerId: String(chosen.id_b_o),
+    bookCount: rows.length,
+  };
+}
+
 /** Bookmaker directory. Confirmed working; Pinnacle is id 19 and is the
  *  one worth having — a sharp reference price says whether a BetMGM line
  *  is genuinely wrong or merely slow. */
@@ -299,6 +370,8 @@ async function discoverOddsPath(sampleEventId) {
 
 module.exports = {
   apiGet,
+  fetchMatchOdds,
+  decToAmerican,
   fetchLiveEvents,
   parseLiveEvent,
   breakPointAgainst,

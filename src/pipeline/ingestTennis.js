@@ -18,7 +18,7 @@
  * dropped middle names) that broke the ESPN join before.
  */
 
-const { fetchUpcomingFixtures, fetchLiveEvents } = require('./fetchTennisApi.js');
+const { fetchUpcomingFixtures, fetchLiveEvents, fetchMatchOdds } = require('./fetchTennisApi.js');
 const { namesLikelyMatch } = require('./fetchEspn.js');
 const db = require('../lib/db.js');
 
@@ -46,7 +46,7 @@ async function ingestTennisFixtures() {
     return { created: 0, updated: 0, skipped: 0 };
   }
 
-  let created = 0, updated = 0, skipped = 0;
+  let created = 0, updated = 0, skipped = 0, priced = 0, unpriced = 0;
 
   for (const f of fixtures) {
     if (!f.competitorA || !f.competitorB || !f.startTime) { skipped++; continue; }
@@ -132,10 +132,42 @@ async function ingestTennisFixtures() {
       },
     });
     before ? updated++ : created++;
+
+    /* PRICE IT.
+     *
+     * Without a price the analyst has nothing to compute edge against and
+     * nothing to settle at, so an unpriced row can never become a
+     * gradeable pick — it just gets retried every cycle. The opening line
+     * comes from the `upcoming/matchodds` endpoint, which needs the four
+     * fixture ids as query parameters.
+     *
+     * Only fetched when we don't already have a price: prices are frozen
+     * at analysis time as the line of record, so refetching an already
+     * priced match would risk moving the number a pick was made against.
+     */
+    const row = await db.match.findUnique({ where: { externalId: f.sourceId } });
+    if (row && (row.oddsA === null || row.oddsB === null)) {
+      const odds = await fetchMatchOdds({
+        tour: f.tour || 'atp',
+        player1Id: f.playerAId,
+        player2Id: f.playerBId,
+        tournamentId: f.tournamentId,
+        roundId: f.roundId,
+      });
+      if (odds) {
+        await db.match.update({
+          where: { id: row.id },
+          data: { oddsA: odds.oddsA, oddsB: odds.oddsB },
+        });
+        priced++;
+      } else {
+        unpriced++;
+      }
+    }
   }
 
-  console.log(`[tennisIngest] fixtures: ${created} new, ${updated} updated, ${skipped} already covered`);
-  return { created, updated, skipped };
+  console.log(`[tennisIngest] fixtures: ${created} new, ${updated} updated, ${skipped} already covered | odds: ${priced} priced, ${unpriced} not yet on the market`);
+  return { created, updated, skipped, priced, unpriced };
 }
 
 /**
