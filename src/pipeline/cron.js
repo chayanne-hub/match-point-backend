@@ -46,6 +46,7 @@ function releaseAnalysisSlot() {
 }
 
 const { ingestTennisFixtures, applyTennisLiveState } = require('./ingestTennis.js');
+const { analyzeTennisUpcoming } = require('./analyzeTennisUpcoming.js');
 
 async function analyzeMatchWithRetry(params, context) {
   // Held across BOTH the first attempt and the retry — a failing match
@@ -890,14 +891,30 @@ async function runAll() {
    * backlog can't consume a whole cycle, and it only touches rows that
    * already have a price — an unpriced row is skipped rather than burned.
    */
-  const tennisBacklog = Number(process.env.TENNIS_ANALYSE_LIMIT) || 25;
-  await reanalyzeUpcoming('tennis', { limit: tennisBacklog, dryRun: false, mode: 'missing' })
-    .then((r) => {
-      if (r?.reanalysed) console.log(`[pipeline] tennis backlog: analysed ${r.reanalysed}, failed ${r.failed || 0}`);
-    })
-    .catch((err) => {
-      console.error('[pipeline] tennis backlog analysis failed:', err.message);
-    });
+  /* LOWER-TIER TENNIS.
+   *
+   * reanalyzeUpcoming() can't do this job: it sources prices by
+   * re-fetching from the odds provider, which carries no Challenger or
+   * ITF, so every lower-tier match hit `failed++; continue;` regardless
+   * of how often it ran.
+   *
+   * This pass gets both the fixture list and the price from SportsAPI365
+   * and hands them to the same analyzeMatchWithRetry with the same
+   * parameter shape — so a Challenger pick is produced by identical
+   * reasoning, and blended against the market the same way, as a
+   * main-tour one.
+   *
+   * analyze and blend are injected rather than imported on the other side,
+   * because cron.js owns the concurrency slots and the retry policy, and
+   * importing them there would create a require cycle.
+   */
+  await analyzeTennisUpcoming({
+    analyze: analyzeMatchWithRetry,
+    blend: blendWithMarket,
+    limit: Number(process.env.TENNIS_ANALYSE_LIMIT) || 15,
+  }).catch((err) => {
+    console.error('[pipeline] tennis upcoming analysis failed:', err.message);
+  });
   // Concurrent, not sequential — SPORTS order used to double as processing
   // order, which meant a heavy day for one sport (30 tennis matches, each
   // a real API call) could eat the entire cycle before sports later in

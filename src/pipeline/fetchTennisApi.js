@@ -246,6 +246,76 @@ async function fetchMatchOdds({ tour = 'atp', player1Id, player2Id, tournamentId
   };
 }
 
+/**
+ * UPCOMING EVENTS, priced. Keyed by `event_id` — the same id space the
+ * live feed uses, NOT the composite {p1}-{p2}-{tour}-{round}. That
+ * mismatch is why /extend/api/odds/match/{composite} kept returning
+ * "No odds found": right group, wrong key.
+ *
+ *   { id: "3841355", name, participant1, participant2, league,
+ *     tourType, matchId, startTimestamp, status: "Not Started" }
+ */
+async function fetchUpcomingEvents(tour = 'atp') {
+  const body = await apiGet(`extend/api/events/upcoming/${tour}`);
+  const rows = Array.isArray(body?.results) ? body.results : [];
+  return rows.map((e) => ({
+    eventId: String(e.id),
+    matchId: e.matchId || null,
+    competitorA: e.participant1 || null,
+    competitorB: e.participant2 || null,
+    league: e.league || null,
+    tour: e.tourType || tour,
+    status: e.status || null,
+    startTime: e.startTimestamp ? new Date(e.startTimestamp * 1000) : null,
+  })).filter((e) => e.competitorA && e.competitorB);
+}
+
+/**
+ * Pre-match odds for one event. Confirmed working on Challenger AND ITF,
+ * which is what makes lower-tier picks possible at all:
+ *
+ *   { result: { "Full Time Result": [
+ *       { marketId: 1, bookmaker: "Bet365", od1: "1.180", od2: "4.500",
+ *         addTime: "1787240698", line: null } ], ... } }
+ *
+ * od1/od2 are DECIMAL prices for participant1/participant2. Other markets
+ * (Over Under, Correct Score, Match Handicap Games) come in the same
+ * response and are available later — only the moneyline is taken here,
+ * because that is what the pipeline grades on.
+ */
+async function fetchPreMatchOdds(eventId) {
+  let body;
+  try {
+    body = await apiGet(`extend/api/odds/pre-match/${encodeURIComponent(eventId)}`);
+  } catch {
+    return null; // not priced yet — a real state, not a failure
+  }
+
+  const rows = body?.result?.['Full Time Result'];
+  if (!Array.isArray(rows) || !rows.length) return null;
+
+  // Prefer a sharp book if the response carries one.
+  const prefer = (process.env.TENNIS_ODDS_BOOKS || 'Pinnacle,Bet365,DraftKings')
+    .split(',').map((b) => b.trim().toLowerCase());
+  let chosen = null;
+  for (const want of prefer) {
+    chosen = rows.find((r) => String(r.bookmaker || '').toLowerCase() === want);
+    if (chosen) break;
+  }
+  if (!chosen) chosen = rows[0];
+
+  const oddsA = decToAmerican(chosen.od1);
+  const oddsB = decToAmerican(chosen.od2);
+  if (oddsA === null || oddsB === null) return null;
+
+  return {
+    oddsA,
+    oddsB,
+    bookmaker: chosen.bookmaker || null,
+    addTime: chosen.addTime ? new Date(Number(chosen.addTime) * 1000) : null,
+  };
+}
+
 /** Bookmaker directory. Confirmed working; Pinnacle is id 19 and is the
  *  one worth having — a sharp reference price says whether a BetMGM line
  *  is genuinely wrong or merely slow. */
@@ -370,6 +440,8 @@ async function discoverOddsPath(sampleEventId) {
 
 module.exports = {
   apiGet,
+  fetchUpcomingEvents,
+  fetchPreMatchOdds,
   fetchMatchOdds,
   decToAmerican,
   fetchLiveEvents,
