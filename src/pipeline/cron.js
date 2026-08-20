@@ -486,7 +486,12 @@ async function runForSport(sportSlug, dayFilter = null) {
         pickType: 'model',
         market: 'moneyline',
         selection: analysis.selection,
-        confidence: analysis.confidence,
+        // Blended: the model's blind estimate combined with the de-vigged
+        // market price. Both inputs are stored alongside so the weighting
+        // can be scored later rather than assumed.
+        confidence: blended ? blended.confidence : analysis.confidence,
+        rawConfidence: blended ? blended.rawConfidence : analysis.confidence,
+        marketProb: blended ? blended.marketProb : null,
         conviction: analysis.conviction || 'guess',
         odds: pickedOdds,
         rationale: analysis.analysis,
@@ -659,6 +664,53 @@ async function clearStaleFailureCounters() {
  * The old pick is only deleted once the new analysis has returned, so a
  * failure leaves the existing pick intact rather than blanking the board.
  */
+/**
+ * BLEND the model's independent probability with the market's.
+ *
+ * The analyst never sees the price — that stays true, because a model
+ * shown "-150" produces 60% and the edge is zero by construction. But
+ * refusing to USE the market afterwards throws away the best-calibrated
+ * single input available: it aggregates far more information than any
+ * research pass, and it is right more often than it is wrong.
+ *
+ * So: form the view blind, then combine. The model contributes what the
+ * market can't see (injury news, surface fit, travel, matchup); the
+ * market contributes everything the model missed. Where they agree,
+ * confidence firms up. Where they disagree, the number lands between
+ * them — which is the honest position, since a disagreement with a sharp
+ * price is sometimes an edge and sometimes just being wrong.
+ *
+ * MODEL_WEIGHT is env-tunable and both inputs are stored, so which
+ * weighting actually performs is a question the data can answer rather
+ * than something I assert here.
+ */
+const MODEL_WEIGHT = (() => {
+  const raw = Number(process.env.MODEL_WEIGHT);
+  return Number.isFinite(raw) && raw >= 0 && raw <= 1 ? raw : 0.55;
+})();
+
+function blendWithMarket(modelConfidence, oddsA, oddsB, selectionIsA) {
+  if (typeof modelConfidence !== 'number') return null;
+
+  const factor = marketImpliedFactor(oddsA, oddsB); // -1..+1, positive favours A
+  if (factor === null) {
+    // No usable price: the model's own number stands, unblended.
+    return { confidence: Math.round(modelConfidence), rawConfidence: Math.round(modelConfidence), marketProb: null };
+  }
+
+  // De-vigged market probability for the side we picked.
+  const marketProbA = (factor + 1) / 2;
+  const marketProb = selectionIsA ? marketProbA : 1 - marketProbA;
+
+  const blended = MODEL_WEIGHT * (modelConfidence / 100) + (1 - MODEL_WEIGHT) * marketProb;
+
+  return {
+    confidence: Math.max(1, Math.min(99, Math.round(blended * 100))),
+    rawConfidence: Math.round(modelConfidence),
+    marketProb: Math.round(marketProb * 100),
+  };
+}
+
 async function reanalyzeUpcoming(sportSlug, { limit = 50, dryRun = true, mode = 'existing' } = {}) {
   // 'all' — the board's default filter. Previously this fell back to
   // tennis, so a button pressed with no sport filter silently ignored
@@ -758,7 +810,15 @@ async function reanalyzeUpcoming(sportSlug, { limit = 50, dryRun = true, mode = 
         await db.match.update({ where: { id: match.id }, data: { analysisFailCycles: 0 } }).catch(() => {});
       }
 
-      const pickedOdds = analysis.selection.startsWith(m.competitorA) ? m.oddsA : m.oddsB;
+      const selectionIsA = analysis.selection.startsWith(m.competitorA);
+      const pickedOdds = selectionIsA ? m.oddsA : m.oddsB;
+      const blended = blendWithMarket(analysis.confidence, m.oddsA, m.oddsB, selectionIsA);
+      if (blended && blended.marketProb !== null && Math.abs(blended.rawConfidence - blended.marketProb) >= 20) {
+        // A big disagreement is either the edge we're looking for or the
+        // model missing something the market knows. Logged either way so
+        // the pattern is visible before it shows up in the results.
+        console.log(`[blend] ${m.competitorA} vs ${m.competitorB}: model ${blended.rawConfidence}% vs market ${blended.marketProb}% -> ${blended.confidence}%`);
+      }
 
       // Replace only AFTER a successful analysis.
       await db.pick.deleteMany({
