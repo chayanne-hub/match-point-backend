@@ -19,6 +19,7 @@
  */
 
 const { fetchUpcomingEvents, fetchPreMatchOdds } = require('./fetchTennisApi.js');
+const { buildFactorBrief, renderFactorBrief } = require('./tennisFactors.js');
 const { namesLikelyMatch } = require('./fetchEspn.js');
 const db = require('../lib/db.js');
 
@@ -82,6 +83,29 @@ async function analyzeTennisUpcoming({ analyze, blend, limit = 15 } = {}) {
     const oddsA = flipped ? priced.oddsB : priced.oddsA;
     const oddsB = flipped ? priced.oddsA : priced.oddsB;
 
+    /* STRUCTURED FACTOR DATA.
+     *
+     * Five of the twelve factors — H2H, Surface Fit, Venue History,
+     * Recent Form, Ranking — carry 55 of the 100 weight points and were
+     * previously researched by web search. Search quality varied per
+     * match, which made the learned weights measure the research as much
+     * as the factor.
+     *
+     * Passed as `verifiedData`, appended to the prompt. Best-effort: if
+     * the provider is down the analysis still runs on search, one notch
+     * worse rather than not at all.
+     */
+    const brief = await buildFactorBrief({
+      tour: ev.tour || 'atp',
+      nameA: match.competitorA,
+      nameB: match.competitorB,
+      playerAId: ev.matchId ? String(ev.matchId).split('-')[0] : null,
+      playerBId: ev.matchId ? String(ev.matchId).split('-')[1] : null,
+      tournamentId: ev.matchId ? String(ev.matchId).split('-')[2] : null,
+    }).catch(() => null);
+
+    const verifiedData = renderFactorBrief(brief, { surface: match.surface });
+
     const analysis = await analyze({
       sport: 'tennis',
       competitorA: match.competitorA,
@@ -89,6 +113,7 @@ async function analyzeTennisUpcoming({ analyze, blend, limit = 15 } = {}) {
       oddsA,
       oddsB,
       startTime: match.startTime,
+      verifiedData,
     }, `${match.competitorA} vs ${match.competitorB} (${ev.league || 'tennis'})`);
 
     if (!analysis) { skipped++; continue; }
@@ -113,6 +138,9 @@ async function analyzeTennisUpcoming({ analyze, blend, limit = 15 } = {}) {
         odds: selectionIsA ? oddsA : oddsB,
         rationale: analysis.analysis,
         factsUsed: JSON.stringify(analysis.factors || []),
+        // Stored so the closing line can be fetched at start time and
+        // CLV computed against the price actually taken.
+        sourceEventId: ev.eventId,
       },
     });
 

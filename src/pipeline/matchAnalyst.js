@@ -450,7 +450,7 @@ ${process}${preseasonNote}${weightNote}
  * fallback plan (e.g. skip creating a pick this cycle) rather than crash
  * the pipeline over one bad match.
  */
-async function analyzeMatch({ sport, competitorA, competitorB, oddsA, oddsB, startTime, spread, spreadOddsA, spreadOddsB, total, overOdds, underOdds, pregameProjectedTotal, sportKey }) {
+async function analyzeMatch({ sport, competitorA, competitorB, oddsA, oddsB, startTime, spread, spreadOddsA, spreadOddsB, total, overOdds, underOdds, pregameProjectedTotal, sportKey, verifiedData }) {
   // The preseason sport key is how we know regular-season logic doesn't
   // apply. Without it the model reasons about playoff seeding in August.
   const isPreseason = typeof sportKey === 'string' && sportKey.includes('preseason');
@@ -658,7 +658,20 @@ this exact shape:
 ${JSON_VALIDITY_REMINDER}
 `.trim();
 
-  const matchDescription = `${competitorA} vs ${competitorB} (${sport}), ${new Date(startTime).toISOString()}. ${oddsContext} ${spreadContext} ${totalContext}`;
+  /* VERIFIED DATA, appended to the match description.
+   *
+   * Head-to-head, surface record, venue history, recent form and ranking
+   * carry 55 of the 100 factor weight points and were previously
+   * researched by web search — which returned different quality per match
+   * and made the learned weights partly a measure of the research rather
+   * than the factor.
+   *
+   * Appended rather than replacing the description so nothing else
+   * changes, and empty when the provider gave nothing, in which case the
+   * analyst falls back to search exactly as before.
+   */
+  const matchDescription = `${competitorA} vs ${competitorB} (${sport}), ${new Date(startTime).toISOString()}. ${oddsContext} ${spreadContext} ${totalContext}`
+    + (verifiedData ? `\n${verifiedData}\nThese figures come from the tennis data provider and are accurate — do not re-research them. Use search only for what they do not cover: injury and physical condition, travel and scheduling, motivation, court speed at this venue, and crowd.` : '');
 
   // Real research with web search can legitimately take a while, but a
   // single hung request must never be allowed to block the entire

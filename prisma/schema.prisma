@@ -208,6 +208,14 @@ model Pick {
   /// Market-implied probability for the picked side at analysis time,
   /// de-vigged. The other half of the blend.
   marketProb   Int?
+  /// Provider event id, so the closing line can be fetched after the
+  /// match starts and CLV measured against the price actually taken.
+  sourceEventId String?
+  /// Closing price for the picked side, and the movement from entry to
+  /// close in percentage points of implied probability. Positive means
+  /// the market moved toward the pick after it was made.
+  closingOdds  Int?
+  clvPercent   Float?
   odds         Int
   rationale    String
   factsUsed    String?  // JSON array of {label, tag, body} — the real facts behind this pick, for the detail page's factor breakdown
