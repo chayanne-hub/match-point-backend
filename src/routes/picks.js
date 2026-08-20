@@ -1288,12 +1288,26 @@ router.get('/admin/backtest', requireAuth, async (req, res) => {
 
     const overall = summarise(rows);
 
-    /* The number a win rate hides: at the average price taken, a certain
-     * win rate is required merely to break even. A 71% record on prices
-     * demanding 74% is a losing business that looks like a winning one. */
-    const probs = rows.map((r) => impliedProb(r.odds)).filter((x) => x !== null);
-    const breakEvenWinRate = probs.length
-      ? +((probs.reduce((a, b) => a + b, 0) / probs.length) * 100).toFixed(1) : null;
+    /* BREAK-EVEN from what the winners ACTUALLY PAID.
+     *
+     * The first version of this averaged implied probability across every
+     * pick. That is systematically optimistic — by Jensen's inequality the
+     * payout at the average price exceeds the average payout — and it
+     * produced a positive gap sitting next to a negative ROI, which is a
+     * contradiction, not a finding.
+     *
+     * Derived from realised payouts, the comparison is algebraically
+     * consistent with P/L and cannot contradict it:
+     *   profit >= 0  <=>  winRate >= 100 / (100 + avgPayoutOnWins) */
+    const decidedRows = rows.filter((r) => r.outcome !== 'push');
+    const winRows = decidedRows.filter((r) => r.outcome === 'win');
+    const totalWinPayout = winRows.reduce((sum, r) => {
+      const o = Number(r.odds);
+      return sum + (o > 0 ? STAKE * (o / 100) : STAKE * (100 / Math.abs(o)));
+    }, 0);
+    const avgPayoutOnWins = winRows.length ? totalWinPayout / winRows.length : null;
+    const breakEvenWinRate = avgPayoutOnWins
+      ? +((STAKE / (STAKE + avgPayoutOnWins)) * 100).toFixed(1) : null;
 
     /* rawConfidence is the model's own probability BEFORE the market was
      * blended in. If disagreeing with the market is where the profit is,
@@ -1335,7 +1349,9 @@ router.get('/admin/backtest', requireAuth, async (req, res) => {
       },
       overall,
       breakEvenWinRate,
+      avgPayoutPerWin: avgPayoutOnWins ? +avgPayoutOnWins.toFixed(2) : null,
       // Positive means the picks are beating the prices paid for them.
+      // Guaranteed to agree with the sign of overall.roi.
       gapVsBreakEven: breakEvenWinRate !== null && overall.winRate !== null
         ? +(overall.winRate - breakEvenWinRate).toFixed(1) : null,
       byPriceBand: groupBy(rows, (r) => priceBand(r.odds)),
