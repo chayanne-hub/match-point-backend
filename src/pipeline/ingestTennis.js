@@ -227,8 +227,40 @@ async function applyTennisLiveState() {
     matched++;
   }
 
-  console.log(`[tennisIngest] live: ${matched} joined, ${unmatched} with no match on our board`);
-  return { matched, unmatched };
+  /* CLOSE OUT FINISHED MATCHES.
+   *
+   * Nothing else can. This ingest promotes a match to `live`, but ESPN —
+   * which closes every other sport — carries no Challenger or ITF, so a
+   * lower-tier match promoted here had no route back to `final` and would
+   * sit on the board showing LIVE forever.
+   *
+   * A match that WAS live, is no longer in the provider's in-play feed,
+   * and started long enough ago to have plausibly finished, is finished.
+   * The grace window guards against a momentary gap in the feed flipping
+   * a match that is genuinely still being played.
+   */
+  const liveIds = new Set(events.map((e) => `${e.competitorA}|${e.competitorB}`.toLowerCase()));
+  const graceMs = Number(process.env.TENNIS_FINAL_GRACE_MS) || 10 * 60 * 1000;
+  let closed = 0;
+
+  for (const m of candidates) {
+    if (m.status !== 'live') continue;
+    const key = `${m.competitorA}|${m.competitorB}`.toLowerCase();
+    const keyRev = `${m.competitorB}|${m.competitorA}`.toLowerCase();
+    if (liveIds.has(key) || liveIds.has(keyRev)) continue; // still in play
+
+    // Only close a match whose last observed live update is older than the
+    // grace window — a match that just went live and hasn't been picked up
+    // yet must not be closed on its first cycle.
+    const lastSeen = m.liveStateAt ? new Date(m.liveStateAt).getTime() : new Date(m.startTime).getTime();
+    if (Date.now() - lastSeen < graceMs) continue;
+
+    await db.match.update({ where: { id: m.id }, data: { status: 'final' } });
+    closed++;
+  }
+
+  console.log(`[tennisIngest] live: ${matched} joined, ${unmatched} with no match on our board${closed ? `, ${closed} closed out` : ''}`);
+  return { matched, unmatched, closed };
 }
 
 /**
