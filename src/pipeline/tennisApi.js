@@ -294,8 +294,8 @@ const profiles = {
   filters:        (name) => request(`/profile/${enc(name)}/filters`, { ttl: TTL.STATIC }),
   /** Name -> id resolution. This is how you STOP being name-keyed. */
   search:         (name, type) => request(`/profile/search/${enc(name)}/${type}`, { ttl: TTL.STATIC }),
-  /** Tennis has no teams — "teamId" is the player. May return bytes. */
-  teamLogo:       (teamId) => request(`/profile/team-logo/${teamId}`, { ttl: TTL.STATIC, label: 'profiles.teamLogo' }),
+  /* teamLogo removed — returns 500 on every player id. Player imagery
+   * comes from profiles.get().image instead (see playerImages below). */
 };
 
 /* ================================================================== *
@@ -388,7 +388,11 @@ const odds = {
    *  line shopping on Challenger/ITF — tiers The Odds API does not carry
    *  at all, where the site currently promises best-price and can't
    *  deliver it. */
-  compare:    (eventId) => request(`/extend/api/odds/compare/${enc(eventId)}`, { ttl: TTL.PRICE, label: 'odds.compare' }),
+  /* market_id is REQUIRED and must be numeric — without it the gateway
+   * returns 400 "Required market id & must be numeric value". 1 = Full
+   * Time Result (moneyline). */
+  compare:    (eventId, marketId = 1) =>
+    request(`/extend/api/odds/compare/${enc(eventId)}?market_id=${marketId}`, { ttl: TTL.PRICE, label: 'odds.compare' }),
   /** Cheaper than compare when you only need the range. */
   summary:    (eventId) => request(`/extend/api/odds/summary/${enc(eventId)}`, { ttl: TTL.PRICE }),
   /** CONFIRMED — already used. */
@@ -422,7 +426,8 @@ const liveApi = {
   count:     () => request(`/extend/api/events/live/count`, { ttl: TTL.LIVE, label: 'live.count' }),
   /** CONFIRMED — already used. */
   events:    () => request(`/extend/api/events/live`, { ttl: TTL.LIVE, label: 'live.events' }),
-  score:     (eventId) => request(`/extend/api/live-score/get/${enc(eventId)}`, { ttl: TTL.LIVE }),
+  /* live-score/get removed — the gateway reports ROUTE_NOT_FOUND. Live
+   * score comes from events/live and the socket. */
   /** REST fallback for the socket timeline — matters given how long the
    *  socket took to work. */
   timeline:  (eventId) => request(`/extend/api/event/timeline/${enc(eventId)}`, { ttl: TTL.LIVE }),
@@ -513,33 +518,339 @@ function marketIndex(marketsBody) {
   return { byName, byId, size: list.length };
 }
 
-/**
- * Best price across books from odds.compare(). UNVERIFIED shape — this is
- * the highest-value normaliser in the file and the first one to fix from
- * probe output. Returns null when nothing parses, so callers fall back to
- * the single pre-match price rather than showing a wrong "best" number.
- */
-function bestPriceFrom(compareBody) {
-  const list = rows(compareBody);
-  if (!list.length) return null;
+/* ==================================================================
+ * CONFIRMED PARSERS — written against real captured payloads.
+ * ================================================================== */
 
-  let bestA = null, bestB = null;
-  for (const r of list) {
-    const book = r.bookmaker ?? r.bookmakerName ?? r.book ?? r.name ?? null;
-    const d1 = Number(r.od1 ?? r.odds1 ?? r.home ?? r.player1);
-    const d2 = Number(r.od2 ?? r.odds2 ?? r.away ?? r.player2);
-    if (Number.isFinite(d1) && d1 > 1 && (!bestA || d1 > bestA.decimal)) bestA = { decimal: d1, book };
-    if (Number.isFinite(d2) && d2 > 1 && (!bestB || d2 > bestB.decimal)) bestB = { decimal: d2, book };
+/**
+ * PLAYER IMAGERY. profiles.get(name) returns relative paths:
+ *   image:        /tennis/api2/uploads/Photo/atp/29932.jpg
+ *   image_p_name: /tennis/api2/uploads/Photo/atp_name/taylor_fritz.jpg
+ *
+ * This is the answer to the card-photo problem: imagery served by the
+ * provider under the existing subscription, rather than hotlinked from a
+ * rights-holder's CDN.
+ *
+ * The host is NOT in the payload. Set TENNIS_MEDIA_BASE once you have
+ * confirmed which host serves these; the default is the API host.
+ */
+const MEDIA_BASE = process.env.TENNIS_MEDIA_BASE || 'https://api.sportsapi365.com';
+
+function playerImages(profileBody) {
+  const b = profileBody?.data || profileBody;
+  if (!b) return null;
+  const abs = (p) => (!p ? null : /^https?:\/\//.test(p) ? p : MEDIA_BASE + p);
+  const photo = abs(b.image);
+  const byName = abs(b.image_p_name);
+  if (!photo && !byName) return null;
+  return { photo, photoByName: byName, name: b.name || null };
+}
+
+/**
+ * IDENTITY + a real factor. `plays` carries handedness and backhand:
+ * "Right-Handed, Two-Handed Backhand". Lefty matchups are a genuine
+ * tennis edge and nothing in the pipeline currently models them.
+ */
+function playerIdentity(profileBody) {
+  const b = profileBody?.data || profileBody;
+  if (!b) return null;
+  const info = b.information || {};
+  const plays = String(info.plays || '');
+  const born = b.birthday ? new Date(b.birthday) : null;
+  return {
+    id: b.id ?? info.id ?? null,
+    name: b.name || null,
+    country: b.countryAcr || b.country?.acronym || null,
+    countryName: b.country?.name || null,
+    rank: Number.isFinite(Number(b.currentRank)) ? Number(b.currentRank) : null,
+    points: Number(b.points) || null,
+    ageYears: born ? Math.floor((Date.now() - born.getTime()) / 31557600000) : null,
+    heightCm: Number(info.height) || null,
+    turnedPro: Number(info.turnedPro) || null,
+    // `false || null` collapses to null, which would report every
+    // right-hander as unknown handedness. Ternary, not ||.
+    leftHanded: plays ? /left/i.test(plays) : null,
+    oneHandedBackhand: plays ? /one-handed/i.test(plays) : null,
+    status: b.playerStatus || info.playerStatus || null,
+  };
+}
+
+/**
+ * BEST PRICE. odds.arbitrage() already computes this server-side and
+ * returns it pre-resolved, which is cheaper and less error-prone than
+ * scanning compare() ourselves:
+ *
+ *   result: { arbitrage, margin, bestOdds: {
+ *     outcome1: { bookmakerId, bookmaker, odds },
+ *     outcome2: { ... } }, bookmakersChecked }
+ *
+ * NOTE ON COVERAGE: bookmakersChecked came back as 2 (Bet365,
+ * DraftKings). This provider is NOT a forty-book feed. See the margin
+ * field — it doubles as a data-quality signal: a margin below 1.0 means
+ * a genuine arb, which in practice usually means one book is stale.
+ */
+function bestPriceFrom(arbitrageBody) {
+  const r = arbitrageBody?.result || arbitrageBody;
+  const best = r?.bestOdds;
+  if (!best) return null;
+  const a = best.outcome1, b = best.outcome2;
+  if (!a && !b) return null;
+  return {
+    bestOddsA: a ? decimalToAmerican(a.odds) : null,
+    bestBookA: a ? a.bookmaker || null : null,
+    bestOddsB: b ? decimalToAmerican(b.odds) : null,
+    bestBookB: b ? b.bookmaker || null : null,
+    margin: Number(r.margin) || null,
+    isArb: r.arbitrage === true,
+    bookCount: Number(r.bookmakersChecked) || null,
+  };
+}
+
+/**
+ * LINE MOVEMENT PER BOOK, from odds.summary().
+ *
+ *   result: { "Bet365": { "Full Time Result": {
+ *       start: { od1, od2, sourceAddTime },
+ *       end:   { od1, od2, sourceAddTime } } } }
+ *
+ * Bookmaker first, then market — note this is INVERTED relative to
+ * odds.recent(), which nests market first. Getting the two the wrong way
+ * round yields empty results rather than an error, so they are separate
+ * functions on purpose.
+ */
+function lineMovementFrom(summaryBody, market = 'Full Time Result') {
+  const result = summaryBody?.result || summaryBody;
+  if (!result || typeof result !== 'object') return null;
+
+  const books = [];
+  for (const [book, markets] of Object.entries(result)) {
+    const m = markets?.[market];
+    if (!m) continue;
+    const s1 = Number(m.start?.od1), e1 = Number(m.end?.od1);
+    const s2 = Number(m.start?.od2), e2 = Number(m.end?.od2);
+    if (!Number.isFinite(e1) || !Number.isFinite(e2)) continue;
+    books.push({
+      book,
+      openA: Number.isFinite(s1) ? decimalToAmerican(s1) : null,
+      openB: Number.isFinite(s2) ? decimalToAmerican(s2) : null,
+      currentA: decimalToAmerican(e1),
+      currentB: decimalToAmerican(e2),
+      movedA: Number.isFinite(s1) ? +(e1 - s1).toFixed(3) : null,
+      movedB: Number.isFinite(s2) ? +(e2 - s2).toFixed(3) : null,
+      updatedAt: m.end?.sourceAddTime ? new Date(m.end.sourceAddTime * 1000) : null,
+    });
+  }
+  return books.length ? books : null;
+}
+
+/** Best price from odds.recent() — market first, THEN bookmaker. */
+function bestPriceFromRecent(recentBody, market = 'Full Time Result') {
+  const byMarket = recentBody?.result || recentBody;
+  const books = byMarket?.[market];
+  if (!books || typeof books !== 'object') return null;
+
+  let bestA = null, bestB = null, n = 0;
+  for (const [book, o] of Object.entries(books)) {
+    n++;
+    const d1 = Number(o.od1), d2 = Number(o.od2);
+    if (Number.isFinite(d1) && d1 > 1 && (!bestA || d1 > bestA.d)) bestA = { d: d1, book };
+    if (Number.isFinite(d2) && d2 > 1 && (!bestB || d2 > bestB.d)) bestB = { d: d2, book };
   }
   if (!bestA && !bestB) return null;
+  return {
+    bestOddsA: bestA ? decimalToAmerican(bestA.d) : null,
+    bestBookA: bestA?.book || null,
+    bestOddsB: bestB ? decimalToAmerican(bestB.d) : null,
+    bestBookB: bestB?.book || null,
+    bookCount: n,
+  };
+}
+
+/**
+ * SURFACE FIT, from players.surfaceSummary().
+ *   data: [{ year, surfaces: [{ courtId, court, courtWins, courtLosses }] }]
+ * Fourteen years came back for Fritz; recent years are what matter, so
+ * this windows rather than using the career total.
+ */
+function surfaceRecordFrom(surfaceBody, { surface, years = 3 } = {}) {
+  const list = rows(surfaceBody);
+  if (!list.length) return null;
+  const cutoff = new Date().getFullYear() - years;
+  const totals = new Map();
+
+  for (const y of list) {
+    if (Number(y.year) < cutoff) continue;
+    for (const s of (y.surfaces || [])) {
+      const key = String(s.court || s.courtId);
+      const cur = totals.get(key) || { court: s.court, wins: 0, losses: 0 };
+      cur.wins += Number(s.courtWins) || 0;
+      cur.losses += Number(s.courtLosses) || 0;
+      totals.set(key, cur);
+    }
+  }
+  const out = [...totals.values()].map((t) => ({
+    ...t,
+    played: t.wins + t.losses,
+    winRate: t.wins + t.losses ? +(t.wins / (t.wins + t.losses) * 100).toFixed(1) : null,
+  }));
+  if (!out.length) return null;
+  if (surface) {
+    const hit = out.find((o) => String(o.court).toLowerCase() === String(surface).toLowerCase());
+    return hit || null;
+  }
+  return out;
+}
+
+/**
+ * CAREER SURFACE SPLIT, from h2h.surfaceBreakdown().
+ * Flat counters, "1" = wins and "2" = losses:
+ *   hard1/hard2, iHard1/iHard2, clay1/clay2, grass1/grass2, total1/total2
+ */
+function surfaceSplitFrom(breakdownBody) {
+  const b = breakdownBody?.data || breakdownBody;
+  if (!b || typeof b !== 'object') return null;
+  const pair = (w, l) => {
+    const wins = Number(b[w]), losses = Number(b[l]);
+    if (!Number.isFinite(wins) || !Number.isFinite(losses)) return null;
+    const played = wins + losses;
+    return { wins, losses, played, winRate: played ? +(wins / played * 100).toFixed(1) : null };
+  };
+  const out = {
+    hard: pair('hard1', 'hard2'),
+    indoorHard: pair('iHard1', 'iHard2'),
+    clay: pair('clay1', 'clay2'),
+    grass: pair('grass1', 'grass2'),
+    overall: pair('total1', 'total2'),
+  };
+  return out.overall ? out : null;
+}
+
+/**
+ * RECENT FORM, from h2h.recent().
+ *   games: [{ id, roundId, result, date, seed1, seed2, odd1, odd2,
+ *             player1Id, player2Id, tournamentId, draw }]
+ *
+ * These rows carry the PRICE the match traded at (odd1/odd2). That makes
+ * this a backtest corpus with odds attached, not just a form list — which
+ * is what the equity curve work actually needs.
+ */
+function recentFormFrom(recentBody, playerId) {
+  const b = recentBody?.data || recentBody;
+  const games = Array.isArray(b?.games) ? b.games : rows(b);
+  if (!games.length) return null;
+
+  const pid = playerId != null ? String(playerId) : null;
+  let wins = 0, losses = 0;
+  const matches = games.map((g) => {
+    const isP1 = pid ? String(g.player1Id) === pid : true;
+    // "6-4 6-3" is written from player1's perspective.
+    const sets = String(g.result || '').trim().split(/\s+/);
+    let s1 = 0, s2 = 0;
+    for (const s of sets) {
+      const m = s.match(/^(\d+)-(\d+)/);
+      if (!m) continue;
+      if (Number(m[1]) > Number(m[2])) s1++; else s2++;
+    }
+    const p1Won = s1 > s2;
+    const won = isP1 ? p1Won : !p1Won;
+    won ? wins++ : losses++;
+    return {
+      date: g.date ? new Date(g.date) : null,
+      won,
+      score: g.result || null,
+      seed: isP1 ? g.seed1 : g.seed2,
+      opponentSeed: isP1 ? g.seed2 : g.seed1,
+      priceTaken: isP1 ? decimalToAmerican(g.odd1) : decimalToAmerican(g.odd2),
+      wasFavourite: Number(isP1 ? g.odd1 : g.odd2) < Number(isP1 ? g.odd2 : g.odd1),
+      tournamentId: g.tournamentId || null,
+    };
+  });
 
   return {
-    bestOddsA: bestA ? decimalToAmerican(bestA.decimal) : null,
-    bestBookA: bestA ? bestA.book : null,
-    bestOddsB: bestB ? decimalToAmerican(bestB.decimal) : null,
-    bestBookB: bestB ? bestB.book : null,
-    bookCount: list.length,
+    played: matches.length,
+    wins, losses,
+    winRate: matches.length ? +(wins / matches.length * 100).toFixed(1) : null,
+    careerMatches: Number(b?.count) || null,
+    matches,
   };
+}
+
+/**
+ * SEEDING GAP, from tournaments.seeds(). Bare array: [{ player, seed }].
+ * An unseeded player whose ranking merits a seed is systematically
+ * underpriced — that comparison is the factor, not the seed itself.
+ */
+function seedsFrom(seedsBody) {
+  const list = rows(seedsBody);
+  if (!list.length) return null;
+  const byName = new Map();
+  for (const s of list) {
+    if (!s.player) continue;
+    byName.set(String(s.player).toLowerCase(), Number(s.seed) || null);
+  }
+  return { byName, count: byName.size, seedOf: (n) => byName.get(String(n).toLowerCase()) ?? null };
+}
+
+/**
+ * DRAW, from tournaments.draws().
+ *   { singles: [...], qualifying: [...], doubles: [...] }
+ * Rows carry result, date, seeds, draw position and sometimes odds.
+ * Qualifying rows are how you tell a qualifier from a direct entrant —
+ * three extra matches in the legs before the main draw even starts.
+ */
+function drawFrom(drawsBody, { includeDoubles = false } = {}) {
+  if (!drawsBody || typeof drawsBody !== 'object') return null;
+  const singles = Array.isArray(drawsBody.singles) ? drawsBody.singles : [];
+  const qualifying = Array.isArray(drawsBody.qualifying) ? drawsBody.qualifying : [];
+  if (!singles.length && !qualifying.length) return null;
+
+  const qualifiers = new Set();
+  for (const q of qualifying) {
+    if (q.player1Id) qualifiers.add(String(q.player1Id));
+    if (q.player2Id) qualifiers.add(String(q.player2Id));
+  }
+  return {
+    singles, qualifying,
+    doubles: includeDoubles && Array.isArray(drawsBody.doubles) ? drawsBody.doubles : undefined,
+    /** Came through qualifying — extra matches in the legs. */
+    cameThroughQualifying: (playerId) => qualifiers.has(String(playerId)),
+    matchesPlayedHere: (playerId) => {
+      const id = String(playerId);
+      return [...singles, ...qualifying]
+        .filter((m) => String(m.player1Id) === id || String(m.player2Id) === id).length;
+    },
+  };
+}
+
+/**
+ * LOOKAHEAD / TRAP MATCH, from potential.forPlayer().
+ *   data: [{ id, name, date, tourRank,
+ *            matches: [{ round, roundName, draw, player1, player2 }] }]
+ * The projected path, including the final. A big name waiting two rounds
+ * out is a real motivational factor in tennis and nobody prices it.
+ */
+function lookaheadFrom(potentialBody, playerName) {
+  const list = rows(potentialBody);
+  if (!list.length) return null;
+  const me = String(playerName || '').toLowerCase();
+
+  const path = [];
+  for (const t of list) {
+    for (const m of (t.matches || [])) {
+      const p1 = String(m.player1 || '').toLowerCase();
+      const p2 = String(m.player2 || '').toLowerCase();
+      if (me && p1 !== me && p2 !== me) continue;
+      path.push({
+        tournament: t.name || null,
+        round: m.round ?? null,
+        roundName: m.roundName || null,
+        opponent: me ? (p1 === me ? m.player2 : m.player1) : null,
+      });
+    }
+  }
+  if (!path.length) return null;
+  path.sort((a, b) => (a.round ?? 99) - (b.round ?? 99));
+  return { path, nextOpponent: path[0]?.opponent || null, projectedRounds: path.length };
 }
 
 module.exports = {
@@ -547,5 +858,9 @@ module.exports = {
   fixtures, h2h, h2hById, players, profiles, rankings,
   tournaments, calendar, potential, upcoming, odds, reference,
   live: liveApi, search,
-  decimalToAmerican, fatigueFrom, marketIndex, bestPriceFrom,
+  decimalToAmerican, fatigueFrom, marketIndex,
+  // confirmed against real payloads
+  playerImages, playerIdentity, bestPriceFrom, bestPriceFromRecent,
+  lineMovementFrom, surfaceRecordFrom, surfaceSplitFrom, recentFormFrom,
+  seedsFrom, drawFrom, lookaheadFrom, MEDIA_BASE,
 };
