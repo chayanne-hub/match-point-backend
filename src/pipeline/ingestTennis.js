@@ -86,6 +86,31 @@ async function ingestTennisFixtures() {
       continue;
     }
 
+    /* PRICING REALITY, and why these rows are marked skipAnalysis.
+     *
+     * Pregame odds come from The Odds API; live odds come from this
+     * provider's socket. The Odds API carries NO Challenger or ITF on any
+     * plan, and this provider only prices a match once it is in play. So a
+     * lower-tier fixture has no pregame price from either source.
+     *
+     * The analyst can't make a gradeable pick without a price — there is
+     * nothing to compute edge against and nothing to settle at. Left
+     * unmarked, each of these rows is retried every cycle forever, which
+     * is what buried the tennis slate: 24 unpriceable matches queued ahead
+     * of real work, hammering the failure counters for no possible output.
+     *
+     * So they are created (the board still shows them, and they become
+     * live-priced the moment play starts) but flagged so the analyst skips
+     * them. If pregame prices for these tiers ever become available, clear
+     * the flag and they analyse normally. */
+    // OFF by default. The provider advertises opening lines for these
+    // tiers, so excluding them is a temporary measure at most — and
+    // skipping a match the analyst could actually price is a worse error
+    // than letting it retry. Enable only if lower-tier pricing turns out
+    // to be genuinely unavailable.
+    const skipUnpriced = process.env.TENNIS_SKIP_UNPRICED_TIERS === 'true';
+    const hasPregameSource = !skipUnpriced || (f.tourLevel !== null && f.tourLevel >= 2);
+
     const before = await db.match.findUnique({ where: { externalId: f.sourceId } });
     await db.match.upsert({
       where: { externalId: f.sourceId },
@@ -103,6 +128,7 @@ async function ingestTennisFixtures() {
         startTime: f.startTime,
         status: 'scheduled',
         tourLevel: f.tourLevel,
+        skipAnalysis: !hasPregameSource,
       },
     });
     before ? updated++ : created++;
@@ -233,4 +259,34 @@ async function cleanupDuplicateTennis({ dryRun = true } = {}) {
   return { groups: dupGroups, removed };
 }
 
-module.exports = { ingestTennisFixtures, applyTennisLiveState, cleanupDuplicateTennis };
+/**
+ * Backfill: flag already-ingested lower-tier rows so the analyst stops
+ * retrying matches it can never price. Only touches rows that have no
+ * pick — anything already analysed is left exactly as it is.
+ */
+async function markUnpriceableTennis({ dryRun = true } = {}) {
+  const sport = await db.sport.findFirst({ where: { slug: 'tennis' } });
+  if (!sport) return { marked: 0 };
+
+  const rows = await db.match.findMany({
+    where: {
+      sportId: sport.id,
+      skipAnalysis: false,
+      tourLevel: { in: [0, 1] },
+      startTime: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+    },
+    include: { picks: { select: { id: true } } },
+  });
+
+  const targets = rows.filter((r) => r.picks.length === 0);
+  if (!dryRun && targets.length) {
+    await db.match.updateMany({
+      where: { id: { in: targets.map((t) => t.id) } },
+      data: { skipAnalysis: true },
+    });
+  }
+  console.log(`[tennisIngest] ${targets.length} unpriceable row(s) ${dryRun ? 'would be' : ''} flagged (of ${rows.length} lower-tier)`);
+  return { marked: targets.length, scanned: rows.length };
+}
+
+module.exports = { ingestTennisFixtures, applyTennisLiveState, cleanupDuplicateTennis, markUnpriceableTennis };

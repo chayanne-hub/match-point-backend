@@ -1923,9 +1923,13 @@ router.post('/admin/cleanup-tennis-duplicates', requireAuth, async (req, res) =>
   const user = await db.user.findUnique({ where: { id: req.userId } });
   if (!user || !isAdminEmail(user.email)) return res.status(403).json({ error: 'Admins only.' });
   try {
-    const { cleanupDuplicateTennis } = require('../pipeline/ingestTennis.js');
-    const result = await cleanupDuplicateTennis({ dryRun: !req.body?.apply });
-    res.json({ dryRun: !req.body?.apply, ...result });
+    const { cleanupDuplicateTennis, markUnpriceableTennis } = require('../pipeline/ingestTennis.js');
+    const dryRun = !req.body?.apply;
+    // Both repairs run together: de-duplicate, then stop the analyst
+    // retrying tiers that have no pregame price from either provider.
+    const dupes = await cleanupDuplicateTennis({ dryRun });
+    const unpriceable = await markUnpriceableTennis({ dryRun });
+    res.json({ dryRun, duplicates: dupes, unpriceable });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
