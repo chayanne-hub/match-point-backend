@@ -81,7 +81,28 @@ const { computePregameProjectedTotalGoals, computeLiveProjectedTotalGoals, parse
 // straight who-wins call on every match, regardless of edge size).
 const MODEL_PICK_THRESHOLD = 65;
 
-const SPORTS = ['tennis', 'basketball', 'soccer', 'baseball', 'football'];
+/* SPORTS the pregame pipeline actually analyses.
+ *
+ * Baseball is disabled by default on evidence, not instinct: across 198
+ * graded picks it returned -8.61% ROI (-$1,705 at $100 flat), against a
+ * whole-book loss of -$1,044. Every other sport combined was positive.
+ * Dropping it is the single change that flips the book profitable.
+ *
+ * Env-driven rather than deleted, for two reasons: the finding is
+ * in-sample (the losing bucket was identified after seeing the results,
+ * which is how overfitting happens), and re-enabling should not require a
+ * deploy. Set DISABLED_SPORTS='' to turn everything back on, or add more
+ * as the backtest tells you to.
+ *
+ * Note this stops ANALYSIS — it does not delete graded history, and the
+ * record on the site still includes every baseball pick already made. */
+const ALL_SPORTS = ['tennis', 'basketball', 'soccer', 'baseball', 'football'];
+const DISABLED_SPORTS = (process.env.DISABLED_SPORTS ?? 'baseball')
+  .split(',').map((x) => x.trim().toLowerCase()).filter(Boolean);
+const SPORTS = ALL_SPORTS.filter((s) => !DISABLED_SPORTS.includes(s));
+if (DISABLED_SPORTS.length) {
+  console.log(`[pipeline] analysing ${SPORTS.join(', ')} — disabled: ${DISABLED_SPORTS.join(', ')}`);
+}
 
 // Sports with a real, computed pregame/live total formula.
 const TOTAL_FORMULA_SPORTS = ['basketball', 'football', 'baseball', 'tennis', 'soccer'];
