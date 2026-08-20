@@ -27,7 +27,12 @@ const db = require('./db');
 // people whose card simply expired. It is not a way to reach the product
 // without ever paying: a brand-new account has no Subscription row at
 // all, so it fails on the first check, not this one.
-const LIVE_STATUSES = new Set(['active', 'past_due']);
+// 'canceling' is a Coinbase-era status no current code path writes, but
+// legacy rows may still carry it — and the reasoning behind honouring it
+// was right: someone who cancels a weekly plan on day 2 paid for the week
+// and keeps the week. Cheap to keep, and currentPeriodEnd still ends it
+// on schedule either way.
+const LIVE_STATUSES = new Set(['active', 'past_due', 'canceling']);
 
 async function getEntitlement(userId) {
   if (!userId) return { entitled: false, reason: 'not_signed_in' };
