@@ -875,6 +875,29 @@ async function runAll() {
     console.error('[pipeline] tennis ingest failed:', err.message);
     recordError(`tennis ingest failed: ${err.message}`);
   });
+
+  /* ANALYSE WHAT THE INGEST CREATED.
+   *
+   * runForSport() analyses whatever fetchMatches() returns from the odds
+   * provider. Rows created directly in the database by the tennis ingest
+   * are never in that list, so they were never analysed at all — 120
+   * Challenger and ITF matches sat in the board permanently pickless
+   * while the diagnose reported everything healthy, because it only
+   * examines fetched matches too.
+   *
+   * reanalyzeUpcoming(mode:'missing') works from database rows with no
+   * pick, which is exactly this population. Bounded by `limit` so a large
+   * backlog can't consume a whole cycle, and it only touches rows that
+   * already have a price — an unpriced row is skipped rather than burned.
+   */
+  const tennisBacklog = Number(process.env.TENNIS_ANALYSE_LIMIT) || 25;
+  await reanalyzeUpcoming('tennis', { limit: tennisBacklog, dryRun: false, mode: 'missing' })
+    .then((r) => {
+      if (r?.reanalysed) console.log(`[pipeline] tennis backlog: analysed ${r.reanalysed}, failed ${r.failed || 0}`);
+    })
+    .catch((err) => {
+      console.error('[pipeline] tennis backlog analysis failed:', err.message);
+    });
   // Concurrent, not sequential — SPORTS order used to double as processing
   // order, which meant a heavy day for one sport (30 tennis matches, each
   // a real API call) could eat the entire cycle before sports later in
