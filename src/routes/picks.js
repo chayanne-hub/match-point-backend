@@ -1137,6 +1137,181 @@ router.get('/rankings', async (req, res) => {
 // more time than it saves.
 //
 // Read-only: no picks created, no Anthropic credit spent.
+/* ------------------------------------------------------------------ *
+ * BACKTEST — where does the model actually make money?
+ *
+ * The record sits around 71% while the equity curve is negative. That
+ * combination has one explanation: the model is right about who wins and
+ * wrong about whether the price was worth taking. A win rate cannot show
+ * that. ROI segmented by price can.
+ *
+ * Runs in-process so it reaches Postgres over the private network — the
+ * standalone script needed a public proxy that isn't enabled.
+ *
+ * Read-only. GET /api/picks/admin/backtest?sport=tennis&days=30&market=all
+ * ------------------------------------------------------------------ */
+router.get('/admin/backtest', requireAuth, async (req, res) => {
+  try {
+    const user = await db.user.findUnique({ where: { id: req.userId } });
+    if (!user || !isAdminEmail(user.email)) return res.status(403).json({ error: 'Admin access required.' });
+
+    const sport = req.query.sport || null;
+    const days = Number(req.query.days) || 0;
+    const market = req.query.market || 'moneyline';
+    const STAKE = Number(req.query.stake) || 100;
+
+    /* Flat stake, deliberately. A staking scheme can make a losing set of
+     * picks look profitable for a stretch, which is the exact
+     * self-deception this endpoint exists to prevent. */
+    const profitOn = (odds, outcome) => {
+      if (outcome === 'push') return 0;
+      if (outcome === 'loss') return -STAKE;
+      if (outcome !== 'win') return null;
+      const o = Number(odds);
+      if (!Number.isFinite(o) || o === 0) return null;
+      return o > 0 ? STAKE * (o / 100) : STAKE * (100 / Math.abs(o));
+    };
+    const impliedProb = (odds) => {
+      const o = Number(odds);
+      if (!Number.isFinite(o) || o === 0) return null;
+      return o > 0 ? 100 / (o + 100) : Math.abs(o) / (Math.abs(o) + 100);
+    };
+
+    const picks = await db.pick.findMany({
+      where: {
+        result: { isNot: null },
+        ...(market !== 'all' ? { market } : {}),
+        ...(days ? { createdAt: { gte: new Date(Date.now() - days * 864e5) } } : {}),
+      },
+      include: { result: true, match: { include: { sport: true } } },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    const rows = picks
+      .filter((p) => !sport || p.match?.sport?.slug === sport)
+      .map((p) => ({
+        odds: p.odds,
+        outcome: p.result.outcome,
+        confidence: p.confidence,
+        rawConfidence: p.rawConfidence,
+        marketProb: p.marketProb,
+        conviction: p.conviction || 'guess',
+        clvPercent: p.clvPercent,
+        market: p.market,
+        sport: p.match?.sport?.slug || 'unknown',
+        tourLevel: p.match?.tourLevel,
+      }));
+
+    if (!rows.length) return res.json({ n: 0, message: 'No graded picks match those filters.' });
+
+    const summarise = (set) => {
+      let n = 0, wins = 0, losses = 0, pushes = 0, staked = 0, profit = 0;
+      for (const r of set) {
+        const pr = profitOn(r.odds, r.outcome);
+        if (pr === null) continue;
+        n++;
+        if (r.outcome === 'win') wins++; else if (r.outcome === 'loss') losses++; else pushes++;
+        if (r.outcome !== 'push') staked += STAKE;
+        profit += pr;
+      }
+      const decided = wins + losses;
+      return {
+        n, wins, losses, pushes,
+        profit: Math.round(profit),
+        winRate: decided ? +((wins / decided) * 100).toFixed(1) : null,
+        roi: staked ? +((profit / staked) * 100).toFixed(2) : null,
+        // A handful of picks is not a strategy. Flagged so a 3-pick 100%
+        // ROI can't be read as one.
+        thin: n < 25,
+      };
+    };
+
+    const groupBy = (set, fn) => {
+      const m = {};
+      for (const r of set) {
+        const k = fn(r);
+        if (k === null || k === undefined) continue;
+        (m[k] = m[k] || []).push(r);
+      }
+      return Object.fromEntries(Object.entries(m).map(([k, v]) => [k, summarise(v)]));
+    };
+
+    const priceBand = (o) => {
+      const n = Number(o);
+      if (!Number.isFinite(n)) return 'unknown';
+      if (n <= -300) return '1 heavy fav (-300+)';
+      if (n <= -200) return '2 big fav (-299..-200)';
+      if (n <= -150) return '3 solid fav (-199..-150)';
+      if (n <= -110) return '4 mild fav (-149..-110)';
+      if (n < 110) return '5 pick-em';
+      if (n < 200) return '6 small dog (+110..+199)';
+      if (n < 300) return '7 dog (+200..+299)';
+      return '8 big dog (+300+)';
+    };
+    const confBand = (c) => {
+      const n = Number(c);
+      if (!Number.isFinite(n)) return 'unknown';
+      if (n < 55) return '<55%'; if (n < 60) return '55-59%'; if (n < 65) return '60-64%';
+      if (n < 70) return '65-69%'; if (n < 75) return '70-74%'; if (n < 80) return '75-79%';
+      return '80%+';
+    };
+
+    const overall = summarise(rows);
+
+    /* The number a win rate hides: at the average price taken, a certain
+     * win rate is required merely to break even. A 71% record on prices
+     * demanding 74% is a losing business that looks like a winning one. */
+    const probs = rows.map((r) => impliedProb(r.odds)).filter((x) => x !== null);
+    const breakEvenWinRate = probs.length
+      ? +((probs.reduce((a, b) => a + b, 0) / probs.length) * 100).toFixed(1) : null;
+
+    /* rawConfidence is the model's own probability BEFORE the market was
+     * blended in. If disagreeing with the market is where the profit is,
+     * the blend is diluting the edge — a far cheaper fix than new
+     * factors. */
+    const withRaw = rows.filter((r) => Number.isFinite(r.rawConfidence) && Number.isFinite(r.marketProb));
+    const modelVsMarket = withRaw.length >= 25 ? {
+      agrees: summarise(withRaw.filter((r) => Math.abs(r.rawConfidence - r.marketProb) <= 5)),
+      modelMoreConfident: summarise(withRaw.filter((r) => r.rawConfidence - r.marketProb > 5)),
+      modelLessConfident: summarise(withRaw.filter((r) => r.marketProb - r.rawConfidence > 5)),
+    } : { note: `only ${withRaw.length} picks carry both rawConfidence and marketProb` };
+
+    /* The actionable part: if publishing everything loses money but a
+     * filtered subset doesn't, that subset is the product. */
+    const scenarios = {
+      everything: summarise(rows),
+      'no shorter than -200': summarise(rows.filter((r) => Number(r.odds) > -200)),
+      'no shorter than -150': summarise(rows.filter((r) => Number(r.odds) > -150)),
+      'underdogs only': summarise(rows.filter((r) => Number(r.odds) >= 100)),
+      'strong conviction only': summarise(rows.filter((r) => r.conviction === 'strong')),
+      'confidence 65%+': summarise(rows.filter((r) => r.confidence >= 65)),
+      'confidence 65%+ and > -200': summarise(rows.filter((r) => r.confidence >= 65 && Number(r.odds) > -200)),
+    };
+
+    res.json({
+      filters: { sport, days: days || 'all', market, stake: STAKE },
+      overall,
+      breakEvenWinRate,
+      // Positive means the picks are beating the prices paid for them.
+      gapVsBreakEven: breakEvenWinRate !== null && overall.winRate !== null
+        ? +(overall.winRate - breakEvenWinRate).toFixed(1) : null,
+      byPriceBand: groupBy(rows, (r) => priceBand(r.odds)),
+      byConfidence: groupBy(rows, (r) => confBand(r.confidence)),
+      byConviction: groupBy(rows, (r) => r.conviction),
+      bySport: groupBy(rows, (r) => r.sport),
+      byTourLevel: groupBy(rows.filter((r) => r.tourLevel !== null && r.tourLevel !== undefined),
+        (r) => ({ 0: 'ITF', 1: 'Challenger', 2: 'tour', 3: 'main tour' })[r.tourLevel] ?? `level ${r.tourLevel}`),
+      byMarket: market === 'all' ? groupBy(rows, (r) => r.market) : undefined,
+      modelVsMarket,
+      scenarios,
+      note: 'Profit is computed at the price recorded on each pick. Line shopping is NOT included — best available prices would move every row up.',
+    });
+  } catch (err) {
+    console.error('[backtest] failed:', err);
+    res.status(500).json({ error: 'Backtest failed.' });
+  }
+});
+
 router.get('/admin/diagnose', requireAuth, async (req, res) => {
   try {
     const user = await db.user.findUnique({ where: { id: req.userId } });
