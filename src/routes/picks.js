@@ -1913,6 +1913,24 @@ router.get('/archive/results', async (req, res) => {
 // admin email check the /auth/me bypass uses — this reveals internal
 // operational detail (error messages, run timing) that shouldn't be
 // public, even to a paying non-admin subscriber.
+/* POST /api/picks/admin/cleanup-tennis-duplicates
+ *
+ * One-off repair for duplicates created by the dedup bug. Defaults to a
+ * dry run — pass { "apply": true } to actually delete. Rows carrying a
+ * pick are never removed, so this cannot destroy a graded result.
+ */
+router.post('/admin/cleanup-tennis-duplicates', requireAuth, async (req, res) => {
+  const user = await db.user.findUnique({ where: { id: req.userId } });
+  if (!user || !isAdminEmail(user.email)) return res.status(403).json({ error: 'Admins only.' });
+  try {
+    const { cleanupDuplicateTennis } = require('../pipeline/ingestTennis.js');
+    const result = await cleanupDuplicateTennis({ dryRun: !req.body?.apply });
+    res.json({ dryRun: !req.body?.apply, ...result });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 router.get('/admin/health', requireAuth, async (req, res) => {
   const user = await db.user.findUnique({ where: { id: req.userId } });
   if (!user || !isAdminEmail(user.email)) {

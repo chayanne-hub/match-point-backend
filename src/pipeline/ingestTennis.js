@@ -51,20 +51,32 @@ async function ingestTennisFixtures() {
   for (const f of fixtures) {
     if (!f.competitorA || !f.competitorB || !f.startTime) { skipped++; continue; }
 
-    // Don't duplicate a match the Odds API already supplied. Same two
-    // players starting within three hours is the same match.
+    /* DEDUPE against every candidate in the window, not just one.
+     *
+     * This previously used findFirst() over a +/-3h window with no name
+     * filter, then compared names against whatever single row came back.
+     * On a busy tennis slate that window holds dozens of matches, so the
+     * one row returned was almost never the right one, the name check
+     * failed, and a duplicate was created — the provider lists the same
+     * fixture under several consecutive ids (1477/1478/1479 were all the
+     * same match), so the same match landed two or three times.
+     *
+     * Fetching all candidates and searching them is the same approach
+     * applyTennisLiveState() already used correctly. */
     const windowStart = new Date(f.startTime.getTime() - 3 * 60 * 60 * 1000);
     const windowEnd = new Date(f.startTime.getTime() + 3 * 60 * 60 * 1000);
-    const existing = await db.match.findFirst({
+    const candidates = await db.match.findMany({
       where: {
         sportId: sport.id,
         startTime: { gte: windowStart, lte: windowEnd },
         NOT: { externalId: f.sourceId },
       },
     });
-    if (existing &&
-        ((namesLikelyMatch(existing.competitorA, f.competitorA) && namesLikelyMatch(existing.competitorB, f.competitorB)) ||
-         (namesLikelyMatch(existing.competitorA, f.competitorB) && namesLikelyMatch(existing.competitorB, f.competitorA)))) {
+    const existing = candidates.find((c) =>
+      (namesLikelyMatch(c.competitorA, f.competitorA) && namesLikelyMatch(c.competitorB, f.competitorB)) ||
+      (namesLikelyMatch(c.competitorA, f.competitorB) && namesLikelyMatch(c.competitorB, f.competitorA)));
+
+    if (existing) {
       // Already have it from the other provider. Enrich rather than
       // duplicate: the tour level is the one thing only this feed knows.
       if (existing.tourLevel === null || existing.tourLevel === undefined) {
@@ -161,4 +173,64 @@ async function applyTennisLiveState() {
   return { matched, unmatched };
 }
 
-module.exports = { ingestTennisFixtures, applyTennisLiveState };
+/**
+ * Remove duplicate tennis fixtures created by the old dedup bug.
+ *
+ * The provider lists the same match under several consecutive ids. The
+ * previous dedup compared names against one arbitrary row from a wide
+ * time window, so it almost never matched and duplicates were created —
+ * 41 of them, inflating the board from ~40 tennis matches to 123.
+ *
+ * Keeps the row that has the most attached to it (a pick, or a live
+ * status) rather than blindly keeping the lowest id, so cleaning up can't
+ * throw away an analysed pick. Only ever removes rows with NO picks.
+ */
+async function cleanupDuplicateTennis({ dryRun = true } = {}) {
+  const sport = await db.sport.findFirst({ where: { slug: 'tennis' } });
+  if (!sport) return { groups: 0, removed: 0 };
+
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const matches = await db.match.findMany({
+    where: { sportId: sport.id, startTime: { gte: since } },
+    include: { picks: { select: { id: true } } },
+  });
+
+  // Group by normalised player pair + start time.
+  const groups = new Map();
+  for (const m of matches) {
+    const pair = [m.competitorA, m.competitorB].map((n) => String(n).toLowerCase().trim()).sort().join('|');
+    const key = `${pair}@${m.startTime.toISOString()}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(m);
+  }
+
+  let removed = 0, dupGroups = 0;
+  for (const [key, rows] of groups) {
+    if (rows.length < 2) continue;
+    dupGroups++;
+
+    // Keep the most valuable row: one with picks first, then live status,
+    // then the earliest created.
+    rows.sort((a, b) => {
+      if (a.picks.length !== b.picks.length) return b.picks.length - a.picks.length;
+      const rank = (s) => (s === 'final' ? 2 : s === 'live' ? 1 : 0);
+      if (rank(a.status) !== rank(b.status)) return rank(b.status) - rank(a.status);
+      return String(a.externalId).localeCompare(String(b.externalId));
+    });
+
+    const [keep, ...drop] = rows;
+    for (const d of drop) {
+      // Never delete a row that carries a pick — that would silently
+      // destroy a graded result.
+      if (d.picks.length) { console.warn(`[tennisCleanup] keeping ${d.externalId}, it has ${d.picks.length} pick(s)`); continue; }
+      if (!dryRun) await db.match.delete({ where: { id: d.id } });
+      removed++;
+    }
+    if (dryRun) console.log(`[tennisCleanup] would keep ${keep.externalId}, drop ${drop.map((d) => d.externalId).join(', ')}`);
+  }
+
+  console.log(`[tennisCleanup] ${dupGroups} duplicate group(s), ${removed} row(s) ${dryRun ? 'would be' : ''} removed`);
+  return { groups: dupGroups, removed };
+}
+
+module.exports = { ingestTennisFixtures, applyTennisLiveState, cleanupDuplicateTennis };
