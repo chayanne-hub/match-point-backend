@@ -459,6 +459,23 @@ async function shapePick(p, userId) {
     // Redact the actual pick and confidence until purchased/subscribed
     selection: unlocked ? p.selection : null,
     confidence: unlocked ? p.confidence : null,
+    /* BLEND COMPONENTS.
+     *
+     * `confidence` is the blended number the pick is made on. These two
+     * are the inputs that produced it: the model's own estimate formed
+     * without seeing the price, and the de-vigged market probability.
+     *
+     * Both are stored on every pick but were never exposed here, which
+     * made the blend unmeasurable — the whole reason for keeping both was
+     * to score model-alone against market-alone against blended once
+     * enough picks have graded, and that can't be done from data the API
+     * doesn't return.
+     *
+     * Redacted with the pick itself: they'd let a non-member reconstruct
+     * the confidence figure.
+     */
+    rawConfidence: unlocked ? (p.rawConfidence ?? null) : null,
+    marketProb: unlocked ? (p.marketProb ?? null) : null,
     rationale: unlocked ? p.rationale : null,
     odds: p.odds,
     entryOdds: p.entryOdds ?? null,
@@ -1923,13 +1940,14 @@ router.post('/admin/cleanup-tennis-duplicates', requireAuth, async (req, res) =>
   const user = await db.user.findUnique({ where: { id: req.userId } });
   if (!user || !isAdminEmail(user.email)) return res.status(403).json({ error: 'Admins only.' });
   try {
-    const { cleanupDuplicateTennis, markUnpriceableTennis } = require('../pipeline/ingestTennis.js');
+    const { cleanupDuplicateTennis, unflagLowerTierTennis } = require('../pipeline/ingestTennis.js');
     const dryRun = !req.body?.apply;
-    // Both repairs run together: de-duplicate, then stop the analyst
-    // retrying tiers that have no pregame price from either provider.
+    // De-duplicate, then return lower-tier rows to the analysis queue —
+    // they were flagged unanalysable before the opening-odds endpoint was
+    // found, which was a wrong call and needs undoing.
     const dupes = await cleanupDuplicateTennis({ dryRun });
-    const unpriceable = await markUnpriceableTennis({ dryRun });
-    res.json({ dryRun, duplicates: dupes, unpriceable });
+    const unflagged = await unflagLowerTierTennis({ dryRun });
+    res.json({ dryRun, duplicates: dupes, unflagged });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
