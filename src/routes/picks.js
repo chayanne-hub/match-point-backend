@@ -450,6 +450,12 @@ async function shapePick(p, userId) {
     id: p.id,
     sport: p.match.sport.slug,
     league: p.match.league,
+    /* Competition tier signal. sportKey distinguishes NFL preseason from
+     * regular season — different reasoning entirely (playing-time intent,
+     * not standings), so a member should read a preseason pick
+     * differently. Exposed so the board can say so rather than presenting
+     * every pick as equivalent. */
+    sportKey: p.match.sportKey ?? null,
     matchup: `${p.match.competitorA} vs ${p.match.competitorB}`,
     startTime: p.match.startTime,
     pickType: p.pickType,
