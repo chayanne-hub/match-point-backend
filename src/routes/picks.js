@@ -1177,15 +1177,45 @@ router.get('/admin/backtest', requireAuth, async (req, res) => {
       return o > 0 ? 100 / (o + 100) : Math.abs(o) / (Math.abs(o) + 100);
     };
 
-    const picks = await db.pick.findMany({
+    /* MUST match how /stats counts, or the two disagree about the same
+     * record on the same screen.
+     *
+     * pickType filter + per-match dedupe are both load-bearing: a single
+     * call was historically written as TWO Pick rows — 'winner' and
+     * 'model' — with identical selection, odds and outcome whenever it
+     * cleared the edge threshold. Counting both double-weights every
+     * above-threshold match, which inflates the sample AND distorts every
+     * segment ROI, because the duplicates are not evenly spread across
+     * price bands or sports.
+     *
+     * This was wrong in the first version of this endpoint. It reported
+     * 765 graded picks where /stats reports 510, and the segment figures
+     * it produced were used to make real decisions. */
+    const rawPicks = await db.pick.findMany({
       where: {
         result: { isNot: null },
+        pickType: { in: ['model', 'winner'] },
         ...(market !== 'all' ? { market } : {}),
         ...(days ? { createdAt: { gte: new Date(Date.now() - days * 864e5) } } : {}),
       },
       include: { result: true, match: { include: { sport: true } } },
       orderBy: { createdAt: 'asc' },
     });
+
+    /* One row per match+market, preferring the 'model' row — same rule
+     * dedupeResultsByMatch applies for /stats. Keyed by market too, since
+     * a match can legitimately carry separate moneyline/spread/total
+     * picks that are NOT duplicates of each other. */
+    const byMatchMarket = new Map();
+    for (const p of rawPicks) {
+      const key = `${p.matchId}|${p.market}`;
+      const existing = byMatchMarket.get(key);
+      if (!existing || (existing.pickType !== 'model' && p.pickType === 'model')) {
+        byMatchMarket.set(key, p);
+      }
+    }
+    const picks = [...byMatchMarket.values()];
+    const duplicatesDropped = rawPicks.length - picks.length;
 
     const rows = picks
       .filter((p) => !sport || p.match?.sport?.slug === sport)
@@ -1290,6 +1320,19 @@ router.get('/admin/backtest', requireAuth, async (req, res) => {
 
     res.json({
       filters: { sport, days: days || 'all', market, stake: STAKE },
+      /* Reconciliation against /stats. Note /stats ALSO excludes
+       * DEVELOPING_SPORTS (football, soccer) from its published figures,
+       * which this endpoint deliberately does not — internal analysis
+       * wants to see them. So expect this n to exceed the published
+       * sample by however many graded picks those sports carry. */
+      counting: {
+        gradedRowsBeforeDedupe: rawPicks.length,
+        duplicatesDropped,
+        note: duplicatesDropped
+          ? 'legacy winner/model pairs collapsed to one row per match+market'
+          : 'no duplicate pairs found',
+        includesDevelopingSports: true,
+      },
       overall,
       breakEvenWinRate,
       // Positive means the picks are beating the prices paid for them.
