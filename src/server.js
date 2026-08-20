@@ -7,7 +7,7 @@ const authRoutes = require('./routes/auth');
 const checkoutRoutes = require('./routes/checkout');
 const webhookRoutes = require('./routes/webhooks');
 const picksRoutes = require('./routes/picks');
-const { startWatchdog, startReactiveOdds, startScheduled, startLiveScheduled, startEspnScheduled } = require('./pipeline/cron');
+const { startWatchdog, startReactiveOdds, startScheduled, startLiveScheduled, startEspnScheduled, startTennisUpcomingScheduled } = require('./pipeline/cron');
 const { startTennisLive } = require('./pipeline/tennisLiveRunner');
 const { initLiveSocket } = require('./lib/liveSocket');
 
@@ -62,6 +62,11 @@ startScheduled();
 // re-enabling it is a real, deliberate, ongoing spend, not free.
 startLiveScheduled();
 startEspnScheduled();
+
+/* Lower-tier tennis pricing runs on its own short cycle — the provider's
+ * priced window is only a few hours wide, so the 15-minute pipeline missed
+ * most Challengers entirely. */
+startTennisUpcomingScheduled();
 
 /* TENNIS LIVE SOCKET.
  *

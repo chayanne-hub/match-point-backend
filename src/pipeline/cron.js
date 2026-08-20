@@ -891,30 +891,7 @@ async function runAll() {
    * backlog can't consume a whole cycle, and it only touches rows that
    * already have a price — an unpriced row is skipped rather than burned.
    */
-  /* LOWER-TIER TENNIS.
-   *
-   * reanalyzeUpcoming() can't do this job: it sources prices by
-   * re-fetching from the odds provider, which carries no Challenger or
-   * ITF, so every lower-tier match hit `failed++; continue;` regardless
-   * of how often it ran.
-   *
-   * This pass gets both the fixture list and the price from SportsAPI365
-   * and hands them to the same analyzeMatchWithRetry with the same
-   * parameter shape — so a Challenger pick is produced by identical
-   * reasoning, and blended against the market the same way, as a
-   * main-tour one.
-   *
-   * analyze and blend are injected rather than imported on the other side,
-   * because cron.js owns the concurrency slots and the retry policy, and
-   * importing them there would create a require cycle.
-   */
-  await analyzeTennisUpcoming({
-    analyze: analyzeMatchWithRetry,
-    blend: blendWithMarket,
-    limit: Number(process.env.TENNIS_ANALYSE_LIMIT) || 15,
-  }).catch((err) => {
-    console.error('[pipeline] tennis upcoming analysis failed:', err.message);
-  });
+
   // Concurrent, not sequential — SPORTS order used to double as processing
   // order, which meant a heavy day for one sport (30 tennis matches, each
   // a real API call) could eat the entire cycle before sports later in
@@ -1659,6 +1636,48 @@ function startReactiveOdds() {
   console.log(`[live-reactive] watching for scoring events (cooldown ${Math.round(REACTIVE_COOLDOWN_MS / 1000)}s per sport).`);
 }
 
+/**
+ * LOWER-TIER TENNIS, on a short cycle.
+ *
+ * The provider's `extend/api` group — the only place Challenger and ITF
+ * prices exist — lists roughly 14 matches at a time, a narrow window near
+ * start time rather than the whole day. On the 15-minute pipeline cycle a
+ * match could enter and leave that window entirely unseen, which is why
+ * a full slate of Challengers sat unanalysed while the same matches
+ * returned prices fine when queried by hand.
+ *
+ * Running every two minutes means a match is caught while it is still in
+ * the window. The cost is bounded: the pass only analyses rows that have
+ * no pick, so once a match is picked it is never reconsidered, and most
+ * cycles do nothing at all.
+ */
+let tennisPassRunning = false;
+
+function startTennisUpcomingScheduled() {
+  const intervalMs = Number(process.env.TENNIS_UPCOMING_INTERVAL_MS) || 120000;
+
+  const tick = () => {
+    // Same overlap guard the live pipeline uses. A slow pass must not
+    // stack on itself and analyse the same match twice — that would be
+    // duplicate paid calls for one pick.
+    if (tennisPassRunning) return;
+    tennisPassRunning = true;
+    analyzeTennisUpcoming({
+      analyze: analyzeMatchWithRetry,
+      blend: blendWithMarket,
+      limit: Number(process.env.TENNIS_ANALYSE_LIMIT) || 8,
+    })
+      .catch((err) => console.error('[tennis-upcoming] run failed:', err.message))
+      .finally(() => { tennisPassRunning = false; });
+  };
+
+  setInterval(tick, intervalMs);
+  console.log(`[tennis-upcoming] scheduled every ${Math.round(intervalMs / 1000)}s.`);
+  // setInterval waits a full interval before its first fire; kick one off
+  // shortly after boot so a restart doesn't cost a whole window.
+  setTimeout(tick, 20000);
+}
+
 function startLiveScheduled() {
   const intervalMs = Number(process.env.LIVE_PIPELINE_INTERVAL_MS) || 900000; // 15 minutes — cost-conscious default pre-revenue; drop LIVE_PIPELINE_INTERVAL_MS lower once picks are actually selling
   setInterval(() => {
@@ -1970,4 +1989,5 @@ function startEspnScheduled() {
 
 module.exports = {
   ingestTennisFixtures,
+  startTennisUpcomingScheduled,
   updateTennisLiveState, runAll, reanalyzeUpcoming, startWatchdog, startReactiveOdds, startScheduled, startLiveScheduled, startEspnScheduled, triggerManualRun, triggerManualRunTomorrow };
