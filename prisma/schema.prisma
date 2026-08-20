@@ -96,6 +96,11 @@ model Match {
   startTime    DateTime
   status       String   // "scheduled" | "live" | "final" | "postponed"
   surface      String?  // tennis only
+  /// Tour tier, tennis only: 0 = ITF, 1 = ATP Challenger, 2/3 = main tour.
+  /// Only the SportsAPI365 feed reports this — the odds provider carries no
+  /// tier concept at all, which is why a Challenger and a Masters match
+  /// were previously indistinguishable on the board.
+  tourLevel    Int?
   venue        String?
   liveScore    String?  // free-text live score snapshot, updated by the live poller
   liveClock    String?  // "Q3 8:42", "62'", "Top 6th", "Set 2", etc. — display only

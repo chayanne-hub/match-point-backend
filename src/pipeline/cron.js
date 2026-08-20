@@ -45,6 +45,8 @@ function releaseAnalysisSlot() {
   if (next) next();
 }
 
+const { ingestTennisFixtures, applyTennisLiveState } = require('./ingestTennis.js');
+
 async function analyzeMatchWithRetry(params, context) {
   // Held across BOTH the first attempt and the retry — a failing match
   // occupies one slot for its whole up-to-180-second lifetime rather
@@ -860,6 +862,19 @@ async function runAll() {
   // bounded, but a fixed outage no longer leaves matches unanalysable.
   await clearStaleFailureCounters();
   await ensureSportRows();
+
+  // TENNIS SECOND SOURCE. Pulled before the per-sport runs so anything new
+  // is already a Match row when the analyst reaches tennis. This is the
+  // only source for ATP Challenger and ITF — the odds provider carries
+  // neither on any plan.
+  //
+  // Wrapped in its own catch: a second provider must never be able to
+  // take down the slate for all five sports. If it fails we lose the
+  // extra tiers for a cycle and nothing else.
+  await ingestTennisFixtures().catch((err) => {
+    console.error('[pipeline] tennis ingest failed:', err.message);
+    recordError(`tennis ingest failed: ${err.message}`);
+  });
   // Concurrent, not sequential — SPORTS order used to double as processing
   // order, which meant a heavy day for one sport (30 tennis matches, each
   // a real API call) could eat the entire cycle before sports later in
@@ -1484,6 +1499,20 @@ async function updateLivePicksForSport(sportSlug, onlyKeys) {
   return liveMatches.length;
 }
 
+/**
+ * Live tennis state from the second provider. Runs alongside the ESPN
+ * poller rather than replacing it: ESPN covers all five sports, this
+ * covers the tennis tiers ESPN doesn't carry and adds set scores for
+ * matches ESPN never sees.
+ */
+async function updateTennisLiveState() {
+  try {
+    await applyTennisLiveState();
+  } catch (err) {
+    console.error('[pipeline] tennis live state failed:', err.message);
+  }
+}
+
 async function updateLivePicks() {
   recordLiveCycleStart();
   let totalReassessed = 0;
@@ -1600,6 +1629,11 @@ function startLiveScheduled() {
     }
     liveIsRunning = true;
     updateLivePicks()
+      // Tennis live state runs after the main live pass, on the same tick.
+      // It is cheap — one call to the second provider, no per-match cost —
+      // and its own catch means a failure here cannot mark the live cycle
+      // as failed or block the heartbeat.
+      .then(() => updateTennisLiveState())
       .then(() => beat('Live odds'))
       .catch(err => console.error('[live-pipeline] run failed:', err))
       .finally(() => { liveIsRunning = false; });
@@ -1894,4 +1928,6 @@ function startEspnScheduled() {
   console.log('[espn-pipeline] scheduled to run every 15 seconds.');
 }
 
-module.exports = { runAll, reanalyzeUpcoming, startWatchdog, startReactiveOdds, startScheduled, startLiveScheduled, startEspnScheduled, triggerManualRun, triggerManualRunTomorrow };
+module.exports = {
+  ingestTennisFixtures,
+  updateTennisLiveState, runAll, reanalyzeUpcoming, startWatchdog, startReactiveOdds, startScheduled, startLiveScheduled, startEspnScheduled, triggerManualRun, triggerManualRunTomorrow };
