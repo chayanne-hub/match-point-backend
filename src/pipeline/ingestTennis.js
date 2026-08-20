@@ -335,7 +335,7 @@ async function markUnpriceableTennis({ dryRun = true } = {}) {
   const rows = await db.match.findMany({
     where: {
       sportId: sport.id,
-      skipAnalysis: false,
+      skipAnalysis: true,
       tourLevel: { in: [0, 1] },
       startTime: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
     },
@@ -346,7 +346,7 @@ async function markUnpriceableTennis({ dryRun = true } = {}) {
   if (!dryRun && targets.length) {
     await db.match.updateMany({
       where: { id: { in: targets.map((t) => t.id) } },
-      data: { skipAnalysis: true },
+      data: { skipAnalysis: false },
     });
   }
   console.log(`[tennisIngest] ${targets.length} unpriceable row(s) ${dryRun ? 'would be' : ''} flagged (of ${rows.length} lower-tier)`);
