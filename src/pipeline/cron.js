@@ -83,10 +83,17 @@ const MODEL_PICK_THRESHOLD = 65;
 
 /* SPORTS the pregame pipeline actually analyses.
  *
- * Baseball is disabled by default on evidence, not instinct: across 198
- * graded picks it returned -8.61% ROI (-$1,705 at $100 flat), against a
- * whole-book loss of -$1,044. Every other sport combined was positive.
- * Dropping it is the single change that flips the book profitable.
+ * Baseball is disabled on evidence: across 198 graded picks it returned
+ * -8.61% ROI (-$1,705 at $100 flat), against a whole-book loss of
+ * -$1,044. Dropping it is the single change that flips the book
+ * profitable.
+ *
+ * Soccer is disabled by DECISION, not by the numbers — worth stating
+ * plainly, because the backtest says the opposite. It was the best
+ * segment on record: +20.26% ROI, +$648 over 39 picks. But only 32 of
+ * those were decided (soccer draws push the moneyline), which is a
+ * sample small enough that +20% is inside the noise. Turn it back on by
+ * removing it from DISABLED_SPORTS if the coverage is wanted.
  *
  * Env-driven rather than deleted, for two reasons: the finding is
  * in-sample (the losing bucket was identified after seeing the results,
@@ -97,7 +104,7 @@ const MODEL_PICK_THRESHOLD = 65;
  * Note this stops ANALYSIS — it does not delete graded history, and the
  * record on the site still includes every baseball pick already made. */
 const ALL_SPORTS = ['tennis', 'basketball', 'soccer', 'baseball', 'football'];
-const DISABLED_SPORTS = (process.env.DISABLED_SPORTS ?? 'baseball')
+const DISABLED_SPORTS = (process.env.DISABLED_SPORTS ?? 'baseball,soccer')
   .split(',').map((x) => x.trim().toLowerCase()).filter(Boolean);
 const SPORTS = ALL_SPORTS.filter((s) => !DISABLED_SPORTS.includes(s));
 if (DISABLED_SPORTS.length) {
