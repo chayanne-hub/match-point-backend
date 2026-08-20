@@ -8,6 +8,7 @@ const checkoutRoutes = require('./routes/checkout');
 const webhookRoutes = require('./routes/webhooks');
 const picksRoutes = require('./routes/picks');
 const { startWatchdog, startReactiveOdds, startScheduled, startLiveScheduled, startEspnScheduled } = require('./pipeline/cron');
+const { startTennisLive } = require('./pipeline/tennisLiveRunner');
 const { initLiveSocket } = require('./lib/liveSocket');
 
 const app = express();
@@ -61,3 +62,18 @@ startScheduled();
 // re-enabling it is a real, deliberate, ongoing spend, not free.
 startLiveScheduled();
 startEspnScheduled();
+
+/* TENNIS LIVE SOCKET.
+ *
+ * Point-level scores and live prices arrive by push, not polling — the
+ * REST poller runs on a multi-minute interval, which is fine for sets and
+ * useless for points. This is the only path that makes "30-15" honest.
+ *
+ * Deliberately fire-and-forget with its own catch: a live feed must never
+ * be able to stop the server booting. If the socket is unreachable the
+ * board simply falls back to set scores from the REST poller, which is
+ * exactly the behaviour before this existed.
+ */
+startTennisLive().catch((err) => {
+  console.error('[server] tennis live socket failed to start:', err.message);
+});

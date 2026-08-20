@@ -101,6 +101,28 @@ model Match {
   /// tier concept at all, which is why a Challenger and a Masters match
   /// were previously indistinguishable on the board.
   tourLevel    Int?
+  /// LIVE POINT-LEVEL STATE, tennis only, pushed over the SportsAPI365
+  /// socket. The odds provider and ESPN both stop at games and sets, so
+  /// none of this existed before.
+  ///
+  /// livePoints is the score WITHIN the current game ("30-15", "40-A").
+  /// liveServing is "A" or "B". liveStateAt timestamps the push — the
+  /// frontend must gate display on it, because a point score is stale
+  /// within about a minute and a stale one shown as live is worse than
+  /// showing nothing.
+  livePoints   String?
+  liveServing  String?
+  liveStateAt  DateTime?
+  /// Live moneyline from the socket, American odds. Kept apart from the
+  /// pregame `oddsA`/`oddsB` of record so grading is never contaminated
+  /// by an in-play price.
+  liveOddsA    Int?
+  liveOddsB    Int?
+  liveOddsBook String?
+  /// First-serve points won, per player. The physical tell behind most
+  /// in-match reversals — it moves before the scoreline does.
+  firstServeWonA Int?
+  firstServeWonB Int?
   venue        String?
   liveScore    String?  // free-text live score snapshot, updated by the live poller
   liveClock    String?  // "Q3 8:42", "62'", "Top 6th", "Set 2", etc. — display only
