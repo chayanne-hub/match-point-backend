@@ -283,6 +283,38 @@ async function fetchUpcomingEvents(tour = 'atp') {
  * response and are available later — only the moneyline is taken here,
  * because that is what the pipeline grades on.
  */
+/**
+ * Resolve one of OUR stored rows to an extend-space event id.
+ *
+ * The provider runs two disjoint id spaces. Fixtures (what we ingest and
+ * store as `sa365:1466`) live in core space. Odds live in extend space
+ * (`3841355`). Nothing in a fixture payload carries its extend id, so a
+ * stored row has no route to a price without this lookup.
+ *
+ * `extend/api/event/get/{p1}/{p2}/{date}` bridges the two by name. It
+ * only resolves matches that exist in extend space, so a null here is a
+ * real answer — that match simply isn't priced — not an error.
+ */
+async function resolveExtendId(competitorA, competitorB, startTime) {
+  if (!competitorA || !competitorB || !startTime) return null;
+  const date = new Date(startTime).toISOString().slice(0, 10);
+  const p1 = encodeURIComponent(competitorA.trim());
+  const p2 = encodeURIComponent(competitorB.trim());
+
+  for (const [a, b] of [[p1, p2], [p2, p1]]) { // feed may list either side first
+    let body;
+    try {
+      body = await apiGet(`extend/api/event/get/${a}/${b}/${date}`);
+    } catch {
+      continue;
+    }
+    const row = body?.results || body?.result || body;
+    const id = row?.id || (Array.isArray(row) ? row[0]?.id : null);
+    if (id) return String(id);
+  }
+  return null;
+}
+
 async function fetchPreMatchOdds(eventId) {
   let body;
   try {
@@ -439,6 +471,7 @@ async function discoverOddsPath(sampleEventId) {
 }
 
 module.exports = {
+  resolveExtendId,
   apiGet,
   fetchUpcomingEvents,
   fetchPreMatchOdds,

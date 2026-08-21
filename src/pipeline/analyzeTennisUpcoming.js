@@ -18,7 +18,7 @@
  * Nothing here touches the existing pipeline's path.
  */
 
-const { fetchUpcomingEvents, fetchPreMatchOdds } = require('./fetchTennisApi.js');
+const { fetchUpcomingEvents, resolveExtendId, fetchPreMatchOdds } = require('./fetchTennisApi.js');
 const { buildFactorBrief, renderFactorBrief } = require('./tennisFactors.js');
 const { namesLikelyMatch } = require('./fetchEspn.js');
 const db = require('../lib/db.js');
@@ -37,15 +37,20 @@ async function analyzeTennisUpcoming({ analyze, blend, limit = 15 } = {}) {
   const sport = await db.sport.findFirst({ where: { slug: 'tennis' } });
   if (!sport) return { analysed: 0, skipped: 0 };
 
-  let events = [];
-  for (const tour of ['atp', 'wta']) {
-    try {
-      events.push(...await fetchUpcomingEvents(tour));
-    } catch (err) {
-      console.warn(`[tennisUpcoming] ${tour} fetch failed: ${err.message}`);
-    }
-  }
-  if (!events.length) return { analysed: 0, skipped: 0 };
+  /* DRIVEN BY OUR ROWS, NOT BY THE FEED.
+   *
+   * This used to iterate `fetchUpcomingEvents('atp'|'wta')` and look for
+   * a stored row matching each event. That feed is a small extend-space
+   * window (a handful at a time) and is mostly MAIN TOUR — which we no
+   * longer ingest, since ESPN owns that tier now. So the loop spent its
+   * whole run failing to match matches we deliberately don't store,
+   * reporting "5 skipped", while 91 Challenger and ITF rows that we DO
+   * hold were never even looked at.
+   *
+   * Inverting it fixes the mismatch: start from the lower-tier rows that
+   * need a pick, and resolve each one forward to an extend id for
+   * pricing. The feed is no longer the source of truth about what we
+   * care about — our own board is. */
 
   // Only matches we already hold, that have no moneyline pick yet.
   const since = new Date(Date.now() - 2 * 60 * 60 * 1000);
@@ -63,13 +68,31 @@ async function analyzeTennisUpcoming({ analyze, blend, limit = 15 } = {}) {
 
   let analysed = 0, skipped = 0, unpriced = 0;
 
-  for (const ev of events) {
+  // Nearest first: a match starting soon is the one worth a price now.
+  candidates.sort((a, b) => new Date(a.startTime) - new Date(b.startTime));
+
+  for (const match of candidates) {
     if (analysed >= limit) break;
 
-    const match = candidates.find((m) =>
-      (namesLikelyMatch(m.competitorA, ev.competitorA) && namesLikelyMatch(m.competitorB, ev.competitorB)) ||
-      (namesLikelyMatch(m.competitorA, ev.competitorB) && namesLikelyMatch(m.competitorB, ev.competitorA)));
-    if (!match) { skipped++; continue; }
+    const extendId = await resolveExtendId(match.competitorA, match.competitorB, match.startTime)
+      .catch(() => null);
+    if (!extendId) { unpriced++; continue; }   // not in extend space = not priced yet
+
+    /* The body below reads eventId, matchId and tour off `ev`. When the
+       loop was driven by the feed those arrived with the payload; now we
+       build the row ourselves, so every field it reads must be supplied
+       here or it silently becomes undefined. matchId is unavailable on
+       this path — the factor lookups degrade to null ids rather than
+       splitting a string that doesn't exist. */
+    const ev = {
+      id: extendId,
+      eventId: extendId,
+      matchId: null,
+      tour: (match.tourLevel === 0 || match.tourLevel === 1) ? 'atp' : 'atp',
+      competitorA: match.competitorA,
+      competitorB: match.competitorB,
+      league: match.league || null,   // read further down for the log line
+    };
 
     // The feed may list the players the other way round from our row.
     // Prices are per-position, so they have to be swapped with them or the
