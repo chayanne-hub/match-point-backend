@@ -382,7 +382,12 @@ async function cleanupDuplicateTennis({ dryRun = true } = {}) {
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
   const matches = await db.match.findMany({
     where: { sportId: sport.id, startTime: { gte: since } },
-    include: { picks: { select: { id: true } } },
+    // pickType and market are REQUIRED here: the dedupe below compares
+    // them to decide whether a duplicate's pick is already covered by
+    // the row we keep. Selecting only `id` would leave both undefined,
+    // every pick would compare as equal, and real picks would be deleted
+    // as false duplicates.
+    include: { picks: { select: { id: true, pickType: true, market: true } } },
   });
 
   // Group by normalised player pair + start time.
@@ -417,10 +422,31 @@ async function cleanupDuplicateTennis({ dryRun = true } = {}) {
     });
 
     const [keep, ...drop] = rows;
+
+    /* A duplicate pick is a DOUBLE COUNT, not a result to protect.
+     *
+     * This refused to delete any row carrying a pick, to avoid
+     * destroying a graded result. But when the row we are keeping holds
+     * the same pick, the duplicate is the identical wager recorded
+     * twice — it appeared twice in the activity feed and counted twice
+     * in the win rate, inflating the sample and double-weighting one
+     * outcome.
+     *
+     * So: drop the duplicate when the keeper already covers it. If the
+     * duplicate carries a pick the keeper does NOT have, that is real
+     * data and the row still survives, exactly as before. */
+    const keepCovers = (pick) => keep.picks.some(
+      (k) => k.pickType === pick.pickType && k.market === pick.market);
+
     for (const d of drop) {
-      // Never delete a row that carries a pick — that would silently
-      // destroy a graded result.
-      if (d.picks.length) { console.warn(`[tennisCleanup] keeping ${d.externalId}, it has ${d.picks.length} pick(s)`); continue; }
+      if (d.picks.length) {
+        const uncovered = d.picks.filter((pk) => !keepCovers(pk));
+        if (uncovered.length) {
+          console.warn(`[tennisCleanup] keeping ${d.externalId}: ${uncovered.length} pick(s) the kept row does not have`);
+          continue;
+        }
+        console.log(`[tennisCleanup] dropping ${d.externalId}: its ${d.picks.length} pick(s) duplicate ${keep.externalId}`);
+      }
       if (!dryRun) await db.match.delete({ where: { id: d.id } });
       removed++;
     }
