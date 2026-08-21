@@ -17,18 +17,8 @@
  * play, then join individual events for the matches we hold picks on.
  */
 
-/* The DEFAULT here was the doubled path straight out of their docs —
- * /v1/tennis/v1/tennis/... — which 404s. Their gateway strips /v1/tennis
- * and re-prefixes /tennis/v2, so the documented URL resolves to nonsense.
- *
- * That only ever worked because TENNIS_WS_TOKEN_URL was set in the
- * environment to override it. The moment that variable was missing, the
- * fallback took over, the token request 404'd, and the socket silently
- * never connected — taking live tennis odds with it. A broken default is
- * worse than no default: it fails only in the environment where nobody
- * is watching. */
 const TOKEN_URL = process.env.TENNIS_WS_TOKEN_URL ||
-  'https://api.sportsapi365.com/v1/tennis/extend/api/socket-creds/ws-token';
+  'https://api.sportsapi365.com/v1/tennis/v1/tennis/extend/api/socket-creds/ws-token';
 const SOCKET_HOST = process.env.TENNIS_WS_HOST || 'https://live-tennis.sportsapi365.com';
 const KEY = process.env.TENNIS_API_KEY || '';
 
@@ -47,21 +37,10 @@ async function getWsToken() {
     method: 'GET',
     headers: { 'X-Gravitee-Api-Key': KEY, 'Content-Type': 'application/json' },
   });
-  if (!res.ok) {
-    console.error(`[tennisLive] TOKEN REQUEST FAILED ${res.status} at ${TOKEN_URL}`);
-    console.error('[tennisLive] live tennis odds are DOWN until this resolves');
-    throw new Error(`[tennisLive] token request failed: ${res.status}`);
-  }
+  if (!res.ok) throw new Error(`[tennisLive] token request failed: ${res.status}`);
   const body = await res.json();
   const token = body?.token;
-  if (!token) {
-    // Their gateway answers 200 for unknown routes with the real status in
-    // the body, so a successful-looking response with no token is the
-    // normal shape of a wrong URL here.
-    console.error(`[tennisLive] no token in response from ${TOKEN_URL}: ${JSON.stringify(body).slice(0, 200)}`);
-    throw new Error('[tennisLive] token missing from response');
-  }
-  console.log('[tennisLive] token acquired');
+  if (!token) throw new Error('[tennisLive] token missing from response');
   return token;
 }
 
@@ -166,24 +145,52 @@ async function subscribeAllLive(onUpdate) {
  * Returns an unsubscribe function; always call it on cleanup or the
  * server keeps streaming a match nobody is watching.
  */
+// Which events are currently subscribed on the shared socket. Used to
+// decide whether an odds push (which carries no id) is attributable.
+const subscribedEvents = new Set();
+
 async function subscribeEvent(eventId, { onScore, onOdds } = {}) {
   const socket = await connect();
   if (!socket) return () => {};
 
+  /* ATTRIBUTION.
+   *
+   * Every joined match registers its own handlers on the SAME shared
+   * socket. `event-update` carries an eventId, so each handler can check
+   * the push is its own — without that check, five joined matches means
+   * five handlers all firing on every push.
+   *
+   * `odds-update` carries NO eventId (verified against a live payload:
+   * just `{results:{"Full Time Result":{od1,od2,...}}}`). So on a shared
+   * socket a price CANNOT be attributed, and writing it to every joined
+   * match would put one match's odds on five rows — silently wrong data,
+   * which is worse than none. We only accept an odds push when exactly
+   * one event is subscribed, where it is unambiguous by definition. */
   const scoreHandler = (data) => {
     if (!onScore) return;
+    const id = data?.eventId ?? data?.id;
+    if (id !== undefined && String(id) !== String(eventId)) return;  // not ours
     try { onScore(data); } catch (e) { console.error(`[tennisLive] score handler: ${e.message}`); }
   };
+
   const oddsHandler = (data) => {
     if (!onOdds) return;
+    const id = data?.eventId ?? data?.id;
+    if (id !== undefined) {
+      if (String(id) !== String(eventId)) return;                    // attributable
+    } else if (subscribedEvents.size > 1) {
+      return;  // ambiguous — refuse rather than mis-assign
+    }
     try { onOdds(data); } catch (e) { console.error(`[tennisLive] odds handler: ${e.message}`); }
   };
 
+  subscribedEvents.add(String(eventId));
   socket.on('event-update', scoreHandler);
   socket.on('odds-update', oddsHandler);
   emitBoth(socket, 'join-event', 'eventId', eventId);
 
   return () => {
+    subscribedEvents.delete(String(eventId));
     socket.off('event-update', scoreHandler);
     socket.off('odds-update', oddsHandler);
     emitBoth(socket, 'leave-event', 'eventId', eventId);

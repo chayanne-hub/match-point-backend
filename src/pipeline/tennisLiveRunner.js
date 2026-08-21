@@ -22,6 +22,7 @@ const live = require('./tennisLiveSocket.js');
 const { namesLikelyMatch } = require('./fetchEspn.js');
 const { parseLiveEvent } = require('./fetchTennisApi.js');
 const db = require('../lib/db.js');
+const { broadcastScoreUpdate } = require('../lib/liveSocket.js');
 
 const ENABLED = process.env.TENNIS_SOCKET_ENABLED !== 'false';
 
@@ -41,6 +42,17 @@ const joined = new Map();
  * the ingest read it instead. */
 let liveSnapshot = [];
 let liveSnapshotAt = 0;
+let pushCount = 0;
+let lastPushLog = 0;
+
+/* Watchdog: if the feed goes silent the board freezes with no error
+ * anywhere, because a socket that stops pushing still looks connected.
+ * This is the only thing that turns that silence into a log line. */
+setInterval(() => {
+  if (!liveSnapshotAt) return;
+  const age = Math.round((Date.now() - liveSnapshotAt) / 1000);
+  if (age > 180) console.warn(`[tennisLive] NO feed update for ${age}s — board will be stale`);
+}, 60000).unref?.();
 
 function getLiveSnapshot() {
   // Stale snapshot is worse than none: it would keep finished matches
@@ -107,6 +119,35 @@ async function writeScore(ev, target) {
   if (ev.score) { data.setScore = ev.score; data.liveScore = ev.score; }
 
   await db.match.update({ where: { id: match.id }, data });
+
+  /* PUSH TO THE BROWSER, don't wait for the poll.
+   *
+   * This wrote to the database and stopped. The board's own refresh is
+   * 20 seconds, so a point that turned over three times between polls
+   * showed as one stale value — which is exactly what "frozen" looks
+   * like from the outside, even though the data was arriving fine.
+   *
+   * The browser socket already exists and the terminal already listens
+   * for `score_update` and applies livePoints / liveServing / odds. The
+   * only missing piece was anything calling it for tennis.
+   *
+   * Matched on sport + matchup because that is what the client keys on;
+   * the id it holds is the PICK id, not the match id. Best-effort: a
+   * broadcast failure must never break the DB write above. */
+  try {
+    broadcastScoreUpdate({
+      sport: 'tennis',
+      matchup: `${match.competitorA} vs ${match.competitorB}`,
+      matchStatus: data.status,
+      liveScore: data.liveScore ?? match.liveScore ?? null,
+      setScore: data.setScore ?? match.setScore ?? null,
+      livePoints: data.livePoints,
+      liveServing: data.liveServing,
+      liveStateAt: data.liveStateAt,
+    });
+  } catch (e) {
+    console.error(`[tennisLive] broadcast: ${e.message}`);
+  }
 }
 
 async function writeEventDetail(payload, target) {
@@ -193,6 +234,16 @@ async function startTennisLive() {
         console.error(`[tennisLive] snapshot: ${e.message}`);
       }
 
+      /* Instrumented because "frozen" is ambiguous from the outside.
+       *
+       * A board that stops updating looks the same whether the feed has
+       * gone quiet or whether pushes arrive fine but none of them match
+       * a row we hold. Those need opposite fixes, so the log now
+       * distinguishes them: pushes counts arrivals, matched counts how
+       * many found one of our rows. Silence in this line means the feed
+       * stopped; matched=0 with a healthy count means name matching. */
+      let matched = 0, inPlay = 0;
+
       for (const ev of rows) {
         if (!ev?.id) continue;
         seen.add(ev.id);
@@ -200,9 +251,25 @@ async function startTennisLive() {
         // Cheap write first: the all-feed carries points for every match,
         // so the board stays current even for matches we haven't joined.
         const target = await findMatch(ev).catch(() => null);
-        if (target) await writeScore(ev, target).catch((e) => console.error(`[tennisLive] score write: ${e.message}`));
+        if (target) {
+          matched++;
+          await writeScore(ev, target).catch((e) => console.error(`[tennisLive] score write: ${e.message}`));
+        }
 
-        if (ev.status === 'InPlay') await joinEvent(ev).catch((e) => console.error(`[tennisLive] join: ${e.message}`));
+        if (ev.status === 'InPlay') {
+          inPlay++;
+          await joinEvent(ev).catch((e) => console.error(`[tennisLive] join: ${e.message}`));
+        }
+      }
+
+      pushCount++;
+      const now = Date.now();
+      if (now - lastPushLog > 60000) {   // once a minute, not per push
+        console.log(`[tennisLive] feed: ${pushCount} push(es) in the last minute, ` +
+          `${rows.length} event(s), ${inPlay} in play, ${matched} matched to our board, ` +
+          `${joined.size} joined`);
+        pushCount = 0;
+        lastPushLog = now;
       }
 
       // Anything we're joined to that's no longer in the feed has finished.

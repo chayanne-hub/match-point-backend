@@ -84,6 +84,20 @@ function note(name, args) {
 
   socket.onAny((name, ...args) => {
     note(name, args);
+
+    /* Dump EVERY argument for odds pushes.
+     *
+     * The payload we captured carries no eventId, so with five matches
+     * joined on one socket there is nothing to attribute a price to.
+     * But Socket.IO handlers can receive several arguments and the first
+     * probe only printed args[0] — the id may simply be in the second.
+     * This prints the full argument list so we know which. */
+    if (/odds/i.test(name)) {
+      console.log(`  <= ${name}: ${args.length} argument(s)`);
+      args.forEach((a, i) => console.log(`       arg[${i}]: ${JSON.stringify(a)}`));
+      return;
+    }
+
     if (seenEvents.get(name) <= 2) {
       console.log(`  <= ${name}: ${JSON.stringify(args[0] || '').slice(0, 220)}`);
     }
@@ -99,12 +113,19 @@ function note(name, args) {
      * from there. */
     if (name === 'live-events-all-update') {
       const rows = Array.isArray(args[0]) ? args[0] : (args[0]?.results || []);
+      /* Join exactly ONE match.
+       *
+       * With five joined, every odds push is ambiguous. With one, any
+       * price that arrives can only belong to that match — which tells
+       * us whether attribution is possible at all via one socket per
+       * event. */
+      const limitOne = process.env.PROBE_JOIN_ALL !== 'true';
       for (const ev of rows) {
         if (!ev?.id || ev.status !== 'InPlay' || joinedIds.has(ev.id)) continue;
+        if (limitOne && joinedIds.size >= 1) break;
         joinedIds.add(ev.id);
         socket.emit('join-event', ev.id);
-        socket.emit('join-event', { eventId: ev.id });
-        console.log(`  => join-event ${ev.id}  ${ev.name || ''}`);
+        console.log(`  => join-event ${ev.id}  ${ev.name || ''}  (ONLY this one)`);
       }
     }
   });
