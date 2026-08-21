@@ -321,12 +321,29 @@ async function applyTennisLiveState() {
 async function closeStaleScheduledTennis() {
   const sport = await db.sport.findFirst({ where: { slug: 'tennis' } });
   if (!sport) return { closed: 0 };
-  const cutoff = new Date(Date.now() - 6 * 60 * 60 * 1000);
+  /* Tier-aware cutoff.
+   *
+   * Six hours was a guess sized for a five-set main-tour match. But this
+   * pass only ever handles tiers we own — Challenger and ITF — and those
+   * are best-of-THREE, typically finishing inside two hours. Six hours
+   * left 44 finished matches sitting as `scheduled`, which is the "stuck
+   * match" symptom from the board's point of view.
+   *
+   * Four hours is still roughly double a long best-of-three, so it
+   * closes promptly without risking a match still on court. Main tour
+   * keeps the longer window since ESPN closes those anyway. */
+  const lowerCutoff = new Date(Date.now() - 4 * 60 * 60 * 1000);
+  const mainCutoff = new Date(Date.now() - 8 * 60 * 60 * 1000);
+
   const res = await db.match.updateMany({
     where: {
       sportId: sport.id,
       status: 'scheduled',
-      startTime: { lt: cutoff },
+      OR: [
+        { tourLevel: { in: [0, 1] }, startTime: { lt: lowerCutoff } },
+        { tourLevel: { notIn: [0, 1] }, startTime: { lt: mainCutoff } },
+        { tourLevel: null, startTime: { lt: mainCutoff } },
+      ],
     },
     data: { status: 'final' },
   });

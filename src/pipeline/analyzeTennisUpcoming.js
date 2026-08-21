@@ -66,7 +66,7 @@ async function analyzeTennisUpcoming({ analyze, blend, limit = 15 } = {}) {
   });
   if (!candidates.length) return { analysed: 0, skipped: 0 };
 
-  let analysed = 0, skipped = 0, unpriced = 0;
+  let analysed = 0, skipped = 0, unpriced = 0, finished = 0;
 
   // Nearest first: a match starting soon is the one worth a price now.
   candidates.sort((a, b) => new Date(a.startTime) - new Date(b.startTime));
@@ -74,9 +74,27 @@ async function analyzeTennisUpcoming({ analyze, blend, limit = 15 } = {}) {
   for (const match of candidates) {
     if (analysed >= limit) break;
 
-    const extendId = await resolveExtendId(match.competitorA, match.competitorB, match.startTime)
+    const resolved = await resolveExtendId(match.competitorA, match.competitorB, match.startTime)
       .catch(() => null);
-    if (!extendId) { unpriced++; continue; }   // not in extend space = not priced yet
+    if (!resolved) { unpriced++; continue; }   // not in extend space at all
+
+    /* Close finished matches instead of retrying them forever.
+     *
+     * The provider reports status here. A match that has Ended cannot be
+     * priced, so without this it came back every cycle, failed to find
+     * odds, and inflated "not yet priced" — while staying `scheduled` on
+     * the board. This is also the close-out path lower tiers never had:
+     * ESPN doesn't carry Challengers, so nothing else can finalise them. */
+    if (resolved.status && /ended|finished|retired|walkover/i.test(resolved.status)) {
+      await db.match.update({
+        where: { id: match.id },
+        data: { status: 'final', ...(resolved.score ? { liveSetScore: resolved.score } : {}) },
+      }).catch(() => {});
+      finished++;
+      continue;
+    }
+
+    const extendId = resolved.id;
 
     /* The body below reads eventId, matchId and tour off `ev`. When the
        loop was driven by the feed those arrived with the payload; now we
@@ -171,8 +189,8 @@ async function analyzeTennisUpcoming({ analyze, blend, limit = 15 } = {}) {
     console.log(`[tennisUpcoming] ${match.competitorA} vs ${match.competitorB} (${ev.league}) -> ${analysis.selection} @ ${selectionIsA ? oddsA : oddsB}`);
   }
 
-  console.log(`[tennisUpcoming] ${analysed} analysed, ${unpriced} not yet priced, ${skipped} skipped`);
-  return { analysed, unpriced, skipped };
+  console.log(`[tennisUpcoming] ${analysed} analysed, ${unpriced} not yet priced, ${skipped} skipped, ${finished} closed as finished`);
+  return { analysed, unpriced, skipped, finished };
 }
 
 module.exports = { analyzeTennisUpcoming };

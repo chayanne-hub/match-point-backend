@@ -329,8 +329,18 @@ async function resolveExtendId(competitorA, competitorB, startTime) {
       continue;
     }
     const row = body?.results || body?.result || body;
-    const id = row?.id || (Array.isArray(row) ? row[0]?.id : null);
-    if (id) return String(id);
+    const r = Array.isArray(row) ? row[0] : row;
+    if (r?.id) {
+      /* Return the STATUS too, not just the id.
+       *
+       * This response is the only place that tells us a lower-tier match
+       * has finished — it carries status "Ended" plus a final score. We
+       * were throwing that away and returning a bare id, so finished
+       * matches stayed `scheduled`, were re-offered for analysis every
+       * cycle, found no pre-match odds (naturally — they were over), and
+       * were counted as "not yet priced". That is most of the 37. */
+      return { id: String(r.id), status: r.status || null, score: r.score || null };
+    }
   }
   return null;
 }
