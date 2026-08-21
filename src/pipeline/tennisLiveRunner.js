@@ -19,6 +19,7 @@
  */
 
 const live = require('./tennisLiveSocket.js');
+const { fetchLiveEvents } = require('./fetchTennisApi.js');
 const { namesLikelyMatch } = require('./fetchEspn.js');
 const db = require('../lib/db.js');
 
@@ -26,7 +27,10 @@ const ENABLED = process.env.TENNIS_SOCKET_ENABLED !== 'false';
 
 // eventId -> { unsubscribe, matchId }
 const joined = new Map();
+// eventIds already reported as unmatchable, so the warning fires once each.
+const warnedNoMatch = new Set();
 let allUnsub = null;
+let discoveryTimer = null;
 let started = false;
 
 /** Find the Match row for a live event, by name. Ids don't cross over
@@ -127,18 +131,39 @@ async function joinEvent(ev) {
   if (joined.has(ev.id)) return;
 
   const target = await findMatch(ev);
-  if (!target) return; // in play, but not a match we hold a pick on
+  if (!target) {
+    /* Was a bare `return`. A live match we cannot name-match produced no
+     * output at all, so "the socket is delivering but nothing reaches the
+     * board" and "the socket is dead" looked identical from the logs.
+     * Throttled to once per event so a busy slate can't flood. */
+    if (!warnedNoMatch.has(ev.id)) {
+      warnedNoMatch.add(ev.id);
+      console.warn(`[tennisLive] in play but not on our board: ${ev.participant1 || '?'} vs ${ev.participant2 || '?'}`);
+    }
+    return;
+  }
 
   const unsubscribe = await live.subscribeEvent(ev.id, {
     onScore: (payload) => {
       writeEventDetail(payload, target).catch((e) => console.error(`[tennisLive] detail write: ${e.message}`));
     },
     onOdds: (payload) => {
+      /* Joining a match and RECEIVING PRICES for it are different things,
+       * and the difference is the whole question of whether this feed
+       * works. Logging the first push per match makes that visible
+       * without spamming every point. */
+      const entry = joined.get(ev.id);
+      if (entry && entry.odds === 0) {
+        entry.odds = 1;
+        console.log(`[tennisLive] first odds push for ${ev.participant1} vs ${ev.participant2}`);
+      } else if (entry) {
+        entry.odds++;
+      }
       writeOdds(payload, target).catch((e) => console.error(`[tennisLive] odds write: ${e.message}`));
     },
   });
 
-  joined.set(ev.id, { unsubscribe, matchId: target.match.id });
+  joined.set(ev.id, { unsubscribe, matchId: target.match.id, odds: 0 });
   console.log(`[tennisLive] joined ${ev.participant1} vs ${ev.participant2} (${ev.league})`);
 }
 
@@ -158,29 +183,79 @@ async function startTennisLive() {
   if (!ENABLED || started) return;
   started = true;
 
+  /* DISCOVERY IS REST, SUBSCRIPTION IS SOCKET.
+   *
+   * This previously discovered in-play matches via subscribeAllLive(),
+   * which emits `join-live-events-all`. probe-socket.js tried that shape
+   * twice (emits 1 and 2 of 8) and got NOTHING back; the only emit that
+   * produced a response was `join-event` with a bare id (emit 3).
+   *
+   * So the runner's whole discovery path depended on the one subscription
+   * that does not answer. The socket connected, authenticated, and then
+   * waited forever for a feed that was never coming — which meant
+   * joinEvent() never ran, and `join-event`, the thing that DOES work,
+   * was never called for any match.
+   *
+   * REST /extend/api/events/live is confirmed working — applyTennisLiveState
+   * has been using it all along. So: poll REST to learn what is in play,
+   * then join those events over the socket for the per-point odds pushes
+   * that REST cannot give. Each transport does the job it is good at. */
+  const DISCOVERY_MS = Number(process.env.TENNIS_DISCOVERY_MS) || 60000;
+
+  async function discover() {
+    let events;
+    try {
+      events = await fetchLiveEvents();
+    } catch (err) {
+      console.warn(`[tennisLive] discovery poll failed: ${err.message}`);
+      return;
+    }
+
+    const seen = new Set();
+    for (const ev of events) {
+      // parseLiveEvent normalises to liveId/competitorA/competitorB; the
+      // socket wants the raw event id and the runner's helpers read
+      // participant1/participant2, so present both shapes.
+      const id = ev.liveId;
+      if (!id) continue;
+      seen.add(id);
+
+      const shaped = {
+        id,
+        participant1: ev.competitorA,
+        participant2: ev.competitorB,
+        league: ev.league,
+        status: ev.status,
+        score: ev.setScore,
+        points: ev.points,
+        indicator: ev.indicator,
+      };
+
+      // Cheap write first, so the board stays current even for matches we
+      // never manage to join.
+      const target = await findMatch(shaped).catch(() => null);
+      if (target) await writeScore(shaped, target).catch((e) => console.error(`[tennisLive] score write: ${e.message}`));
+
+      if (ev.status === 'InPlay') {
+        await joinEvent(shaped).catch((e) => console.error(`[tennisLive] join: ${e.message}`));
+      }
+    }
+
+    for (const id of [...joined.keys()]) {
+      if (!seen.has(id)) { leaveEvent(id); console.log(`[tennisLive] left finished event ${id}`); }
+    }
+
+    if (events.length) {
+      console.log(`[tennisLive] discovery: ${events.length} in play, ${joined.size} joined`);
+    }
+  }
+
   try {
-    allUnsub = await live.subscribeAllLive(async (rows) => {
-      const seen = new Set();
-
-      for (const ev of rows) {
-        if (!ev?.id) continue;
-        seen.add(ev.id);
-
-        // Cheap write first: the all-feed carries points for every match,
-        // so the board stays current even for matches we haven't joined.
-        const target = await findMatch(ev).catch(() => null);
-        if (target) await writeScore(ev, target).catch((e) => console.error(`[tennisLive] score write: ${e.message}`));
-
-        if (ev.status === 'InPlay') await joinEvent(ev).catch((e) => console.error(`[tennisLive] join: ${e.message}`));
-      }
-
-      // Anything we're joined to that's no longer in the feed has finished.
-      for (const id of [...joined.keys()]) {
-        if (!seen.has(id)) { leaveEvent(id); console.log(`[tennisLive] left finished event ${id}`); }
-      }
-    });
-
-    console.log('[tennisLive] runner started');
+    await discover();
+    discoveryTimer = setInterval(() => {
+      discover().catch((e) => console.error(`[tennisLive] discovery: ${e.message}`));
+    }, DISCOVERY_MS);
+    console.log(`[tennisLive] runner started (REST discovery every ${DISCOVERY_MS / 1000}s, socket for odds)`);
   } catch (err) {
     started = false;
     console.error(`[tennisLive] failed to start: ${err.message}`);
@@ -188,6 +263,7 @@ async function startTennisLive() {
 }
 
 async function stopTennisLive() {
+  if (discoveryTimer) { clearInterval(discoveryTimer); discoveryTimer = null; }
   for (const id of [...joined.keys()]) leaveEvent(id);
   if (allUnsub) { try { allUnsub(); } catch { /* noop */ } allUnsub = null; }
   await live.disconnect();

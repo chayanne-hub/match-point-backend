@@ -17,8 +17,18 @@
  * play, then join individual events for the matches we hold picks on.
  */
 
+/* The DEFAULT here was the doubled path straight out of their docs —
+ * /v1/tennis/v1/tennis/... — which 404s. Their gateway strips /v1/tennis
+ * and re-prefixes /tennis/v2, so the documented URL resolves to nonsense.
+ *
+ * That only ever worked because TENNIS_WS_TOKEN_URL was set in the
+ * environment to override it. The moment that variable was missing, the
+ * fallback took over, the token request 404'd, and the socket silently
+ * never connected — taking live tennis odds with it. A broken default is
+ * worse than no default: it fails only in the environment where nobody
+ * is watching. */
 const TOKEN_URL = process.env.TENNIS_WS_TOKEN_URL ||
-  'https://api.sportsapi365.com/v1/tennis/v1/tennis/extend/api/socket-creds/ws-token';
+  'https://api.sportsapi365.com/v1/tennis/extend/api/socket-creds/ws-token';
 const SOCKET_HOST = process.env.TENNIS_WS_HOST || 'https://live-tennis.sportsapi365.com';
 const KEY = process.env.TENNIS_API_KEY || '';
 
@@ -37,10 +47,21 @@ async function getWsToken() {
     method: 'GET',
     headers: { 'X-Gravitee-Api-Key': KEY, 'Content-Type': 'application/json' },
   });
-  if (!res.ok) throw new Error(`[tennisLive] token request failed: ${res.status}`);
+  if (!res.ok) {
+    console.error(`[tennisLive] TOKEN REQUEST FAILED ${res.status} at ${TOKEN_URL}`);
+    console.error('[tennisLive] live tennis odds are DOWN until this resolves');
+    throw new Error(`[tennisLive] token request failed: ${res.status}`);
+  }
   const body = await res.json();
   const token = body?.token;
-  if (!token) throw new Error('[tennisLive] token missing from response');
+  if (!token) {
+    // Their gateway answers 200 for unknown routes with the real status in
+    // the body, so a successful-looking response with no token is the
+    // normal shape of a wrong URL here.
+    console.error(`[tennisLive] no token in response from ${TOKEN_URL}: ${JSON.stringify(body).slice(0, 200)}`);
+    throw new Error('[tennisLive] token missing from response');
+  }
+  console.log('[tennisLive] token acquired');
   return token;
 }
 
