@@ -1899,6 +1899,41 @@ async function updateEspnScores() {
  * no draw option in the model) is graded as a push rather than forced into
  * a win/loss — nobody actually won that match outright.
  */
+/**
+ * Sets won by each side, parsed from Match.setScore ("6-4, 3-6, 6-2").
+ *
+ * Tennis is scored in sets, and NOTHING in the tennis pipeline writes
+ * homeScore/awayScore — ingestTennis and tennisLiveRunner both write
+ * setScore and liveScore only. ESPN writes the numeric scores, but ESPN
+ * carries neither Challenger nor ITF and in practice misses main-tour
+ * matches too. So every tennis match closed by our own pipeline reached
+ * gradePick with null scores, returned null, and was skipped silently and
+ * permanently.
+ *
+ * Tolerant of tiebreak notation ("7-6(5)") and of space- or
+ * comma-separated sets, because the value is written from two different
+ * providers and the exact separator is not guaranteed.
+ */
+function tennisSetsFromScore(setScore) {
+  if (!setScore) return null;
+  // Strip tiebreak parentheses so "7-6(5)" reads as a 7-6 set.
+  const cleaned = String(setScore).replace(/\([^)]*\)/g, ' ');
+  const pairs = [...cleaned.matchAll(/(\d+)\s*-\s*(\d+)/g)];
+  if (!pairs.length) return null;
+
+  let setsA = 0, setsB = 0;
+  for (const m of pairs) {
+    const a = Number(m[1]), b = Number(m[2]);
+    if (!Number.isFinite(a) || !Number.isFinite(b) || a === b) continue;
+    if (a > b) setsA++; else setsB++;
+  }
+  // Equal sets means the match is unfinished, retired, or the string was
+  // mis-parsed. Refusing to guess is the point — a wrong grade is far
+  // worse than an ungraded pick, because it silently corrupts the record.
+  if (setsA === setsB) return null;
+  return { setsA, setsB };
+}
+
 function gradeMoneyline(match, pick) {
   const pickedName = pick.selection.replace(/\s*ML$/, '').trim();
   let pickedSide = null;
@@ -1956,7 +1991,18 @@ function gradeTotal(match, pick) {
 }
 
 function gradePick(match, pick) {
-  if (match.homeScore === null || match.awayScore === null) return null;
+  if (match.homeScore === null || match.awayScore === null) {
+    /* Tennis fallback: derive the result from sets won.
+     *
+     * Moneyline ONLY. A spread or total on tennis is priced in GAMES, and
+     * set counts cannot settle either — grading those from sets would
+     * produce confidently wrong results, which is worse than none. */
+    const isMoneyline = !pick.market || pick.market === 'moneyline';
+    if (!isMoneyline) return null;
+    const sets = tennisSetsFromScore(match.setScore);
+    if (!sets) return null;
+    return gradeMoneyline({ ...match, homeScore: sets.setsA, awayScore: sets.setsB }, pick);
+  }
 
   if (pick.market === 'spread') return gradeSpread(match, pick);
   if (pick.market === 'total') return gradeTotal(match, pick);
@@ -1985,9 +2031,25 @@ async function gradeFinishedMatches() {
   });
 
   let graded = 0;
+  const skipped = [];
   for (const pick of ungraded) {
     const outcome = gradePick(pick.match, pick);
-    if (!outcome) continue;
+    if (!outcome) {
+      /* A skip used to be completely silent — `continue` and nothing
+       * else. A pick that cannot be graded is retried every 15 seconds
+       * forever, produces no log line, and simply never appears in the
+       * record. That is how every tennis match closed by our own pipeline
+       * went missing without anyone noticing: the only symptom was a win
+       * count that looked too low. */
+      skipped.push({
+        matchup: `${pick.match.competitorA} vs ${pick.match.competitorB}`,
+        market: pick.market,
+        why: (pick.match.homeScore === null || pick.match.awayScore === null)
+          ? (pick.match.setScore ? 'setScore present but unparseable/tied' : 'no scores recorded')
+          : 'selection did not match either competitor',
+      });
+      continue;
+    }
 
     await db.result.create({
       data: { pickId: pick.id, outcome },
@@ -1997,6 +2059,12 @@ async function gradeFinishedMatches() {
 
   if (graded > 0) {
     console.log(`[grading] graded ${graded} pick(s).`);
+  }
+  if (skipped.length) {
+    console.warn(`[grading] ${skipped.length} finished pick(s) COULD NOT be graded:`);
+    for (const sk of skipped.slice(0, 10)) {
+      console.warn(`[grading]   ${sk.matchup} (${sk.market}) — ${sk.why}`);
+    }
   }
 }
 
