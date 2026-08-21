@@ -32,7 +32,11 @@ const ENABLED = process.env.TENNIS_API_INGEST !== 'false';
  * collide with, or silently overwrite, an Odds API row for the same match
  * — the two sources stay distinguishable in the database.
  */
+let loggedLiveShape = false;
+
 async function ingestTennisFixtures() {
+  // externalIds the fixture feed currently reports as in play.
+  const liveSourceIds = [];
   if (!ENABLED) return { created: 0, updated: 0, skipped: 0 };
 
   let fixtures;
@@ -132,6 +136,26 @@ async function ingestTennisFixtures() {
         console.log(`[tennisIngest] ${f.competitorA} vs ${f.competitorB} rescheduled to ${f.startTime.toISOString()}`);
       }
 
+      /* Promote to live from the fixture feed.
+       *
+       * Every fixture carries a `live` field, and it is the only signal
+       * that covers the whole slate — ESPN has no lower-tier tennis and
+       * the socket all-feed carries only a few events at a time, so
+       * Challenger and ITF matches were never marked live by anything.
+       *
+       * The shape when populated has not been observed (it is null for
+       * every not-yet-started fixture), so this treats ANY non-null,
+       * non-false value as "in play" and logs the raw value once so the
+       * real shape can be read from the logs instead of guessed. */
+      if (f.live !== null && f.live !== undefined && f.live !== false) {
+        if (!loggedLiveShape) {
+          console.log(`[tennisIngest] fixture live field shape: ${JSON.stringify(f.live)}`);
+          loggedLiveShape = true;
+        }
+        if (existing.status === 'scheduled') enrich.status = 'live';
+        liveSourceIds.push(f.sourceId);
+      }
+
       if (Object.keys(enrich).length) {
         await db.match.update({ where: { id: existing.id }, data: enrich });
       }
@@ -171,6 +195,11 @@ async function ingestTennisFixtures() {
         startTime: f.startTime,
         league: f.league,
         tourLevel: f.tourLevel,
+        // Status deliberately NOT set here. An upsert cannot see the
+        // current value, so writing 'live' whenever the feed says live
+        // would demote a match already marked final back to live on the
+        // next cycle — it would never stay finished. Promotion happens
+        // in a guarded update below instead.
         playerAId: f.playerAId ? String(f.playerAId) : undefined,
         playerBId: f.playerBId ? String(f.playerBId) : undefined,
         tournamentId: f.tournamentId ? String(f.tournamentId) : undefined,
@@ -225,6 +254,19 @@ async function ingestTennisFixtures() {
         unpriced++;
       }
     }
+  }
+
+  /* Promote to live, guarded on current status.
+   *
+   * updateMany with an explicit `status: 'scheduled'` filter means a
+   * match can only ever move scheduled -> live here. A final match is
+   * untouched no matter what the feed reports. */
+  if (liveSourceIds.length) {
+    const promoted = await db.match.updateMany({
+      where: { externalId: { in: liveSourceIds }, status: 'scheduled' },
+      data: { status: 'live' },
+    }).catch((e) => { console.error(`[tennisIngest] promote: ${e.message}`); return { count: 0 }; });
+    if (promoted.count) console.log(`[tennisIngest] promoted ${promoted.count} match(es) to live from the fixture feed`);
   }
 
   console.log(`[tennisIngest] fixtures: ${created} new, ${updated} updated, ${skipped} already covered | odds: ${priced} priced, ${unpriced} not yet on the market`);

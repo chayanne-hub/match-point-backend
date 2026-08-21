@@ -131,6 +131,21 @@ function shapeFixture(fx, tourType) {
     tourLevel: tierFromName(fx?.tournament?.name, rankId),
     tourLevelName: RANK[tierFromName(fx?.tournament?.name, rankId)] || 'Unknown',
     roundId: fx.roundId ?? null,
+
+    /* `live` is the only complete lifecycle signal we get.
+     *
+     * Promotion to live came from two places, and neither covers lower
+     * tiers: ESPN scores (main tour only) and the socket all-feed (a
+     * handful of events at a time — it reported 4 while dozens were
+     * scheduled). So Challenger and ITF matches sat on "Starting…" and
+     * were never marked live at all.
+     *
+     * This field is on EVERY fixture in the daily list, so it covers the
+     * whole slate. Shape is unknown beyond `null` when not started —
+     * kept raw here and interpreted by the caller rather than guessed
+     * at. */
+    live: fx.live ?? null,
+    timeGame: fx.timeGame ?? null,
     seedA: fx.seed1 || null,
     seedB: fx.seed2 || null,
   };
