@@ -52,7 +52,7 @@ initLiveSocket(server);
 
 startWatchdog();
 startReactiveOdds();
-startScheduled();
+if (!PAUSED) startScheduled();
 // Re-enabled: live reassessment now runs, meaning confidence for a live
 // match will genuinely recalculate (and re-color) as the match unfolds
 // — real Claude API calls, every LIVE_PIPELINE_INTERVAL_MS (currently
@@ -60,13 +60,38 @@ startScheduled();
 // to keep cost more reasonable), for every live match, for its full
 // duration. This was disabled earlier specifically to cut this cost;
 // re-enabling it is a real, deliberate, ongoing spend, not free.
-startLiveScheduled();
+/* COST SWITCHES.
+ *
+ * Live reassessment calls the analyst for every LIVE match every cycle,
+ * for as long as it stays live. That is fine when matches close out
+ * promptly. It is not fine when tennis rows stick in `live` — a finished
+ * match then gets re-analysed, and paid for, every two minutes forever.
+ * That combination is what has been draining credits.
+ *
+ * These default to ON so behaviour is unchanged, but they let the spend
+ * be stopped from Railway in seconds without a deploy:
+ *   LIVE_ANALYSIS_ENABLED=false     stop re-analysing live matches
+ *   TENNIS_UPCOMING_ENABLED=false   stop the lower-tier tennis cycle
+ *   PIPELINE_PAUSED=true            stop all scheduled analysis
+ */
+const PAUSED = process.env.PIPELINE_PAUSED === 'true';
+if (PAUSED) console.warn('[cost] PIPELINE_PAUSED=true — no scheduled analysis will run.');
+
+if (!PAUSED && process.env.LIVE_ANALYSIS_ENABLED !== 'false') {
+  startLiveScheduled();
+} else {
+  console.warn('[cost] live re-analysis disabled — no analyst calls for in-play matches.');
+}
 startEspnScheduled();
 
 /* Lower-tier tennis pricing runs on its own short cycle — the provider's
  * priced window is only a few hours wide, so the 15-minute pipeline missed
  * most Challengers entirely. */
-startTennisUpcomingScheduled();
+if (!PAUSED && process.env.TENNIS_UPCOMING_ENABLED !== 'false') {
+  startTennisUpcomingScheduled();
+} else {
+  console.warn('[cost] tennis upcoming cycle disabled.');
+}
 
 /* TENNIS LIVE SOCKET.
  *
