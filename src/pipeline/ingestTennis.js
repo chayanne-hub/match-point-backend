@@ -18,7 +18,7 @@
  * dropped middle names) that broke the ESPN join before.
  */
 
-const { fetchUpcomingFixtures, fetchLiveEvents, fetchMatchOdds } = require('./fetchTennisApi.js');
+const { fetchUpcomingFixtures, fetchLiveEvents, fetchMatchOdds, resolveExtendId } = require('./fetchTennisApi.js');
 // Safe as a top-level require: the runner never requires this file, so the
 // dependency runs one way only (verified against the require graph).
 const { getLiveSnapshot } = require('./tennisLiveRunner.js');
@@ -425,6 +425,37 @@ async function applyTennisLiveState() {
  *
  * Six hours past start with no live signal means it is finished, not
  * pending. Generous enough for a five-setter plus a rain delay. */
+
+/* Sets won from a score string, shared by both close-out paths.
+ *
+ * Lived only inside analyzeTennisUpcoming. The stale sweep needed the
+ * identical rules — decided sets only, leader takes an early ending — and
+ * two copies would have drifted the moment either changed.
+ */
+function setsWonFromScore(score, status) {
+  if (!score) return null;
+  let a = 0, b = 0;
+  String(score).split(',').forEach((chunk) => {
+    const [x, y] = chunk.trim().split('-').map(Number);
+    if (isNaN(x) || isNaN(y)) return;
+    const decided = (x >= 6 || y >= 6) && (Math.abs(x - y) >= 2 || x === 7 || y === 7);
+    if (!decided) return;
+    if (x > y) a++; else if (y > x) b++;
+  });
+
+  if (/retired|walkover|w\/o/i.test(status || '')) {
+    const last = String(score).split(',').pop().trim().split('-').map(Number);
+    const lastDecided = !isNaN(last[0]) && !isNaN(last[1]) &&
+      (last[0] >= 6 || last[1] >= 6) &&
+      (Math.abs(last[0] - last[1]) >= 2 || last[0] === 7 || last[1] === 7);
+    if (!lastDecided && !isNaN(last[0]) && !isNaN(last[1]) && last[0] !== last[1]) {
+      if (last[0] > last[1]) a = Math.max(a, b + 1); else b = Math.max(b, a + 1);
+    }
+  }
+
+  return (a || b) ? { a, b } : null;
+}
+
 async function closeStaleScheduledTennis() {
   const sport = await db.sport.findFirst({ where: { slug: 'tennis' } });
   if (!sport) return { closed: 0 };
@@ -442,7 +473,21 @@ async function closeStaleScheduledTennis() {
   const lowerCutoff = new Date(Date.now() - 4 * 60 * 60 * 1000);
   const mainCutoff = new Date(Date.now() - 8 * 60 * 60 * 1000);
 
-  const res = await db.match.updateMany({
+  /* TRY FOR A REAL RESULT BEFORE CLOSING.
+   *
+   * This used to write `status: 'final'` and nothing else. gradePick()
+   * returns null without homeScore/awayScore, so every match closed this
+   * way could never be graded — it left the board, left the record, and
+   * counted for nothing. ESPN used to cover that for main tour; with
+   * ESPN off for tennis, this pass is the last stop for any match the
+   * extend feed does not carry.
+   *
+   * So: resolve each stale row first and write the score when we get
+   * one. Anything still unresolved is closed anyway (a match hours past
+   * its start is not pending), but counted separately and logged — an
+   * ungraded match should be a visible number, not a silent hole in the
+   * win rate. */
+  const stale = await db.match.findMany({
     where: {
       sportId: sport.id,
       status: 'scheduled',
@@ -452,10 +497,38 @@ async function closeStaleScheduledTennis() {
         { tourLevel: null, startTime: { lt: mainCutoff } },
       ],
     },
-    data: { status: 'final' },
+    select: { id: true, competitorA: true, competitorB: true, startTime: true },
   });
-  if (res.count) console.log(`[tennisIngest] closed ${res.count} stale scheduled row(s)`);
-  return { closed: res.count };
+  if (!stale.length) return { closed: 0, scored: 0, unscored: 0 };
+
+  let scored = 0, unscored = 0;
+
+  for (const m of stale) {
+    let resolved = null;
+    try {
+      resolved = await resolveExtendId(m.competitorA, m.competitorB, m.startTime);
+    } catch { /* treated as unresolved below */ }
+
+    const data = { status: 'final' };
+
+    if (resolved && resolved.score) {
+      const sets = setsWonFromScore(resolved.score, resolved.status);
+      if (sets) {
+        data.setScore = resolved.score;
+        data.liveScore = resolved.score;
+        data.homeScore = sets.a;
+        data.awayScore = sets.b;
+        scored++;
+      }
+    }
+    if (data.homeScore === undefined) unscored++;
+
+    await db.match.update({ where: { id: m.id }, data })
+      .catch((e) => console.error(`[tennisIngest] stale close ${m.competitorA}: ${e.message}`));
+  }
+
+  console.log(`[tennisIngest] closed ${stale.length} stale row(s): ${scored} with a final score, ${unscored} unresolved (these cannot be graded)`);
+  return { closed: stale.length, scored, unscored };
 }
 
 async function cleanupDuplicateTennis({ dryRun = true } = {}) {

@@ -271,6 +271,25 @@ async function fetchMatchOdds({ tour = 'atp', player1Id, player2Id, tournamentId
   const oddsB = decToAmerican(chosen.k2);
   if (oddsA === null || oddsB === null) return null;
 
+  /* BEST PRICE ACROSS BOOKS.
+   *
+   * `chosen` is a single preferred bookmaker, used for the blend because
+   * a consistent book is the cleaner probability signal. But the rest of
+   * the rows were thrown away, and The Odds API used to give us
+   * bestOddsA/B across books — so switching tennis to this source
+   * silently ended line shopping.
+   *
+   * The highest decimal price is the best available: it pays the most
+   * per unit staked. Reported alongside the reference book so the blend
+   * keeps using one book while the member sees the best number they
+   * could actually take. */
+  let bestA = null, bestB = null, bestBookA = null, bestBookB = null;
+  for (const r of rows) {
+    const da = Number(r.k1), db = Number(r.k2);
+    if (Number.isFinite(da) && da > 1 && (bestA === null || da > bestA)) { bestA = da; bestBookA = String(r.id_b_o); }
+    if (Number.isFinite(db) && db > 1 && (bestB === null || db > bestB)) { bestB = db; bestBookB = String(r.id_b_o); }
+  }
+
   return {
     oddsA,
     oddsB,
@@ -278,6 +297,10 @@ async function fetchMatchOdds({ tour = 'atp', player1Id, player2Id, tournamentId
     decimalB: Number(chosen.k2),
     bookmakerId: String(chosen.id_b_o),
     bookCount: rows.length,
+    bestOddsA: bestA === null ? null : decToAmerican(bestA),
+    bestOddsB: bestB === null ? null : decToAmerican(bestB),
+    bestBookA,
+    bestBookB,
   };
 }
 

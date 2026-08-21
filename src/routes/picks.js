@@ -377,7 +377,20 @@ router.get('/today', async (req, res) => {
   // never will via the normal pipeline — reusing matchEspnEvent() here
   // for the INVERSE of its normal purpose: finding ESPN events that
   // DON'T match anything we already have, not events that do.
-  if (sport && !markets) {
+  /* Not for tennis. SportsAPI365 is the single source there now.
+   *
+   * This injects ESPN events that match nothing we hold — useful for
+   * sports where ESPN is the better schedule. For tennis it added rows
+   * for main-tour matches we deliberately no longer ingest, with no odds
+   * and no pick, sitting alongside the SportsAPI365 fixtures for the
+   * same draw. Two schedules on one board is the duplicate problem in a
+   * different place. */
+  const espnDisabled = (process.env.ESPN_DISABLED_SPORTS === undefined
+    ? 'tennis'
+    : process.env.ESPN_DISABLED_SPORTS)
+    .split(',').map((x) => x.trim().toLowerCase()).filter(Boolean);
+
+  if (sport && !markets && !espnDisabled.includes(String(sport).toLowerCase())) {
     try {
       const espnEvents = await fetchEspnLiveScores(sport);
       const alreadyKnown = matches; // same list already fetched above — both picked and unanalyzed matches

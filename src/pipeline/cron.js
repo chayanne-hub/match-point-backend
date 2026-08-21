@@ -107,6 +107,28 @@ const MODEL_PICK_THRESHOLD = 65;
  *   DISABLED_SPORTS=baseball,soccer   (default — the expensive ones off)
  *   DISABLED_SPORTS=                  (empty string enables everything)
  */
+/* ESPN IS OFF FOR TENNIS.
+ *
+ * ESPN carries main tour only — no Challenger, no ITF — so for tennis it
+ * was never a complete source, only a SECOND writer on rows SportsAPI365
+ * already owned. That produced the duplicate fixtures, competing start
+ * times, and orientation conflicts we spent the day untangling: two
+ * providers writing the same match with different ids and different
+ * player ordering.
+ *
+ * SportsAPI365 covers every tier, carries the `live` field for the whole
+ * slate, and supplies the set scores that grading needs. One writer per
+ * sport removes the class of bug entirely rather than reconciling it.
+ *
+ * Env-tunable so this is reversible without a deploy:
+ *   ESPN_DISABLED_SPORTS=tennis   (default)
+ *   ESPN_DISABLED_SPORTS=         (empty re-enables everything)
+ */
+const ESPN_DISABLED_SPORTS = (process.env.ESPN_DISABLED_SPORTS === undefined
+  ? 'tennis'
+  : process.env.ESPN_DISABLED_SPORTS)
+  .split(',').map((x) => x.trim().toLowerCase()).filter(Boolean);
+
 const ALL_SPORTS = ['tennis', 'basketball', 'soccer', 'baseball', 'football'];
 
 const DISABLED_SPORTS = (process.env.DISABLED_SPORTS === undefined
@@ -116,6 +138,8 @@ const DISABLED_SPORTS = (process.env.DISABLED_SPORTS === undefined
 
 const SPORTS = ALL_SPORTS.filter((s) => !DISABLED_SPORTS.includes(s));
 
+console.log(`[pipeline] ESPN scores disabled for: ${
+  (process.env.ESPN_DISABLED_SPORTS === undefined ? 'tennis' : process.env.ESPN_DISABLED_SPORTS) || 'nothing'}`);
 console.log(`[pipeline] analysing ${SPORTS.join(', ')}` +
   (DISABLED_SPORTS.length ? ` — disabled: ${DISABLED_SPORTS.join(', ')}` : ' — all sports enabled'));
 
@@ -1779,6 +1803,14 @@ function startLiveScheduled() {
  * don't share an ID.
  */
 async function updateEspnScoresForSport(sportSlug) {
+  /* Guard here as well as in the caller.
+   *
+   * updateEspnScores() already skips disabled sports, but this function
+   * is exported and reachable directly, so the check belongs where the
+   * network call actually happens. Otherwise one future caller
+   * reintroduces ESPN into tennis without anyone noticing. */
+  if (ESPN_DISABLED_SPORTS.includes(String(sportSlug).toLowerCase())) return;
+
   const sportRow = await db.sport.findUnique({ where: { slug: sportSlug } });
   if (!sportRow) return;
 
@@ -1904,8 +1936,11 @@ async function updateEspnScoresForSport(sportSlug) {
   }
 }
 
+
+
 async function updateEspnScores() {
   for (const sport of SPORTS) {
+    if (ESPN_DISABLED_SPORTS.includes(sport)) continue;
     await updateEspnScoresForSport(sport);
   }
 }

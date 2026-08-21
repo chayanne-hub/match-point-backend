@@ -123,7 +123,24 @@ async function discoverSportKeys(prefix, baseUrl, apiKey) {
     return [];
   }
   const sports = await res.json();
-  return sports.filter((s) => s.key.startsWith(prefix)).map((s) => s.key);
+  const matched = sports.filter((s) => s.key.startsWith(prefix));
+
+  // Drop OUTRIGHT / FUTURES keys. The Odds API lists things like
+  // "..._winner" alongside real fixture keys, and they carry
+  // tournament-winner markets rather than matches — fetching them burns
+  // credits and produces rows that aren't matches at all.
+  const fixtures = matched.filter((s) => s.has_outrights !== true && !/_winner$/.test(s.key));
+
+  const dropped = matched.filter((s) => !fixtures.includes(s));
+  if (dropped.length) {
+    console.log(`[fetchMatches] ignoring ${dropped.length} outright/futures key(s): ${dropped.map((s) => s.key).join(', ')}`);
+  }
+  // Logged in full so it's visible which tournaments are actually
+  // available — the tour calendar rotates weekly, and a missing tier
+  // (Challenger, ITF) shows up here rather than as a silent absence.
+  console.log(`[fetchMatches] ${prefix} keys in season (${fixtures.length}): ${fixtures.map((s) => s.key).join(', ') || 'none'}`);
+
+  return fixtures.map((s) => s.key);
 }
 
 // Shared by both the odds fetch and the scores fetch — resolves which
@@ -374,7 +391,40 @@ function normalizeMatch(sport, raw) {
 // sport, tight enough to eliminate the season-dump problem.
 const MAX_DAYS_AHEAD = 14;
 
+/* SPORTS THE ODDS API NO LONGER SUPPLIES.
+ *
+ * Tennis comes entirely from SportsAPI365 now — fixtures, odds, live
+ * state, final scores and grading. The Odds API only ever carried main
+ * tour (zero Challenger or ITF keys across all 43 of its tennis keys),
+ * so for tennis it was a partial second source writing the same matches
+ * under different ids, with different start times and player ordering.
+ * That is what produced the duplicate rows, the competing schedules and
+ * the orientation bugs.
+ *
+ * Cut here rather than at each call site: fetchMatches() is the single
+ * door every Odds-API path goes through (analysis, re-analysis, and the
+ * live odds refresh), so one guard covers them all and none can be
+ * missed later.
+ *
+ *   ODDS_API_DISABLED_SPORTS=tennis   (default)
+ *   ODDS_API_DISABLED_SPORTS=         (empty re-enables everything)
+ */
+const ODDS_API_DISABLED_SPORTS = (process.env.ODDS_API_DISABLED_SPORTS === undefined
+  ? 'tennis'
+  : process.env.ODDS_API_DISABLED_SPORTS)
+  .split(',').map((x) => x.trim().toLowerCase()).filter(Boolean);
+
+let loggedDisabled = new Set();
+
 async function fetchMatches(sport, onlyKeys) {
+  if (ODDS_API_DISABLED_SPORTS.includes(String(sport).toLowerCase())) {
+    if (!loggedDisabled.has(sport)) {
+      console.log(`[fetchMatches] ${sport}: Odds API disabled — SportsAPI365 is the sole source.`);
+      loggedDisabled.add(sport);
+    }
+    return [];
+  }
+
   const raw = await fetchFromProvider(sport, onlyKeys);
   const cutoff = Date.now() + MAX_DAYS_AHEAD * 24 * 60 * 60 * 1000;
   const filtered = raw.filter((m) => new Date(m.commence_time).getTime() <= cutoff);

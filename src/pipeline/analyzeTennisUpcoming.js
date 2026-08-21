@@ -294,6 +294,7 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
 
     let oddsA = null, oddsB = null;
     let priceSource = null;
+    let bestOdds = null;
 
     if (hasLiveOdds) {
       // Already stored in OUR orientation by the socket runner, so the
@@ -306,6 +307,9 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
       oddsA = coreOdds.oddsA;
       oddsB = coreOdds.oddsB;
       priceSource = 'core';
+      // Keep the best price across books so line shopping survives the
+      // move off The Odds API, which used to populate bestOddsA/B.
+      bestOdds = { a: coreOdds.bestOddsA, b: coreOdds.bestOddsB };
     } else if (extendId) {
       const priced = await fetchPreMatchOdds(extendId);
       if (priced) {
@@ -389,6 +393,13 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
     const blended = (priceSource !== 'none') && typeof blend === 'function'
       ? blend(analysis.confidence, oddsA, oddsB, selectionIsA)
       : null;
+
+    if (bestOdds && (bestOdds.a !== null || bestOdds.b !== null)) {
+      await db.match.update({
+        where: { id: match.id },
+        data: { bestOddsA: bestOdds.a, bestOddsB: bestOdds.b },
+      }).catch(() => {});   // cosmetic — must never block the pick
+    }
 
     await db.pick.create({
       data: {
