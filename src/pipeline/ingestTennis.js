@@ -19,6 +19,9 @@
  */
 
 const { fetchUpcomingFixtures, fetchLiveEvents, fetchMatchOdds } = require('./fetchTennisApi.js');
+// Safe as a top-level require: the runner never requires this file, so the
+// dependency runs one way only (verified against the require graph).
+const { getLiveSnapshot } = require('./tennisLiveRunner.js');
 const { namesLikelyMatch } = require('./fetchEspn.js');
 const db = require('../lib/db.js');
 
@@ -180,55 +183,39 @@ async function ingestTennisFixtures() {
 async function applyTennisLiveState() {
   if (!ENABLED) return { matched: 0, unmatched: 0 };
 
-  /* An EMPTY feed and a FAILED fetch mean opposite things and must not be
-   * conflated. Empty is information: nothing is in play, so anything still
-   * marked live has finished. A failure is the absence of information, and
-   * closing matches on it would mark every live match final during a
-   * provider outage. */
-  let events = [];
-  let fetchFailed = false;
+  let events;
   try {
-    events = await fetchLiveEvents();
+    /* Socket first. REST is kept only as a fallback in case the provider
+       ever fixes the endpoint — it currently answers 0 rows on a valid
+       key, so relying on it alone froze every tennis row on the board. */
+    events = getLiveSnapshot();
+    if (!events.length) {
+      events = await fetchLiveEvents();
+      if (events.length) console.log('[tennisIngest] live via REST fallback');
+    } else {
+      console.log(`[tennisIngest] live via socket snapshot (${events.length})`);
+    }
   } catch (err) {
     console.error(`[tennisIngest] live fetch failed: ${err.message}`);
-    fetchFailed = true;
+    return { matched: 0, unmatched: 0, error: err.message };
   }
-  if (fetchFailed) return { matched: 0, unmatched: 0, error: 'live fetch failed' };
-
-  /* NOTE: there used to be an early `if (!events.length) return` here.
-   *
-   * The close-out loop below is the ONLY thing that moves a tennis match
-   * from live to final — ESPN carries neither Challenger nor ITF, and in
-   * practice misses main-tour matches too. Returning early on an empty
-   * feed meant the close-out was skipped at exactly the moment it was
-   * needed: when the last match of the day finishes, the feed empties,
-   * and every match still marked live is precisely the set that should be
-   * closed. They then sat live indefinitely — and because
-   * gradeFinishedMatches() only ever looks at status 'final', their picks
-   * were never graded either. One early return, three symptoms. */
+  if (!events.length) return { matched: 0, unmatched: 0 };
 
   const sport = await db.sport.findFirst({ where: { slug: 'tennis' } });
   if (!sport) return { matched: 0, unmatched: 0 };
 
-  /* Two windows on purpose.
+  /* 8h back was too short to close anything reliably.
    *
-   * The JOIN window stays tight — matching live state onto a match that
-   * started ten hours ago would be wrong.
-   *
-   * The CLOSE-OUT window is much wider, because it previously shared the
-   * 8-hour window and anything stuck past that became permanently
-   * unreachable: too old to be scanned, so never closed, so never graded,
-   * forever. A match that started a day ago and is still marked live is
-   * the clearest possible case for closing it. */
-  const since = new Date(Date.now() - 8 * 60 * 60 * 1000);
+   * A match that started 9 hours ago fell outside this window, so the
+   * close-out never saw it and it sat showing LIVE forever. Tennis is the
+   * only sport where this bites: ESPN closes everything else, but carries
+   * no Challenger or ITF, so this pass is the only route to `final`.
+   * A day back costs one cheap indexed query and covers long matches,
+   * rain delays, and anything the feed dropped mid-match. */
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
   const until = new Date(Date.now() + 2 * 60 * 60 * 1000);
   const candidates = await db.match.findMany({
     where: { sportId: sport.id, startTime: { gte: since, lte: until }, status: { not: 'final' } },
-  });
-
-  const staleSince = new Date(Date.now() - (Number(process.env.TENNIS_CLOSEOUT_LOOKBACK_H) || 72) * 60 * 60 * 1000);
-  const closeCandidates = await db.match.findMany({
-    where: { sportId: sport.id, startTime: { gte: staleSince, lte: until }, status: 'live' },
   });
 
   let matched = 0, unmatched = 0;
@@ -276,7 +263,7 @@ async function applyTennisLiveState() {
   const graceMs = Number(process.env.TENNIS_FINAL_GRACE_MS) || 10 * 60 * 1000;
   let closed = 0;
 
-  for (const m of closeCandidates) {
+  for (const m of candidates) {
     if (m.status !== 'live') continue;
     const key = `${m.competitorA}|${m.competitorB}`.toLowerCase();
     const keyRev = `${m.competitorB}|${m.competitorA}`.toLowerCase();
@@ -292,7 +279,7 @@ async function applyTennisLiveState() {
     closed++;
   }
 
-  console.log(`[tennisIngest] live: ${events.length} in play, ${matched} joined, ${unmatched} unmatched, ${closed} closed out (${closeCandidates.length} were live)`);
+  console.log(`[tennisIngest] live: ${matched} joined, ${unmatched} with no match on our board${closed ? `, ${closed} closed out` : ''}`);
   return { matched, unmatched, closed };
 }
 
@@ -322,7 +309,15 @@ async function cleanupDuplicateTennis({ dryRun = true } = {}) {
   const groups = new Map();
   for (const m of matches) {
     const pair = [m.competitorA, m.competitorB].map((n) => String(n).toLowerCase().trim()).sort().join('|');
-    const key = `${pair}@${m.startTime.toISOString()}`;
+    /* Group by pair and DAY, not by exact timestamp.
+     *
+     * The two providers disagree on start time by several minutes — the
+     * same match arrives at 2:30 and 2:40. Keying on the exact ISO string
+     * put every duplicate in a group of one, so the pass reported
+     * "0 groups, 0 removed" and looked like it had nothing to do.
+     * Two rows for the same pair on the same day are the same match. */
+    const day = m.startTime.toISOString().slice(0, 10);
+    const key = `${pair}@${day}`;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(m);
   }
@@ -368,7 +363,7 @@ async function markUnpriceableTennis({ dryRun = true } = {}) {
   const rows = await db.match.findMany({
     where: {
       sportId: sport.id,
-      skipAnalysis: true,
+      skipAnalysis: false,
       tourLevel: { in: [0, 1] },
       startTime: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
     },
@@ -379,7 +374,7 @@ async function markUnpriceableTennis({ dryRun = true } = {}) {
   if (!dryRun && targets.length) {
     await db.match.updateMany({
       where: { id: { in: targets.map((t) => t.id) } },
-      data: { skipAnalysis: false },
+      data: { skipAnalysis: true },
     });
   }
   console.log(`[tennisIngest] ${targets.length} unpriceable row(s) ${dryRun ? 'would be' : ''} flagged (of ${rows.length} lower-tier)`);
