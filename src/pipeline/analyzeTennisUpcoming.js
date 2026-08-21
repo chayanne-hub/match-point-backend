@@ -71,8 +71,32 @@ async function analyzeTennisUpcoming({ analyze, blend, limit = 15 } = {}) {
   // Nearest first: a match starting soon is the one worth a price now.
   candidates.sort((a, b) => new Date(a.startTime) - new Date(b.startTime));
 
+  /* PRICING WINDOW.
+   *
+   * Measured against the provider: a Challenger's opening price is
+   * published about 45 MINUTES before start (Fearnley v Galarneau —
+   * priced 23:15, started 00:00). Before that the match isn't in extend
+   * space at all: the resolve returns an empty object.
+   *
+   * So asking about tomorrow's draw can't work, and every attempt burned
+   * two API calls (both name orders) to learn nothing. That is what
+   * "37 not yet priced" was actually counting.
+   *
+   * We only look at matches inside the window where a price can exist.
+   * Anything further out isn't unpriceable — it's just early, and it
+   * gets picked up automatically on a later cycle as it approaches. */
+  // 90 min: double the observed 45-minute lead, so there is margin if
+  // another tournament prices earlier, without spending 67 futile
+  // lookups per match the way a 3-hour window would. Tunable if a tour
+  // turns out to price further ahead.
+  const WINDOW_MS = Number(process.env.TENNIS_PRICE_WINDOW_MS || 90 * 60 * 1000);
+  let tooEarly = 0;
+
   for (const match of candidates) {
     if (analysed >= limit) break;
+
+    const untilStart = new Date(match.startTime).getTime() - Date.now();
+    if (untilStart > WINDOW_MS) { tooEarly++; continue; }
 
     const resolved = await resolveExtendId(match.competitorA, match.competitorB, match.startTime)
       .catch(() => null);
@@ -189,8 +213,8 @@ async function analyzeTennisUpcoming({ analyze, blend, limit = 15 } = {}) {
     console.log(`[tennisUpcoming] ${match.competitorA} vs ${match.competitorB} (${ev.league}) -> ${analysis.selection} @ ${selectionIsA ? oddsA : oddsB}`);
   }
 
-  console.log(`[tennisUpcoming] ${analysed} analysed, ${unpriced} not yet priced, ${skipped} skipped, ${finished} closed as finished`);
-  return { analysed, unpriced, skipped, finished };
+  console.log(`[tennisUpcoming] ${analysed} analysed, ${unpriced} not yet priced, ${skipped} skipped, ${finished} closed as finished, ${tooEarly} too early to price`);
+  return { analysed, unpriced, skipped, finished, tooEarly };
 }
 
 module.exports = { analyzeTennisUpcoming };
