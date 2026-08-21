@@ -184,6 +184,28 @@ async function writeOdds(payload, target) {
       liveStateAt: new Date(),
     },
   });
+
+  /* Push the price too, not just the score.
+   *
+   * The broadcast was added to writeScore only, so a live price reached
+   * the database and then waited up to 20 seconds for the next poll to
+   * carry it — and the board's merge would keep the OLD value in the
+   * meantime. The price is the number people act on; it should be the
+   * least delayed thing on the row, not the most. */
+  const oddsA = flipped ? parsed.oddsB : parsed.oddsA;
+  const oddsB = flipped ? parsed.oddsA : parsed.oddsB;
+  try {
+    broadcastScoreUpdate({
+      sport: 'tennis',
+      matchup: `${match.competitorA} vs ${match.competitorB}`,
+      matchStatus: 'live',
+      liveOddsA: oddsA,
+      liveOddsB: oddsB,
+      liveStateAt: new Date(),
+    });
+  } catch (e) {
+    console.error(`[tennisLive] odds broadcast: ${e.message}`);
+  }
 }
 
 /** Join one live event for score + odds pushes. */

@@ -49,6 +49,33 @@ let refreshing = false;
 
 /** Single shared connection. A second caller reuses the first's promise
  *  rather than opening a duplicate socket. */
+/* A DEDICATED connection, not the shared one.
+ *
+ * The provider's `odds-update` push carries no event id (verified
+ * against a live payload). On one shared socket with several matches
+ * joined, an arriving price cannot be attributed to a match — and
+ * writing it to all of them would put one match's odds on every row.
+ *
+ * Giving each joined match its own connection removes the ambiguity
+ * structurally: a push on this socket can only belong to the one event
+ * this socket joined. Costs one websocket per in-play match we track,
+ * which is a handful, and needs no cooperation from the provider. */
+async function connectDedicated() {
+  if (!io) return null;
+  const token = await getWsToken();
+  const socket = io(SOCKET_HOST, {
+    auth: { token },
+    transports: ['websocket'],
+    reconnection: true,
+    reconnectionDelay: 2000,
+    reconnectionDelayMax: 30000,
+  });
+  socket.on('connect_error', (err) => {
+    console.warn(`[tennisLive] dedicated socket error: ${err?.message || err}`);
+  });
+  return socket;
+}
+
 async function connect() {
   if (!io) return null;
   if (socketPromise) return socketPromise;
@@ -150,7 +177,11 @@ async function subscribeAllLive(onUpdate) {
 const subscribedEvents = new Set();
 
 async function subscribeEvent(eventId, { onScore, onOdds } = {}) {
-  const socket = await connect();
+  // Own connection per event — see connectDedicated(). Falls back to the
+  // shared socket only if a dedicated one cannot be opened, where the
+  // ambiguity guard below still prevents mis-attributed prices.
+  const dedicated = await connectDedicated().catch(() => null);
+  const socket = dedicated || await connect();
   if (!socket) return () => {};
 
   /* ATTRIBUTION.
@@ -178,8 +209,8 @@ async function subscribeEvent(eventId, { onScore, onOdds } = {}) {
     const id = data?.eventId ?? data?.id;
     if (id !== undefined) {
       if (String(id) !== String(eventId)) return;                    // attributable
-    } else if (subscribedEvents.size > 1) {
-      return;  // ambiguous — refuse rather than mis-assign
+    } else if (!dedicated && subscribedEvents.size > 1) {
+      return;  // shared socket, several events — refuse rather than mis-assign
     }
     try { onOdds(data); } catch (e) { console.error(`[tennisLive] odds handler: ${e.message}`); }
   };
@@ -193,6 +224,9 @@ async function subscribeEvent(eventId, { onScore, onOdds } = {}) {
     subscribedEvents.delete(String(eventId));
     socket.off('event-update', scoreHandler);
     socket.off('odds-update', oddsHandler);
+    // A dedicated socket belongs to this subscription alone, so it must
+    // be closed here — otherwise every finished match leaks a socket.
+    if (dedicated) { try { dedicated.close(); } catch { /* already gone */ } }
     emitBoth(socket, 'leave-event', 'eventId', eventId);
   };
 }
