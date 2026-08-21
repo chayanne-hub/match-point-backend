@@ -66,7 +66,7 @@ async function analyzeTennisUpcoming({ analyze, blend, limit = 15 } = {}) {
   });
   if (!candidates.length) return { analysed: 0, skipped: 0 };
 
-  let analysed = 0, skipped = 0, unpriced = 0, finished = 0;
+  let analysed = 0, skipped = 0, unpriced = 0, finished = 0, missed = 0;
 
   // Nearest first: a match starting soon is the one worth a price now.
   candidates.sort((a, b) => new Date(a.startTime) - new Date(b.startTime));
@@ -97,6 +97,22 @@ async function analyzeTennisUpcoming({ analyze, blend, limit = 15 } = {}) {
 
     const untilStart = new Date(match.startTime).getTime() - Date.now();
     if (untilStart > WINDOW_MS) { tooEarly++; continue; }
+
+    /* A match already in play cannot be priced from this path.
+     *
+     * Pre-match odds stop existing the moment a match starts, so an ITF
+     * match that went live before its price ever appeared (W15/W35 often
+     * price very late, or not at all) would come back here every single
+     * cycle, resolve, find no pre-match odds, and count as "not yet
+     * priced" — forever, at two API calls a time, while showing
+     * "Awaiting Analysis" on the board.
+     *
+     * They are counted separately so the log tells the truth: these are
+     * not pending, they are missed. The live socket carries in-play
+     * prices for matches we joined; analysing those is a different
+     * product decision (a live pick, not a pre-match one) and is
+     * deliberately not done here. */
+    if (match.status === 'live' || untilStart < 0) { missed++; continue; }
 
     const resolved = await resolveExtendId(match.competitorA, match.competitorB, match.startTime)
       .catch(() => null);
@@ -213,8 +229,8 @@ async function analyzeTennisUpcoming({ analyze, blend, limit = 15 } = {}) {
     console.log(`[tennisUpcoming] ${match.competitorA} vs ${match.competitorB} (${ev.league}) -> ${analysis.selection} @ ${selectionIsA ? oddsA : oddsB}`);
   }
 
-  console.log(`[tennisUpcoming] ${analysed} analysed, ${unpriced} not yet priced, ${skipped} skipped, ${finished} closed as finished, ${tooEarly} too early to price`);
-  return { analysed, unpriced, skipped, finished, tooEarly };
+  console.log(`[tennisUpcoming] ${analysed} analysed, ${unpriced} not yet priced, ${skipped} skipped, ${finished} closed as finished, ${tooEarly} too early to price, ${missed} started before pricing`);
+  return { analysed, unpriced, skipped, finished, tooEarly, missed };
 }
 
 module.exports = { analyzeTennisUpcoming };
