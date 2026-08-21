@@ -176,10 +176,22 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
         data.liveScore = resolved.score;
         data.setScore = resolved.score;
 
+        /* Only count DECIDED sets.
+         *
+         * Counting "whoever is ahead" treats an unfinished set as won:
+         * a retirement at 6-2, 5-3 was recorded as 2-0 when the player
+         * had actually won one set and was merely leading the second.
+         *
+         * Usually harmless, but 6-4, 2-5 comes out 1-1 — a tie — and a
+         * moneyline grader handed a tie either pushes the pick or picks
+         * a winner arbitrarily. A set is won at 6 with two clear games,
+         * or at 7. Anything else is still in progress. */
         let setsA = 0, setsB = 0;
         String(resolved.score).split(',').forEach((chunk) => {
           const [a, b] = chunk.trim().split('-').map(Number);
           if (isNaN(a) || isNaN(b)) return;
+          const decided = (a >= 6 || b >= 6) && (Math.abs(a - b) >= 2 || a === 7 || b === 7);
+          if (!decided) return;
           if (a > b) setsA++; else if (b > a) setsB++;
         });
 
