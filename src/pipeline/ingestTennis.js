@@ -66,8 +66,24 @@ async function ingestTennisFixtures() {
      *
      * Fetching all candidates and searching them is the same approach
      * applyTennisLiveState() already used correctly. */
-    const windowStart = new Date(f.startTime.getTime() - 3 * 60 * 60 * 1000);
-    const windowEnd = new Date(f.startTime.getTime() + 3 * 60 * 60 * 1000);
+    /* ±3h was too narrow for a RESCHEDULED match.
+     *
+     * Measured on real rows: Musetti v Tiafoe existed three times —
+     * sa365:1308 at Aug 20 04:10, sa365:1307 at Aug 21 18:00, and
+     * sa365:1306 at Aug 22 02:00. The provider issues a NEW fixture id
+     * when a start time moves rather than updating the old one, and
+     * Cincinnati's "not before" times shift by many hours.
+     *
+     * When 1306 arrived, this window searched Aug 21 23:00 - Aug 22
+     * 05:00. The row at Aug 21 18:00 sat outside it, so no candidate
+     * matched and a third row was created. The original ±3h caught the
+     * consecutive-id case (1477/1478/1479, minutes apart) but not this.
+     *
+     * 48h either side covers rescheduling while staying far short of
+     * the gap between two genuine meetings of the same pair, which do
+     * not happen inside a single tournament. */
+    const windowStart = new Date(f.startTime.getTime() - 48 * 60 * 60 * 1000);
+    const windowEnd = new Date(f.startTime.getTime() + 48 * 60 * 60 * 1000);
     const candidates = await db.match.findMany({
       where: {
         sportId: sport.id,
@@ -75,9 +91,16 @@ async function ingestTennisFixtures() {
         NOT: { externalId: f.sourceId },
       },
     });
-    const existing = candidates.find((c) =>
+    // With a 48h window several rows can match on name, so take the one
+    // CLOSEST in time rather than whichever the query happened to return
+    // first — that ordering is arbitrary and would pick at random.
+    const nameMatches = candidates.filter((c) =>
       (namesLikelyMatch(c.competitorA, f.competitorA) && namesLikelyMatch(c.competitorB, f.competitorB)) ||
       (namesLikelyMatch(c.competitorA, f.competitorB) && namesLikelyMatch(c.competitorB, f.competitorA)));
+
+    nameMatches.sort((a, b) =>
+      Math.abs(new Date(a.startTime) - f.startTime) - Math.abs(new Date(b.startTime) - f.startTime));
+    const existing = nameMatches[0];
 
     if (existing) {
       // Already have it from the other provider. Enrich rather than
@@ -98,6 +121,17 @@ async function ingestTennisFixtures() {
       if ((existing.roundId === null || existing.roundId === undefined) && f.roundId !== null && f.roundId !== undefined) {
         enrich.roundId = Number(f.roundId);
       }
+      /* Correct the start time when the fixture has moved.
+       *
+       * Without this the kept row keeps a stale time, so the pricing
+       * window and the "too early" check both work off a schedule that
+       * no longer exists. Only moved forward when the change is real
+       * (over a minute) to avoid a write on every cycle. */
+      if (f.startTime && Math.abs(new Date(existing.startTime) - f.startTime) > 60000) {
+        enrich.startTime = f.startTime;
+        console.log(`[tennisIngest] ${f.competitorA} vs ${f.competitorB} rescheduled to ${f.startTime.toISOString()}`);
+      }
+
       if (Object.keys(enrich).length) {
         await db.match.update({ where: { id: existing.id }, data: enrich });
       }
