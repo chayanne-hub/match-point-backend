@@ -82,8 +82,24 @@ async function ingestTennisFixtures() {
     if (existing) {
       // Already have it from the other provider. Enrich rather than
       // duplicate: the tour level is the one thing only this feed knows.
-      if (existing.tourLevel === null || existing.tourLevel === undefined) {
-        await db.match.update({ where: { id: existing.id }, data: { tourLevel: f.tourLevel } });
+      /* Carry the core ids across as well as the tour level.
+       *
+       * These four values are the key for `upcoming/matchodds`, the
+       * core-space odds endpoint — the one that actually covers
+       * Challenger and ITF. Without them a row can only be priced
+       * through the `extend` bridge, which holds a small subset, so
+       * most lower-tier matches appeared unpriceable when their odds
+       * were reachable the whole time. */
+      const enrich = {};
+      if (existing.tourLevel === null || existing.tourLevel === undefined) enrich.tourLevel = f.tourLevel;
+      if (!existing.playerAId && f.playerAId) enrich.playerAId = String(f.playerAId);
+      if (!existing.playerBId && f.playerBId) enrich.playerBId = String(f.playerBId);
+      if (!existing.tournamentId && f.tournamentId) enrich.tournamentId = String(f.tournamentId);
+      if ((existing.roundId === null || existing.roundId === undefined) && f.roundId !== null && f.roundId !== undefined) {
+        enrich.roundId = Number(f.roundId);
+      }
+      if (Object.keys(enrich).length) {
+        await db.match.update({ where: { id: existing.id }, data: enrich });
       }
       skipped++;
       continue;
@@ -121,9 +137,17 @@ async function ingestTennisFixtures() {
         startTime: f.startTime,
         league: f.league,
         tourLevel: f.tourLevel,
+        playerAId: f.playerAId ? String(f.playerAId) : undefined,
+        playerBId: f.playerBId ? String(f.playerBId) : undefined,
+        tournamentId: f.tournamentId ? String(f.tournamentId) : undefined,
+        roundId: (f.roundId === null || f.roundId === undefined) ? undefined : Number(f.roundId),
       },
       create: {
         externalId: f.sourceId,
+        playerAId: f.playerAId ? String(f.playerAId) : null,
+        playerBId: f.playerBId ? String(f.playerBId) : null,
+        tournamentId: f.tournamentId ? String(f.tournamentId) : null,
+        roundId: (f.roundId === null || f.roundId === undefined) ? null : Number(f.roundId),
         sportId: sport.id,
         league: f.league || (f.tour || 'ATP').toUpperCase(),
         competitorA: f.competitorA,

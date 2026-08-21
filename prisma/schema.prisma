@@ -101,6 +101,22 @@ model Match {
   /// tier concept at all, which is why a Challenger and a Masters match
   /// were previously indistinguishable on the board.
   tourLevel    Int?
+
+  /// CORE-SPACE IDS from the SportsAPI365 fixture feed.
+  ///
+  /// The provider runs two disjoint id spaces. Fixtures (what we ingest)
+  /// live in core space and carry these ids; odds also exist in core
+  /// space via `upcoming/matchodds`, keyed on exactly these four values.
+  ///
+  /// They were being dropped on ingest, which left only the `extend`
+  /// bridge as a route to a price — and extend space holds a tiny subset
+  /// (8 events against ~35 fixtures at the time of writing), so most
+  /// Challenger and ITF matches looked unpriceable when their odds were
+  /// available all along on the path we were not using.
+  playerAId    String?
+  playerBId    String?
+  tournamentId String?
+  roundId      Int?
   /// LIVE POINT-LEVEL STATE, tennis only, pushed over the SportsAPI365
   /// socket. The odds provider and ESPN both stop at games and sets, so
   /// none of this existed before.

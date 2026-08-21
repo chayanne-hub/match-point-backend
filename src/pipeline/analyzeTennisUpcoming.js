@@ -18,7 +18,7 @@
  * Nothing here touches the existing pipeline's path.
  */
 
-const { fetchUpcomingEvents, resolveExtendId, fetchPreMatchOdds } = require('./fetchTennisApi.js');
+const { fetchUpcomingEvents, resolveExtendId, fetchPreMatchOdds, fetchMatchOdds } = require('./fetchTennisApi.js');
 const { buildFactorBrief, renderFactorBrief } = require('./tennisFactors.js');
 const { namesLikelyMatch } = require('./fetchEspn.js');
 const db = require('../lib/db.js');
@@ -144,9 +144,35 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
      * what a pre-match pick would have used anyway. Nothing is skipped
      * for want of a price until every source has actually been tried. */
 
+    /* CORE ODDS FIRST — that is where the coverage is.
+     *
+     * We were resolving every match into `extend` space and pricing from
+     * there. Extend holds a fraction of the fixtures: measured live, 8
+     * events across the whole ATP feed against ~35 lower-tier fixtures
+     * we had ingested. A Cancun Challenger with a top-50 player was
+     * absent 40 minutes before start.
+     *
+     * `upcoming/matchodds` is keyed on the CORE ids that arrive with
+     * every fixture, so it covers the fixture list rather than a subset.
+     * That path is tried first now; extend is only the fallback, for
+     * live state and for rows ingested before we stored these ids. */
+    let coreOdds = null;
+    if (match.playerAId && match.playerBId && match.tournamentId &&
+        match.roundId !== null && match.roundId !== undefined) {
+      coreOdds = await fetchMatchOdds({
+        tour: 'atp',
+        player1Id: match.playerAId,
+        player2Id: match.playerBId,
+        tournamentId: match.tournamentId,
+        roundId: match.roundId,
+      }).catch(() => null);
+    }
+
     const resolved = await resolveExtendId(match.competitorA, match.competitorB, match.startTime)
       .catch(() => null);
-    if (!resolved) { unpriced++; continue; }   // not in extend space at all
+
+    // Only give up when BOTH paths are dry.
+    if (!resolved && !coreOdds) { unpriced++; continue; }
 
     /* Close finished matches instead of retrying them forever.
      *
@@ -155,7 +181,7 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
      * odds, and inflated "not yet priced" — while staying `scheduled` on
      * the board. This is also the close-out path lower tiers never had:
      * ESPN doesn't carry Challengers, so nothing else can finalise them. */
-    if (resolved.status && /ended|finished|retired|walkover/i.test(resolved.status)) {
+    if (resolved && resolved.status && /ended|finished|retired|walkover/i.test(resolved.status)) {
       /* Record the SETS WON as home/away score, not just the string.
        *
        * gradePick() returns null unless homeScore and awayScore are set.
@@ -197,6 +223,39 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
 
         // The feed lists players in ITS order; `flipped` tells us whether
         // that is reversed relative to how we store the match.
+        /* RETIREMENT / WALKOVER: the leader takes it.
+         *
+         * Decided sets alone can leave a retirement level (6-4, 2-5) or
+         * scoreless (2-5 in the first set) — and a match with no result
+         * never grades, so the pick silently vanishes from the record.
+         *
+         * When a match ends early the player ahead wins it, so the
+         * unfinished set is awarded to whoever was leading. Only applied
+         * when the provider says the match ended early, never to a
+         * normally completed one. */
+        const endedEarly = /retired|walkover|w\/o/i.test(resolved.status || '');
+        if (endedEarly) {
+          /* The leader wins the MATCH, not merely the unfinished set.
+           *
+           * Awarding just the set left 6-4, 2-5 at 1-0 — handing the
+           * match to the player who took the first set while his
+           * opponent was 5-2 up in the second and he was the one
+           * walking off. Whoever is ahead when play stops is the one
+           * who advances, so their set count is set above the other's.
+           *
+           * The last set in progress is the best available read on who
+           * was ahead at the moment it ended. */
+          const last = String(resolved.score).split(',').pop().trim().split('-').map(Number);
+          const decidedLast = !isNaN(last[0]) && !isNaN(last[1]) &&
+            (last[0] >= 6 || last[1] >= 6) &&
+            (Math.abs(last[0] - last[1]) >= 2 || last[0] === 7 || last[1] === 7);
+
+          if (!decidedLast && !isNaN(last[0]) && !isNaN(last[1]) && last[0] !== last[1]) {
+            if (last[0] > last[1]) setsA = Math.max(setsA, setsB + 1);
+            else                   setsB = Math.max(setsB, setsA + 1);
+          }
+        }
+
         if (setsA || setsB) {
           data.homeScore = flipped ? setsB : setsA;
           data.awayScore = flipped ? setsA : setsB;
@@ -209,7 +268,7 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
       continue;
     }
 
-    const extendId = resolved.id;
+    const extendId = resolved ? resolved.id : null;
 
     /* The body below reads eventId, matchId and tour off `ev`. When the
        loop was driven by the feed those arrived with the payload; now we
@@ -242,8 +301,13 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
       oddsA = match.liveOddsA;
       oddsB = match.liveOddsB;
       priceSource = 'live';
-    } else {
-      const priced = await fetchPreMatchOdds(ev.eventId);
+    } else if (coreOdds) {
+      // Core odds are keyed on OUR competitorA/B ids, so no flip needed.
+      oddsA = coreOdds.oddsA;
+      oddsB = coreOdds.oddsB;
+      priceSource = 'core';
+    } else if (extendId) {
+      const priced = await fetchPreMatchOdds(extendId);
       if (priced) {
         oddsA = flipped ? priced.oddsB : priced.oddsA;
         oddsB = flipped ? priced.oddsA : priced.oddsB;
