@@ -20,12 +20,34 @@
 
 const live = require('./tennisLiveSocket.js');
 const { namesLikelyMatch } = require('./fetchEspn.js');
+const { parseLiveEvent } = require('./fetchTennisApi.js');
 const db = require('../lib/db.js');
 
 const ENABLED = process.env.TENNIS_SOCKET_ENABLED !== 'false';
 
 // eventId -> { unsubscribe, matchId }
 const joined = new Map();
+
+/* LIVE SNAPSHOT.
+ *
+ * The ingest used to ask REST (`extend/api/events/live`) which matches
+ * were in play. On a valid key that endpoint returns 0 rows while the
+ * socket all-feed reports InPlay matches at the same moment — verified
+ * with a probe. An empty answer there means nothing is ever promoted to
+ * live and nothing is ever closed out, so tennis rows sit unchanged on
+ * the board. That is the same silence that made live odds look broken.
+ *
+ * The all-feed has the data, so we keep its latest state here and let
+ * the ingest read it instead. */
+let liveSnapshot = [];
+let liveSnapshotAt = 0;
+
+function getLiveSnapshot() {
+  // Stale snapshot is worse than none: it would keep finished matches
+  // looking live. Two minutes without a push means we don't know.
+  if (!liveSnapshotAt || Date.now() - liveSnapshotAt > 120000) return [];
+  return liveSnapshot;
+}
 
 let allUnsub = null;
 let started = false;
@@ -163,6 +185,14 @@ async function startTennisLive() {
     allUnsub = await live.subscribeAllLive(async (rows) => {
       const seen = new Set();
 
+      // Record what the feed says before doing anything with it.
+      try {
+        liveSnapshot = rows.map(parseLiveEvent).filter(Boolean);
+        liveSnapshotAt = Date.now();
+      } catch (e) {
+        console.error(`[tennisLive] snapshot: ${e.message}`);
+      }
+
       for (const ev of rows) {
         if (!ev?.id) continue;
         seen.add(ev.id);
@@ -206,4 +236,4 @@ async function stopTennisLive() {
   started = false;
 }
 
-module.exports = { startTennisLive, stopTennisLive, orientPointState, joined };
+module.exports = { startTennisLive, stopTennisLive, orientPointState, joined, getLiveSnapshot };

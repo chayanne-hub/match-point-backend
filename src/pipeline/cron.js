@@ -81,35 +81,7 @@ const { computePregameProjectedTotalGoals, computeLiveProjectedTotalGoals, parse
 // straight who-wins call on every match, regardless of edge size).
 const MODEL_PICK_THRESHOLD = 65;
 
-/* SPORTS the pregame pipeline actually analyses.
- *
- * Baseball is disabled on evidence: across 198 graded picks it returned
- * -8.61% ROI (-$1,705 at $100 flat), against a whole-book loss of
- * -$1,044. Dropping it is the single change that flips the book
- * profitable.
- *
- * Soccer is disabled by DECISION, not by the numbers — worth stating
- * plainly, because the backtest says the opposite. It was the best
- * segment on record: +20.26% ROI, +$648 over 39 picks. But only 32 of
- * those were decided (soccer draws push the moneyline), which is a
- * sample small enough that +20% is inside the noise. Turn it back on by
- * removing it from DISABLED_SPORTS if the coverage is wanted.
- *
- * Env-driven rather than deleted, for two reasons: the finding is
- * in-sample (the losing bucket was identified after seeing the results,
- * which is how overfitting happens), and re-enabling should not require a
- * deploy. Set DISABLED_SPORTS='' to turn everything back on, or add more
- * as the backtest tells you to.
- *
- * Note this stops ANALYSIS — it does not delete graded history, and the
- * record on the site still includes every baseball pick already made. */
-const ALL_SPORTS = ['tennis', 'basketball', 'soccer', 'baseball', 'football'];
-const DISABLED_SPORTS = (process.env.DISABLED_SPORTS ?? 'baseball,soccer')
-  .split(',').map((x) => x.trim().toLowerCase()).filter(Boolean);
-const SPORTS = ALL_SPORTS.filter((s) => !DISABLED_SPORTS.includes(s));
-if (DISABLED_SPORTS.length) {
-  console.log(`[pipeline] analysing ${SPORTS.join(', ')} — disabled: ${DISABLED_SPORTS.join(', ')}`);
-}
+const SPORTS = ['tennis', 'basketball', 'soccer', 'baseball', 'football'];
 
 // Sports with a real, computed pregame/live total formula.
 const TOTAL_FORMULA_SPORTS = ['basketball', 'football', 'baseball', 'tennis', 'soccer'];
@@ -492,6 +464,17 @@ async function runForSport(sportSlug, dayFilter = null) {
     // not always oddsA.
     const pickedOdds = analysis.selection === `${m.competitorA} ML` ? m.oddsA : m.oddsB;
     const factsUsedJson = JSON.stringify(analysis.factors);
+
+    /* Blend the model's blind estimate with the de-vigged market price.
+     *
+     * This was added to the reanalyse path but never to THIS one, which
+     * is the path that makes almost every pick. The pick.create below
+     * referenced `blended` regardless, so every sport threw
+     * "blended is not defined" and no pick was written at all — the
+     * failure was total rather than partial, which is why football and
+     * basketball died alongside tennis. */
+    const selectionIsA = analysis.selection === `${m.competitorA} ML`;
+    const blended = blendWithMarket(analysis.confidence, m.oddsA, m.oddsB, selectionIsA);
 
     // ONE pick per match. This used to write TWO identical rows whenever
     // confidence cleared MODEL_PICK_THRESHOLD — same selection, same
@@ -1899,41 +1882,6 @@ async function updateEspnScores() {
  * no draw option in the model) is graded as a push rather than forced into
  * a win/loss — nobody actually won that match outright.
  */
-/**
- * Sets won by each side, parsed from Match.setScore ("6-4, 3-6, 6-2").
- *
- * Tennis is scored in sets, and NOTHING in the tennis pipeline writes
- * homeScore/awayScore — ingestTennis and tennisLiveRunner both write
- * setScore and liveScore only. ESPN writes the numeric scores, but ESPN
- * carries neither Challenger nor ITF and in practice misses main-tour
- * matches too. So every tennis match closed by our own pipeline reached
- * gradePick with null scores, returned null, and was skipped silently and
- * permanently.
- *
- * Tolerant of tiebreak notation ("7-6(5)") and of space- or
- * comma-separated sets, because the value is written from two different
- * providers and the exact separator is not guaranteed.
- */
-function tennisSetsFromScore(setScore) {
-  if (!setScore) return null;
-  // Strip tiebreak parentheses so "7-6(5)" reads as a 7-6 set.
-  const cleaned = String(setScore).replace(/\([^)]*\)/g, ' ');
-  const pairs = [...cleaned.matchAll(/(\d+)\s*-\s*(\d+)/g)];
-  if (!pairs.length) return null;
-
-  let setsA = 0, setsB = 0;
-  for (const m of pairs) {
-    const a = Number(m[1]), b = Number(m[2]);
-    if (!Number.isFinite(a) || !Number.isFinite(b) || a === b) continue;
-    if (a > b) setsA++; else setsB++;
-  }
-  // Equal sets means the match is unfinished, retired, or the string was
-  // mis-parsed. Refusing to guess is the point — a wrong grade is far
-  // worse than an ungraded pick, because it silently corrupts the record.
-  if (setsA === setsB) return null;
-  return { setsA, setsB };
-}
-
 function gradeMoneyline(match, pick) {
   const pickedName = pick.selection.replace(/\s*ML$/, '').trim();
   let pickedSide = null;
@@ -1991,18 +1939,7 @@ function gradeTotal(match, pick) {
 }
 
 function gradePick(match, pick) {
-  if (match.homeScore === null || match.awayScore === null) {
-    /* Tennis fallback: derive the result from sets won.
-     *
-     * Moneyline ONLY. A spread or total on tennis is priced in GAMES, and
-     * set counts cannot settle either — grading those from sets would
-     * produce confidently wrong results, which is worse than none. */
-    const isMoneyline = !pick.market || pick.market === 'moneyline';
-    if (!isMoneyline) return null;
-    const sets = tennisSetsFromScore(match.setScore);
-    if (!sets) return null;
-    return gradeMoneyline({ ...match, homeScore: sets.setsA, awayScore: sets.setsB }, pick);
-  }
+  if (match.homeScore === null || match.awayScore === null) return null;
 
   if (pick.market === 'spread') return gradeSpread(match, pick);
   if (pick.market === 'total') return gradeTotal(match, pick);
@@ -2031,25 +1968,9 @@ async function gradeFinishedMatches() {
   });
 
   let graded = 0;
-  const skipped = [];
   for (const pick of ungraded) {
     const outcome = gradePick(pick.match, pick);
-    if (!outcome) {
-      /* A skip used to be completely silent — `continue` and nothing
-       * else. A pick that cannot be graded is retried every 15 seconds
-       * forever, produces no log line, and simply never appears in the
-       * record. That is how every tennis match closed by our own pipeline
-       * went missing without anyone noticing: the only symptom was a win
-       * count that looked too low. */
-      skipped.push({
-        matchup: `${pick.match.competitorA} vs ${pick.match.competitorB}`,
-        market: pick.market,
-        why: (pick.match.homeScore === null || pick.match.awayScore === null)
-          ? (pick.match.setScore ? 'setScore present but unparseable/tied' : 'no scores recorded')
-          : 'selection did not match either competitor',
-      });
-      continue;
-    }
+    if (!outcome) continue;
 
     await db.result.create({
       data: { pickId: pick.id, outcome },
@@ -2059,12 +1980,6 @@ async function gradeFinishedMatches() {
 
   if (graded > 0) {
     console.log(`[grading] graded ${graded} pick(s).`);
-  }
-  if (skipped.length) {
-    console.warn(`[grading] ${skipped.length} finished pick(s) COULD NOT be graded:`);
-    for (const sk of skipped.slice(0, 10)) {
-      console.warn(`[grading]   ${sk.matchup} (${sk.market}) — ${sk.why}`);
-    }
   }
 }
 
