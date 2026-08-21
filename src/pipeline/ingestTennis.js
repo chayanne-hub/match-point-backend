@@ -356,14 +356,14 @@ async function cleanupDuplicateTennis({ dryRun = true } = {}) {
  * retrying matches it can never price. Only touches rows that have no
  * pick — anything already analysed is left exactly as it is.
  */
-async function markUnpriceableTennis({ dryRun = true } = {}) {
+async function clearTennisSkipFlags({ dryRun = true } = {}) {
   const sport = await db.sport.findFirst({ where: { slug: 'tennis' } });
   if (!sport) return { marked: 0 };
 
   const rows = await db.match.findMany({
     where: {
       sportId: sport.id,
-      skipAnalysis: false,
+      skipAnalysis: true,
       tourLevel: { in: [0, 1] },
       startTime: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
     },
@@ -374,11 +374,11 @@ async function markUnpriceableTennis({ dryRun = true } = {}) {
   if (!dryRun && targets.length) {
     await db.match.updateMany({
       where: { id: { in: targets.map((t) => t.id) } },
-      data: { skipAnalysis: true },
+      data: { skipAnalysis: false },
     });
   }
-  console.log(`[tennisIngest] ${targets.length} unpriceable row(s) ${dryRun ? 'would be' : ''} flagged (of ${rows.length} lower-tier)`);
+  console.log(`[tennisIngest] ${targets.length} lower-tier row(s) ${dryRun ? 'would be' : ''} CLEARED for analysis (of ${rows.length} flagged)`);
   return { marked: targets.length, scanned: rows.length };
 }
 
-module.exports = { ingestTennisFixtures, applyTennisLiveState, cleanupDuplicateTennis, markUnpriceableTennis };
+module.exports = { ingestTennisFixtures, applyTennisLiveState, cleanupDuplicateTennis, clearTennisSkipFlags };
