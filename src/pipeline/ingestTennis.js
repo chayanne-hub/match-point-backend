@@ -86,6 +86,22 @@ async function ingestTennisFixtures() {
      * 48h either side covers rescheduling while staying far short of
      * the gap between two genuine meetings of the same pair, which do
      * not happen inside a single tournament. */
+    /* Checked for EVERY fixture, not just ones another provider gave us.
+     *
+     * This lived inside the `if (existing)` branch, which only runs when
+     * a match already exists from The Odds API. Nearly all Challenger and
+     * ITF rows are ones we created ourselves, so they took the upsert
+     * path and never reached the check — liveSourceIds stayed empty and
+     * nothing was ever promoted, which is why no "promoted" line ever
+     * appeared in the logs. */
+    if (f.live !== null && f.live !== undefined && f.live !== false) {
+      if (!loggedLiveShape) {
+        console.log(`[tennisIngest] fixture live field shape: ${JSON.stringify(f.live)}`);
+        loggedLiveShape = true;
+      }
+      liveSourceIds.push(f.sourceId);
+    }
+
     const windowStart = new Date(f.startTime.getTime() - 48 * 60 * 60 * 1000);
     const windowEnd = new Date(f.startTime.getTime() + 48 * 60 * 60 * 1000);
     const candidates = await db.match.findMany({
@@ -147,15 +163,6 @@ async function ingestTennisFixtures() {
        * every not-yet-started fixture), so this treats ANY non-null,
        * non-false value as "in play" and logs the raw value once so the
        * real shape can be read from the logs instead of guessed. */
-      if (f.live !== null && f.live !== undefined && f.live !== false) {
-        if (!loggedLiveShape) {
-          console.log(`[tennisIngest] fixture live field shape: ${JSON.stringify(f.live)}`);
-          loggedLiveShape = true;
-        }
-        if (existing.status === 'scheduled') enrich.status = 'live';
-        liveSourceIds.push(f.sourceId);
-      }
-
       if (Object.keys(enrich).length) {
         await db.match.update({ where: { id: existing.id }, data: enrich });
       }
