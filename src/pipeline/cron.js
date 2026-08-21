@@ -1676,6 +1676,9 @@ function startTennisUpcomingScheduled() {
     analyzeTennisUpcoming({
       analyze: analyzeMatchWithRetry,
       blend: blendWithMarket,
+      // Lower-tier matches that go live before a price appears are
+      // assessed in-play from socket odds rather than left unanalysed.
+      reassessLiveMatch,
       limit: Number(process.env.TENNIS_ANALYSE_LIMIT) || 8,
     })
       .catch((err) => console.error('[tennis-upcoming] run failed:', err.message))

@@ -31,7 +31,9 @@ const ENABLED = process.env.TENNIS_UPCOMING_ANALYSIS !== 'false';
  *                 and importing it here would create a require cycle.
  * @param blend    blendWithMarket, same reasoning.
  */
-async function analyzeTennisUpcoming({ analyze, blend, limit = 15 } = {}) {
+// reassessLiveMatch is injected alongside analyze/blend for the same
+// reason they are: requiring matchAnalyst here would create a cycle.
+async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit = 15 } = {}) {
   if (!ENABLED || typeof analyze !== 'function') return { analysed: 0, skipped: 0 };
 
   const sport = await db.sport.findFirst({ where: { slug: 'tennis' } });
@@ -112,7 +114,24 @@ async function analyzeTennisUpcoming({ analyze, blend, limit = 15 } = {}) {
      * prices for matches we joined; analysing those is a different
      * product decision (a live pick, not a pre-match one) and is
      * deliberately not done here. */
-    if (match.status === 'live' || untilStart < 0) { missed++; continue; }
+    /* IN-PLAY MATCHES USE LIVE ODDS.
+     *
+     * Pre-match odds vanish once a match starts, so an ITF match that
+     * went live before its price appeared could never be analysed and
+     * sat showing "Awaiting Analysis" indefinitely.
+     *
+     * But the socket runner writes live prices onto the row for every
+     * match it has joined, so the price IS there for in-play matches —
+     * just in a different column. We use it, and tell the analyst the
+     * match is under way plus the current score, so it is assessing the
+     * position in front of it rather than a match that hasn't started.
+     *
+     * Only matches we actually hold a live price for: without one there
+     * is nothing to analyse against, and that is a genuine miss. */
+    const isLive = match.status === 'live' || untilStart < 0;
+    const hasLiveOdds = isLive
+      && typeof match.liveOddsA === 'number' && typeof match.liveOddsB === 'number';
+    if (isLive && (!hasLiveOdds || typeof reassessLiveMatch !== 'function')) { missed++; continue; }
 
     const resolved = await resolveExtendId(match.competitorA, match.competitorB, match.startTime)
       .catch(() => null);
@@ -158,11 +177,18 @@ async function analyzeTennisUpcoming({ analyze, blend, limit = 15 } = {}) {
     const flipped = namesLikelyMatch(match.competitorA, ev.competitorB) &&
                     !namesLikelyMatch(match.competitorA, ev.competitorA);
 
-    const priced = await fetchPreMatchOdds(ev.eventId);
-    if (!priced) { unpriced++; continue; }
-
-    const oddsA = flipped ? priced.oddsB : priced.oddsA;
-    const oddsB = flipped ? priced.oddsA : priced.oddsB;
+    let oddsA, oddsB;
+    if (hasLiveOdds) {
+      // Already stored in OUR orientation by the socket runner, so the
+      // pre-match `flipped` correction must not be applied again here.
+      oddsA = match.liveOddsA;
+      oddsB = match.liveOddsB;
+    } else {
+      const priced = await fetchPreMatchOdds(ev.eventId);
+      if (!priced) { unpriced++; continue; }
+      oddsA = flipped ? priced.oddsB : priced.oddsA;
+      oddsB = flipped ? priced.oddsA : priced.oddsB;
+    }
 
     /* STRUCTURED FACTOR DATA.
      *
@@ -187,15 +213,34 @@ async function analyzeTennisUpcoming({ analyze, blend, limit = 15 } = {}) {
 
     const verifiedData = renderFactorBrief(brief, { surface: match.surface });
 
-    const analysis = await analyze({
-      sport: 'tennis',
-      competitorA: match.competitorA,
-      competitorB: match.competitorB,
-      oddsA,
-      oddsB,
-      startTime: match.startTime,
-      verifiedData,
-    }, `${match.competitorA} vs ${match.competitorB} (${ev.league || 'tennis'})`);
+    /* A live match goes to the LIVE analyst, not the pre-match one.
+     *
+     * These are different prompts. The pre-match analyst reasons about a
+     * match that has not started; handing it in-play odds and a flag it
+     * does not read would produce a confident pre-match assessment
+     * quoting live prices — a wrong pick rather than a missing one.
+     * reassessLiveMatch exists precisely for this and takes the score. */
+    const label = `${match.competitorA} vs ${match.competitorB} (${ev.league || 'tennis'})${hasLiveOdds ? ' [live]' : ''}`;
+
+    const analysis = hasLiveOdds
+      ? await reassessLiveMatch({
+          sport: 'tennis',
+          competitorA: match.competitorA,
+          competitorB: match.competitorB,
+          liveScore: match.liveSetScore || match.setScore || null,
+          oddsA,
+          oddsB,
+          priorAnalysis: null,
+        }).catch(() => null)
+      : await analyze({
+          sport: 'tennis',
+          competitorA: match.competitorA,
+          competitorB: match.competitorB,
+          oddsA,
+          oddsB,
+          startTime: match.startTime,
+          verifiedData,
+        }, label);
 
     if (!analysis) { skipped++; continue; }
 
@@ -229,7 +274,7 @@ async function analyzeTennisUpcoming({ analyze, blend, limit = 15 } = {}) {
     console.log(`[tennisUpcoming] ${match.competitorA} vs ${match.competitorB} (${ev.league}) -> ${analysis.selection} @ ${selectionIsA ? oddsA : oddsB}`);
   }
 
-  console.log(`[tennisUpcoming] ${analysed} analysed, ${unpriced} not yet priced, ${skipped} skipped, ${finished} closed as finished, ${tooEarly} too early to price, ${missed} started before pricing`);
+  console.log(`[tennisUpcoming] ${analysed} analysed, ${unpriced} not yet priced, ${skipped} skipped, ${finished} closed as finished, ${tooEarly} too early to price, ${missed} started, no live price`);
   return { analysed, unpriced, skipped, finished, tooEarly, missed };
 }
 
