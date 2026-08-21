@@ -48,6 +48,18 @@ server.listen(PORT, () => {
   console.log(`Match Point backend listening on port ${PORT}`);
 });
 
+/* COST SWITCH — declared here, above every use.
+ *
+ * This was originally declared further down, next to the block it
+ * documents, but `startScheduled()` runs before that point. A `const` is
+ * not hoisted like a function: reading it earlier in the file throws
+ * "Cannot access 'PAUSED' before initialization" and crash-loops the
+ * server on boot. Same trap as POINT_FRESHNESS_MS in the terminal.
+ *
+ * Anything read during boot has to be declared at module top. */
+const PAUSED = process.env.PIPELINE_PAUSED === 'true';
+if (PAUSED) console.warn('[cost] PIPELINE_PAUSED=true — no scheduled analysis will run.');
+
 initLiveSocket(server);
 
 startWatchdog();
@@ -74,9 +86,6 @@ if (!PAUSED) startScheduled();
  *   TENNIS_UPCOMING_ENABLED=false   stop the lower-tier tennis cycle
  *   PIPELINE_PAUSED=true            stop all scheduled analysis
  */
-const PAUSED = process.env.PIPELINE_PAUSED === 'true';
-if (PAUSED) console.warn('[cost] PIPELINE_PAUSED=true — no scheduled analysis will run.');
-
 if (!PAUSED && process.env.LIVE_ANALYSIS_ENABLED !== 'false') {
   startLiveScheduled();
 } else {
