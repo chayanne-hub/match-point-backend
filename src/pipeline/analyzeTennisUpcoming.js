@@ -156,10 +156,38 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
      * the board. This is also the close-out path lower tiers never had:
      * ESPN doesn't carry Challengers, so nothing else can finalise them. */
     if (resolved.status && /ended|finished|retired|walkover/i.test(resolved.status)) {
-      await db.match.update({
-        where: { id: match.id },
-        data: { status: 'final', ...(resolved.score ? { liveSetScore: resolved.score } : {}) },
-      }).catch(() => {});
+      /* Record the SETS WON as home/away score, not just the string.
+       *
+       * gradePick() returns null unless homeScore and awayScore are set.
+       * We were closing these matches with a score STRING only, so every
+       * Challenger and ITF pick sat ungraded forever — invisible to the
+       * archive, to "Graded Today", and to the win rate. ESPN carries no
+       * lower-tier tennis, so nothing else was ever going to fill those
+       * fields in.
+       *
+       * Sets won is the right number for a tennis moneyline: the player
+       * who wins more sets wins the match, which is what the pick was on. */
+      const data = { status: 'final' };
+      if (resolved.score) {
+        data.liveSetScore = resolved.score;
+        data.setScore = resolved.score;
+
+        let setsA = 0, setsB = 0;
+        String(resolved.score).split(',').forEach((chunk) => {
+          const [a, b] = chunk.trim().split('-').map(Number);
+          if (isNaN(a) || isNaN(b)) return;
+          if (a > b) setsA++; else if (b > a) setsB++;
+        });
+
+        // The feed lists players in ITS order; `flipped` tells us whether
+        // that is reversed relative to how we store the match.
+        if (setsA || setsB) {
+          data.homeScore = flipped ? setsB : setsA;
+          data.awayScore = flipped ? setsA : setsB;
+        }
+      }
+
+      await db.match.update({ where: { id: match.id }, data }).catch(() => {});
       finished++;
       continue;
     }
