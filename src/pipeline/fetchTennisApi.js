@@ -93,6 +93,26 @@ function isDoubles(fx) {
          (fx?.player1?.countryAcr === 'N/A' && fx?.player2?.countryAcr === 'N/A');
 }
 
+/* TIER FROM THE TOURNAMENT NAME.
+ *
+ * `tournament.rankId` cannot be trusted: Cincinnati matches (Tiafoe v
+ * Auger-Aliassime, Safiullin v Wawrinka) were stored as rankId 1 —
+ * Challenger — which let main tour straight through a
+ * TENNIS_TOUR_LEVELS=0,1 filter meant to exclude it. Since ESPN also
+ * carries those matches, every one became a duplicate row, which is the
+ * 7-8 duplicates the board has been collapsing all along.
+ *
+ * The tournament NAME is unambiguous and comes from the same payload:
+ * ITF events are always coded (W15, M25), Challengers always say so.
+ * Name first, rankId only as a fallback when the name says nothing. */
+function tierFromName(name, rankId) {
+  const n = String(name || '');
+  if (/challenger/i.test(n)) return 1;
+  if (/\b[WM]\d{2,3}\b/.test(n) || /\bitf\b/i.test(n)) return 0;
+  if (/open|masters|cup|championship|slam/i.test(n)) return 3;
+  return typeof rankId === 'number' ? rankId : null;
+}
+
 function shapeFixture(fx, tourType) {
   const rankId = fx?.tournament?.rankId;
   return {
@@ -108,8 +128,8 @@ function shapeFixture(fx, tourType) {
     playerBId: fx.player2Id ?? null,
     league: fx.tournament?.name || null,
     tournamentId: fx.tournamentId ?? null,
-    tourLevel: rankId ?? null,
-    tourLevelName: RANK[rankId] || 'Unknown',
+    tourLevel: tierFromName(fx?.tournament?.name, rankId),
+    tourLevelName: RANK[tierFromName(fx?.tournament?.name, rankId)] || 'Unknown',
     roundId: fx.roundId ?? null,
     seedA: fx.seed1 || null,
     seedB: fx.seed2 || null,
@@ -138,7 +158,7 @@ async function fetchFixturesForDate(dateStr, { tours = ['atp', 'wta'], pageSize 
       const rows = Array.isArray(body?.data) ? body.data : [];
       for (const fx of rows) {
         if (isDoubles(fx)) { skipped.doubles++; continue; }
-        if (!TOUR_LEVELS.includes(fx?.tournament?.rankId)) { skipped.level++; continue; }
+        if (!TOUR_LEVELS.includes(tierFromName(fx?.tournament?.name, fx?.tournament?.rankId))) { skipped.level++; continue; }
         if (!fx.date) { skipped.noStart++; continue; }
         out.push(shapeFixture(fx, tourType));
       }
@@ -471,6 +491,7 @@ async function discoverOddsPath(sampleEventId) {
 }
 
 module.exports = {
+  tierFromName,
   resolveExtendId,
   apiGet,
   fetchUpcomingEvents,

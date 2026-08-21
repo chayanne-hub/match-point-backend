@@ -1,7 +1,6 @@
 const express = require('express');
 const db = require('../lib/db');
 const { requireAuth } = require('../lib/auth');
-const { getEntitlement } = require('../lib/requireAccess');
 const { fetchEspnNews } = require('../pipeline/fetchEspnNews');
 const { getRecentPosts } = require('../pipeline/fetchXTimeline');
 const { getStandings, getRecordMap } = require('../pipeline/fetchEspnStandings');
@@ -123,38 +122,23 @@ async function userHasAccess(userId, pickId) {
   const user = await db.user.findUnique({ where: { id: userId }, select: { isAdmin: true } });
   if (user?.isAdmin) return true;
 
-  // Legacy single-pick buys from the Coinbase era. No longer sold, but
-  // those rows still exist and those people paid for that pick.
-  // Guarded: without pickId this composite lookup is malformed.
-  if (pickId) {
-    const purchased = await db.purchasedPick.findUnique({
-      where: { userId_pickId: { userId, pickId } },
-    });
-    if (purchased) return true;
-  }
+  const purchased = await db.purchasedPick.findUnique({
+    where: { userId_pickId: { userId, pickId } },
+  });
+  if (purchased) return true;
 
-  /* Subscription access is decided in ONE place now — lib/requireAccess.js
-   * — because this inline check and the webhook handler had drifted apart
-   * and were contradicting each other.
-   *
-   * The old list was ['active', 'canceling']. Both entries were wrong
-   * after the Whop migration:
-   *
-   *   'canceling'  is never written by any code path. It is a Coinbase-era
-   *                leftover. The reasoning attached to it was sound — a
-   *                weekly subscriber who cancels on day 2 keeps the week —
-   *                and that outcome still holds, because currentPeriodEnd
-   *                is what actually ends access, not the status flag.
-   *
-   *   'past_due'   IS written, on every failed renewal charge, and was
-   *                being REJECTED. So a paying member whose card was
-   *                mid-retry got silently locked out — the precise outcome
-   *                the webhook handler's own comment says it is avoiding,
-   *                and the fastest route to the chargeback that comment
-   *                was written to prevent.
-   */
-  const { entitled } = await getEntitlement(userId);
-  return entitled;
+  const sub = await db.subscription.findUnique({ where: { userId } });
+  // Must check expiration explicitly — Coinbase Commerce has no
+  // subscription lifecycle events (unlike Stripe's customer.subscription.*
+  // webhooks), so nothing ever flips status away from 'active' on its own.
+  // Without this check, one payment would grant access forever.
+  // 'canceling' still has access. Someone who cancels a weekly plan on
+  // day 2 paid for the week and keeps the week — the flag only stops the
+  // renewal. currentPeriodEnd is what actually ends access, and Whop
+  // fires membership.went_invalid at that point to close it out.
+  // Requiring 'active' alone would have revoked access the instant they
+  // hit cancel, which is both wrong and the fastest route to a chargeback.
+  return !!sub && ['active', 'canceling'].includes(sub.status) && sub.currentPeriodEnd > new Date();
 }
 
 // Resolves the requester from an optional Authorization header without
@@ -1137,384 +1121,6 @@ router.get('/rankings', async (req, res) => {
 // more time than it saves.
 //
 // Read-only: no picks created, no Anthropic credit spent.
-/* ------------------------------------------------------------------ *
- * BACKTEST — where does the model actually make money?
- *
- * The record sits around 71% while the equity curve is negative. That
- * combination has one explanation: the model is right about who wins and
- * wrong about whether the price was worth taking. A win rate cannot show
- * that. ROI segmented by price can.
- *
- * Runs in-process so it reaches Postgres over the private network — the
- * standalone script needed a public proxy that isn't enabled.
- *
- * Read-only. GET /api/picks/admin/backtest?sport=tennis&days=30&market=all
- * ------------------------------------------------------------------ */
-router.get('/admin/backtest', requireAuth, async (req, res) => {
-  try {
-    const user = await db.user.findUnique({ where: { id: req.userId } });
-    if (!user || !isAdminEmail(user.email)) return res.status(403).json({ error: 'Admin access required.' });
-
-    const sport = req.query.sport || null;
-    const days = Number(req.query.days) || 0;
-    const market = req.query.market || 'moneyline';
-    const STAKE = Number(req.query.stake) || 100;
-
-    /* Flat stake, deliberately. A staking scheme can make a losing set of
-     * picks look profitable for a stretch, which is the exact
-     * self-deception this endpoint exists to prevent. */
-    const profitOn = (odds, outcome) => {
-      if (outcome === 'push') return 0;
-      if (outcome === 'loss') return -STAKE;
-      if (outcome !== 'win') return null;
-      const o = Number(odds);
-      if (!Number.isFinite(o) || o === 0) return null;
-      return o > 0 ? STAKE * (o / 100) : STAKE * (100 / Math.abs(o));
-    };
-    const impliedProb = (odds) => {
-      const o = Number(odds);
-      if (!Number.isFinite(o) || o === 0) return null;
-      return o > 0 ? 100 / (o + 100) : Math.abs(o) / (Math.abs(o) + 100);
-    };
-
-    /* MUST match how /stats counts, or the two disagree about the same
-     * record on the same screen.
-     *
-     * pickType filter + per-match dedupe are both load-bearing: a single
-     * call was historically written as TWO Pick rows — 'winner' and
-     * 'model' — with identical selection, odds and outcome whenever it
-     * cleared the edge threshold. Counting both double-weights every
-     * above-threshold match, which inflates the sample AND distorts every
-     * segment ROI, because the duplicates are not evenly spread across
-     * price bands or sports.
-     *
-     * This was wrong in the first version of this endpoint. It reported
-     * 765 graded picks where /stats reports 510, and the segment figures
-     * it produced were used to make real decisions. */
-    const rawPicks = await db.pick.findMany({
-      where: {
-        result: { isNot: null },
-        pickType: { in: ['model', 'winner'] },
-        ...(market !== 'all' ? { market } : {}),
-        ...(days ? { createdAt: { gte: new Date(Date.now() - days * 864e5) } } : {}),
-      },
-      include: { result: true, match: { include: { sport: true } } },
-      orderBy: { createdAt: 'asc' },
-    });
-
-    /* One row per match+market, preferring the 'model' row — same rule
-     * dedupeResultsByMatch applies for /stats. Keyed by market too, since
-     * a match can legitimately carry separate moneyline/spread/total
-     * picks that are NOT duplicates of each other. */
-    const byMatchMarket = new Map();
-    for (const p of rawPicks) {
-      const key = `${p.matchId}|${p.market}`;
-      const existing = byMatchMarket.get(key);
-      if (!existing || (existing.pickType !== 'model' && p.pickType === 'model')) {
-        byMatchMarket.set(key, p);
-      }
-    }
-    const picks = [...byMatchMarket.values()];
-    const duplicatesDropped = rawPicks.length - picks.length;
-
-    const rows = picks
-      .filter((p) => !sport || p.match?.sport?.slug === sport)
-      .map((p) => ({
-        odds: p.odds,
-        outcome: p.result.outcome,
-        confidence: p.confidence,
-        rawConfidence: p.rawConfidence,
-        marketProb: p.marketProb,
-        conviction: p.conviction || 'guess',
-        clvPercent: p.clvPercent,
-        closingOdds: p.closingOdds,
-        isLive: p.isLive,
-        market: p.market,
-        sport: p.match?.sport?.slug || 'unknown',
-        tourLevel: p.match?.tourLevel,
-        matchId: p.matchId,
-        createdAt: p.createdAt,
-        // Which side the pick is on. cron.js writes selection as
-        // `${competitorA} ML`, so a prefix test resolves it.
-        sideIsA: !!(p.match?.competitorA &&
-          String(p.selection || '').startsWith(p.match.competitorA)),
-      }));
-
-    if (!rows.length) return res.json({ n: 0, message: 'No graded picks match those filters.' });
-
-    const summarise = (set) => {
-      let n = 0, wins = 0, losses = 0, pushes = 0, staked = 0, profit = 0;
-      for (const r of set) {
-        const pr = profitOn(r.odds, r.outcome);
-        if (pr === null) continue;
-        n++;
-        if (r.outcome === 'win') wins++; else if (r.outcome === 'loss') losses++; else pushes++;
-        if (r.outcome !== 'push') staked += STAKE;
-        profit += pr;
-      }
-      const decided = wins + losses;
-      return {
-        n, wins, losses, pushes,
-        profit: Math.round(profit),
-        winRate: decided ? +((wins / decided) * 100).toFixed(1) : null,
-        roi: staked ? +((profit / staked) * 100).toFixed(2) : null,
-        // A handful of picks is not a strategy. Flagged so a 3-pick 100%
-        // ROI can't be read as one.
-        thin: n < 25,
-      };
-    };
-
-    const groupBy = (set, fn) => {
-      const m = {};
-      for (const r of set) {
-        const k = fn(r);
-        if (k === null || k === undefined) continue;
-        (m[k] = m[k] || []).push(r);
-      }
-      return Object.fromEntries(Object.entries(m).map(([k, v]) => [k, summarise(v)]));
-    };
-
-    const priceBand = (o) => {
-      const n = Number(o);
-      if (!Number.isFinite(n)) return 'unknown';
-      if (n <= -300) return '1 heavy fav (-300+)';
-      if (n <= -200) return '2 big fav (-299..-200)';
-      if (n <= -150) return '3 solid fav (-199..-150)';
-      if (n <= -110) return '4 mild fav (-149..-110)';
-      if (n < 110) return '5 pick-em';
-      if (n < 200) return '6 small dog (+110..+199)';
-      if (n < 300) return '7 dog (+200..+299)';
-      return '8 big dog (+300+)';
-    };
-    const confBand = (c) => {
-      const n = Number(c);
-      if (!Number.isFinite(n)) return 'unknown';
-      if (n < 55) return '<55%'; if (n < 60) return '55-59%'; if (n < 65) return '60-64%';
-      if (n < 70) return '65-69%'; if (n < 75) return '70-74%'; if (n < 80) return '75-79%';
-      return '80%+';
-    };
-
-    const overall = summarise(rows);
-
-    /* BREAK-EVEN from what the winners ACTUALLY PAID.
-     *
-     * The first version of this averaged implied probability across every
-     * pick. That is systematically optimistic — by Jensen's inequality the
-     * payout at the average price exceeds the average payout — and it
-     * produced a positive gap sitting next to a negative ROI, which is a
-     * contradiction, not a finding.
-     *
-     * Derived from realised payouts, the comparison is algebraically
-     * consistent with P/L and cannot contradict it:
-     *   profit >= 0  <=>  winRate >= 100 / (100 + avgPayoutOnWins) */
-    const decidedRows = rows.filter((r) => r.outcome !== 'push');
-    const winRows = decidedRows.filter((r) => r.outcome === 'win');
-    const totalWinPayout = winRows.reduce((sum, r) => {
-      const o = Number(r.odds);
-      return sum + (o > 0 ? STAKE * (o / 100) : STAKE * (100 / Math.abs(o)));
-    }, 0);
-    const avgPayoutOnWins = winRows.length ? totalWinPayout / winRows.length : null;
-    const breakEvenWinRate = avgPayoutOnWins
-      ? +((STAKE / (STAKE + avgPayoutOnWins)) * 100).toFixed(1) : null;
-
-    /* rawConfidence is the model's own probability BEFORE the market was
-     * blended in. If disagreeing with the market is where the profit is,
-     * the blend is diluting the edge — a far cheaper fix than new
-     * factors. */
-    const withRaw = rows.filter((r) => Number.isFinite(r.rawConfidence) && Number.isFinite(r.marketProb));
-    const modelVsMarket = withRaw.length >= 25 ? {
-      agrees: summarise(withRaw.filter((r) => Math.abs(r.rawConfidence - r.marketProb) <= 5)),
-      modelMoreConfident: summarise(withRaw.filter((r) => r.rawConfidence - r.marketProb > 5)),
-      modelLessConfident: summarise(withRaw.filter((r) => r.marketProb - r.rawConfidence > 5)),
-    } : { note: `only ${withRaw.length} picks carry both rawConfidence and marketProb` };
-
-    /* The actionable part: if publishing everything loses money but a
-     * filtered subset doesn't, that subset is the product. */
-    const scenarios = {
-      everything: summarise(rows),
-      'no shorter than -200': summarise(rows.filter((r) => Number(r.odds) > -200)),
-      'no shorter than -150': summarise(rows.filter((r) => Number(r.odds) > -150)),
-      'underdogs only': summarise(rows.filter((r) => Number(r.odds) >= 100)),
-      'strong conviction only': summarise(rows.filter((r) => r.conviction === 'strong')),
-      'confidence 65%+': summarise(rows.filter((r) => r.confidence >= 65)),
-      'confidence 65%+ and > -200': summarise(rows.filter((r) => r.confidence >= 65 && Number(r.odds) > -200)),
-    };
-
-    /* PRICE INTEGRITY — is the equity curve built on bettable numbers?
-     *
-     * Every figure here assumes pick.odds was a price you could actually
-     * have taken. Two reasons that may not hold:
-     *
-     *  1. LIVE picks record the price mid-match. Real, but it existed for
-     *     seconds while a match was in play — not something a member
-     *     could act on. Mixed into the same curve as pregame picks, it
-     *     makes the record describe a bet nobody placed.
-     *
-     *  2. Suspended-market placeholders. /stats once bounded odds to
-     *     +/-2000 to exclude corrupted rows, then widened to +/-100000
-     *     because the upstream cause was fixed — but rows written BEFORE
-     *     that fix are still stored and now pass the wider filter. A
-     *     -10000 winner pays $1 and drags the average payout down.
-     *
-     * Reported, not silently filtered: the decision about what belongs in
-     * a published record is not one this endpoint should make quietly. */
-    const pctl = (arr, q) => {
-      if (!arr.length) return null;
-      const a = [...arr].sort((x, y) => x - y);
-      return a[Math.min(a.length - 1, Math.floor(q * a.length))];
-    };
-    const allOdds = decidedRows.map((r) => Number(r.odds)).filter(Number.isFinite);
-    const liveRows = decidedRows.filter((r) => r.isLive);
-    const pregameRows = decidedRows.filter((r) => !r.isLive);
-    const extreme = (limit) => decidedRows.filter((r) => Number(r.odds) <= limit);
-
-    const priceIntegrity = {
-      oddsRange: { min: Math.min(...allOdds), max: Math.max(...allOdds) },
-      percentiles: { p5: pctl(allOdds, 0.05), median: pctl(allOdds, 0.5), p95: pctl(allOdds, 0.95) },
-      live: { ...summarise(liveRows), what: 'price recorded mid-match — not bettable by a member' },
-      pregame: { ...summarise(pregameRows), what: 'price frozen at analysis time, single book, never re-validated' },
-      shorterThan1000: summarise(extreme(-1000)),
-      shorterThan2000: { ...summarise(extreme(-2000)), what: 'the old sanity bound — these were excluded before it was widened' },
-      withClosingOdds: decidedRows.filter((r) => Number.isFinite(r.closingOdds)).length,
-      note: 'A curve mixing live and pregame prices is not a record a member could have replicated. Compare the two rows above.',
-    };
-
-
-    /* ================= LATENCY RE-PRICING =================
-     *
-     * The curve above grades every pick at the price stamped the instant
-     * it was posted. Nobody bets at that instant. A member sees the
-     * alert, opens their book, finds the match, places the bet — a minute
-     * or two later — and in-play tennis reprices on every point.
-     *
-     * The drift is not random, which is what makes this worth measuring.
-     * A player is 4.0 BECAUSE he is losing; the moment he breaks back,
-     * 4.0 becomes 3.2. So the exact situation that makes a live price
-     * attractive is the one where it decays fastest once the model turns
-     * out to be right. The recorded price is systematically better than
-     * the achievable one — not through any dishonesty, just physics.
-     *
-     * OddsSnapshot already stores repeated captures per match, with BOTH
-     * the line-of-record book (bookOddsA/B) and the best across books
-     * (bestOddsA/B). So the honest question — "what could a member
-     * actually have got N minutes after we posted?" — is answerable from
-     * data already on disk.
-     *
-     * Reported at several delays at once, because the SHAPE of the decay
-     * is the finding. Flat means live alerts are genuinely valuable.
-     * Steep means the alert has to fire faster or not at all.
-     */
-    const LATENCIES = [0, 1, 2, 5, 10];
-    let latency = null;
-
-    const matchIds = [...new Set(rows.map((r) => r.matchId).filter(Boolean))];
-    if (matchIds.length) {
-      const snaps = await db.oddsSnapshot.findMany({
-        where: { matchId: { in: matchIds } },
-        orderBy: { capturedAt: 'asc' },
-        select: { matchId: true, capturedAt: true, bestOddsA: true, bestOddsB: true,
-                  bookOddsA: true, bookOddsB: true },
-      });
-
-      const byMatch = new Map();
-      for (const sn of snaps) {
-        if (!byMatch.has(sn.matchId)) byMatch.set(sn.matchId, []);
-        byMatch.get(sn.matchId).push(sn);
-      }
-
-      /* First capture at or after the deadline. Deliberately NOT the
-       * nearest one — a snapshot from before the member could have acted
-       * is exactly the optimistic price we are trying to stop counting. */
-      const priceAfter = (row, minutes) => {
-        const list = byMatch.get(row.matchId);
-        if (!list || !row.createdAt) return null;
-        const deadline = new Date(row.createdAt).getTime() + minutes * 60000;
-        const sn = list.find((x) => new Date(x.capturedAt).getTime() >= deadline);
-        if (!sn) return null;
-        const book = row.sideIsA ? sn.bookOddsA : sn.bookOddsB;
-        const best = row.sideIsA ? sn.bestOddsA : sn.bestOddsB;
-        return {
-          book: Number.isFinite(book) ? book : null,
-          best: Number.isFinite(best) ? best : null,
-          waitedMs: new Date(sn.capturedAt).getTime() - new Date(row.createdAt).getTime(),
-        };
-      };
-
-      const repriced = (minutes, field) => {
-        const out = [];
-        let covered = 0;
-        for (const r of rows) {
-          const px = priceAfter(r, minutes);
-          const odds = px && px[field];
-          if (!Number.isFinite(odds)) continue;
-          covered++;
-          out.push({ ...r, odds });
-        }
-        return { ...summarise(out), covered };
-      };
-
-      const atRecorded = summarise(rows.filter((r) => byMatch.has(r.matchId)));
-      const curve = {};
-      for (const m of LATENCIES) {
-        curve[`${m}min`] = {
-          atBookOfRecord: repriced(m, 'book'),
-          withLineShopping: repriced(m, 'best'),
-        };
-      }
-
-      /* Coverage matters: picks with no snapshot after the deadline are
-       * silently absent from the re-priced rows, so a shrinking sample
-       * across delays is itself information about polling frequency. */
-      latency = {
-        picksWithSnapshots: rows.filter((r) => byMatch.has(r.matchId)).length,
-        picksTotal: rows.length,
-        asRecorded: atRecorded,
-        curve,
-        howToRead: 'Compare atBookOfRecord across delays. Flat decay = live alerts are worth publishing. Steep decay = the recorded price was never achievable. withLineShopping shows what best-price would have added on top.',
-      };
-    }
-
-    res.json({
-      filters: { sport, days: days || 'all', market, stake: STAKE },
-      priceIntegrity,
-      latency,
-      /* Reconciliation against /stats. Note /stats ALSO excludes
-       * DEVELOPING_SPORTS (football, soccer) from its published figures,
-       * which this endpoint deliberately does not — internal analysis
-       * wants to see them. So expect this n to exceed the published
-       * sample by however many graded picks those sports carry. */
-      counting: {
-        gradedRowsBeforeDedupe: rawPicks.length,
-        duplicatesDropped,
-        note: duplicatesDropped
-          ? 'legacy winner/model pairs collapsed to one row per match+market'
-          : 'no duplicate pairs found',
-        includesDevelopingSports: true,
-      },
-      overall,
-      breakEvenWinRate,
-      avgPayoutPerWin: avgPayoutOnWins ? +avgPayoutOnWins.toFixed(2) : null,
-      // Positive means the picks are beating the prices paid for them.
-      // Guaranteed to agree with the sign of overall.roi.
-      gapVsBreakEven: breakEvenWinRate !== null && overall.winRate !== null
-        ? +(overall.winRate - breakEvenWinRate).toFixed(1) : null,
-      byPriceBand: groupBy(rows, (r) => priceBand(r.odds)),
-      byConfidence: groupBy(rows, (r) => confBand(r.confidence)),
-      byConviction: groupBy(rows, (r) => r.conviction),
-      bySport: groupBy(rows, (r) => r.sport),
-      byTourLevel: groupBy(rows.filter((r) => r.tourLevel !== null && r.tourLevel !== undefined),
-        (r) => ({ 0: 'ITF', 1: 'Challenger', 2: 'tour', 3: 'main tour' })[r.tourLevel] ?? `level ${r.tourLevel}`),
-      byMarket: market === 'all' ? groupBy(rows, (r) => r.market) : undefined,
-      modelVsMarket,
-      scenarios,
-      note: 'Profit is computed at the price recorded on each pick. Line shopping is NOT included — best available prices would move every row up.',
-    });
-  } catch (err) {
-    console.error('[backtest] failed:', err);
-    res.status(500).json({ error: 'Backtest failed.' });
-  }
-});
-
 router.get('/admin/diagnose', requireAuth, async (req, res) => {
   try {
     const user = await db.user.findUnique({ where: { id: req.userId } });
@@ -2084,16 +1690,6 @@ router.get('/timing/:pickId', async (req, res) => {
     });
     if (!pick) return res.status(404).json({ error: 'Pick not found.' });
 
-    /* This endpoint returns pick.selection. Without this check it was a
-     * complete paywall bypass in two unauthenticated calls: GET /today
-     * hands out pick ids publicly, then GET /timing/<id> hands over the
-     * side. No settled-pick exception like GET /:id has — timing guidance
-     * on a finished match is meaningless, so there is nothing to open. */
-    const requesterId = resolveOptionalUser(req);
-    if (!(await userHasAccess(requesterId, pick.id))) {
-      return res.status(402).json({ error: 'This needs an active membership.', checkoutUrl: '/checkout.html' });
-    }
-
     const history = await db.oddsSnapshot.findMany({
       where: { matchId: pick.matchId },
       orderBy: { capturedAt: 'asc' },
@@ -2350,13 +1946,13 @@ router.post('/admin/cleanup-tennis-duplicates', requireAuth, async (req, res) =>
   const user = await db.user.findUnique({ where: { id: req.userId } });
   if (!user || !isAdminEmail(user.email)) return res.status(403).json({ error: 'Admins only.' });
   try {
-    const { cleanupDuplicateTennis, unflagLowerTierTennis } = require('../pipeline/ingestTennis.js');
+    const { cleanupDuplicateTennis, clearTennisSkipFlags } = require('../pipeline/ingestTennis.js');
     const dryRun = !req.body?.apply;
     // De-duplicate, then return lower-tier rows to the analysis queue —
     // they were flagged unanalysable before the opening-odds endpoint was
     // found, which was a wrong call and needs undoing.
     const dupes = await cleanupDuplicateTennis({ dryRun });
-    const unflagged = await unflagLowerTierTennis({ dryRun });
+    const unflagged = await clearTennisSkipFlags({ dryRun });
     res.json({ dryRun, duplicates: dupes, unflagged });
   } catch (err) {
     res.status(500).json({ error: err.message });

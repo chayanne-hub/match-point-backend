@@ -170,6 +170,19 @@ async function ingestTennisFixtures() {
   }
 
   console.log(`[tennisIngest] fixtures: ${created} new, ${updated} updated, ${skipped} already covered | odds: ${priced} priced, ${unpriced} not yet on the market`);
+
+  /* Maintenance runs on the ingest cycle, not only from an admin route.
+   *
+   * cleanupDuplicateTennis existed but was reachable ONLY from
+   * /api/picks/admin — so in normal operation it never ran, and the
+   * duplicate rows simply accumulated. The board hid this by collapsing
+   * them at display time, which made a database problem look cosmetic.
+   * Both sweeps are cheap indexed updates; they belong on the cycle. */
+  await cleanupDuplicateTennis({ dryRun: false })
+    .catch((e) => console.error(`[tennisIngest] dedup: ${e.message}`));
+  await closeStaleScheduledTennis()
+    .catch((e) => console.error(`[tennisIngest] stale sweep: ${e.message}`));
+
   return { created, updated, skipped, priced, unpriced };
 }
 
@@ -295,6 +308,32 @@ async function applyTennisLiveState() {
  * status) rather than blindly keeping the lowest id, so cleaning up can't
  * throw away an analysed pick. Only ever removes rows with NO picks.
  */
+/* STALE SCHEDULED ROWS.
+ *
+ * The close-out above only considers rows already marked `live`. A
+ * lower-tier match that was ingested, started, and finished without the
+ * live feed ever picking it up stays `scheduled` forever — Kwon v Bonzi
+ * sat that way from the previous day. Those rows clutter the board and
+ * keep being offered for analysis long after the match is over.
+ *
+ * Six hours past start with no live signal means it is finished, not
+ * pending. Generous enough for a five-setter plus a rain delay. */
+async function closeStaleScheduledTennis() {
+  const sport = await db.sport.findFirst({ where: { slug: 'tennis' } });
+  if (!sport) return { closed: 0 };
+  const cutoff = new Date(Date.now() - 6 * 60 * 60 * 1000);
+  const res = await db.match.updateMany({
+    where: {
+      sportId: sport.id,
+      status: 'scheduled',
+      startTime: { lt: cutoff },
+    },
+    data: { status: 'final' },
+  });
+  if (res.count) console.log(`[tennisIngest] closed ${res.count} stale scheduled row(s)`);
+  return { closed: res.count };
+}
+
 async function cleanupDuplicateTennis({ dryRun = true } = {}) {
   const sport = await db.sport.findFirst({ where: { slug: 'tennis' } });
   if (!sport) return { groups: 0, removed: 0 };
@@ -381,4 +420,4 @@ async function clearTennisSkipFlags({ dryRun = true } = {}) {
   return { marked: targets.length, scanned: rows.length };
 }
 
-module.exports = { ingestTennisFixtures, applyTennisLiveState, cleanupDuplicateTennis, clearTennisSkipFlags };
+module.exports = { ingestTennisFixtures, closeStaleScheduledTennis, applyTennisLiveState, cleanupDuplicateTennis, clearTennisSkipFlags };
