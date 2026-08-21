@@ -180,22 +180,55 @@ async function ingestTennisFixtures() {
 async function applyTennisLiveState() {
   if (!ENABLED) return { matched: 0, unmatched: 0 };
 
-  let events;
+  /* An EMPTY feed and a FAILED fetch mean opposite things and must not be
+   * conflated. Empty is information: nothing is in play, so anything still
+   * marked live has finished. A failure is the absence of information, and
+   * closing matches on it would mark every live match final during a
+   * provider outage. */
+  let events = [];
+  let fetchFailed = false;
   try {
     events = await fetchLiveEvents();
   } catch (err) {
     console.error(`[tennisIngest] live fetch failed: ${err.message}`);
-    return { matched: 0, unmatched: 0, error: err.message };
+    fetchFailed = true;
   }
-  if (!events.length) return { matched: 0, unmatched: 0 };
+  if (fetchFailed) return { matched: 0, unmatched: 0, error: 'live fetch failed' };
+
+  /* NOTE: there used to be an early `if (!events.length) return` here.
+   *
+   * The close-out loop below is the ONLY thing that moves a tennis match
+   * from live to final — ESPN carries neither Challenger nor ITF, and in
+   * practice misses main-tour matches too. Returning early on an empty
+   * feed meant the close-out was skipped at exactly the moment it was
+   * needed: when the last match of the day finishes, the feed empties,
+   * and every match still marked live is precisely the set that should be
+   * closed. They then sat live indefinitely — and because
+   * gradeFinishedMatches() only ever looks at status 'final', their picks
+   * were never graded either. One early return, three symptoms. */
 
   const sport = await db.sport.findFirst({ where: { slug: 'tennis' } });
   if (!sport) return { matched: 0, unmatched: 0 };
 
+  /* Two windows on purpose.
+   *
+   * The JOIN window stays tight — matching live state onto a match that
+   * started ten hours ago would be wrong.
+   *
+   * The CLOSE-OUT window is much wider, because it previously shared the
+   * 8-hour window and anything stuck past that became permanently
+   * unreachable: too old to be scanned, so never closed, so never graded,
+   * forever. A match that started a day ago and is still marked live is
+   * the clearest possible case for closing it. */
   const since = new Date(Date.now() - 8 * 60 * 60 * 1000);
   const until = new Date(Date.now() + 2 * 60 * 60 * 1000);
   const candidates = await db.match.findMany({
     where: { sportId: sport.id, startTime: { gte: since, lte: until }, status: { not: 'final' } },
+  });
+
+  const staleSince = new Date(Date.now() - (Number(process.env.TENNIS_CLOSEOUT_LOOKBACK_H) || 72) * 60 * 60 * 1000);
+  const closeCandidates = await db.match.findMany({
+    where: { sportId: sport.id, startTime: { gte: staleSince, lte: until }, status: 'live' },
   });
 
   let matched = 0, unmatched = 0;
@@ -243,7 +276,7 @@ async function applyTennisLiveState() {
   const graceMs = Number(process.env.TENNIS_FINAL_GRACE_MS) || 10 * 60 * 1000;
   let closed = 0;
 
-  for (const m of candidates) {
+  for (const m of closeCandidates) {
     if (m.status !== 'live') continue;
     const key = `${m.competitorA}|${m.competitorB}`.toLowerCase();
     const keyRev = `${m.competitorB}|${m.competitorA}`.toLowerCase();
@@ -259,7 +292,7 @@ async function applyTennisLiveState() {
     closed++;
   }
 
-  console.log(`[tennisIngest] live: ${matched} joined, ${unmatched} with no match on our board${closed ? `, ${closed} closed out` : ''}`);
+  console.log(`[tennisIngest] live: ${events.length} in play, ${matched} joined, ${unmatched} unmatched, ${closed} closed out (${closeCandidates.length} were live)`);
   return { matched, unmatched, closed };
 }
 
