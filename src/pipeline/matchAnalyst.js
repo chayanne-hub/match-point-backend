@@ -450,6 +450,34 @@ ${process}${preseasonNote}${weightNote}
  * fallback plan (e.g. skip creating a pick this cycle) rather than crash
  * the pipeline over one bad match.
  */
+
+/* PERMANENT vs TRANSIENT FAILURE.
+ *
+ * The caller retries a failed analysis once. That is right for a
+ * timeout or a 529, and pure waste for a 400 — an exhausted credit
+ * balance or a malformed request fails identically the second time,
+ * at full price. Last night every credit error was billed twice for
+ * this reason, on every match, on every cycle.
+ *
+ * A 4xx other than 429 is the model telling us the request itself is
+ * the problem. Retrying it cannot help.
+ */
+let lastFailureWasPermanent = false;
+
+function noteFailure(status, body) {
+  const permanent = status >= 400 && status < 500 && status !== 429;
+  lastFailureWasPermanent = permanent;
+  if (permanent) {
+    const reason = /credit balance/i.test(body || '') ? 'credit balance exhausted'
+      : /invalid_request/i.test(body || '') ? 'invalid request'
+      : /authentication|api key/i.test(body || '') ? 'bad API key'
+      : `HTTP ${status}`;
+    console.error(`[match-analyst] PERMANENT failure (${reason}) — not retrying, retry would be billed for nothing.`);
+  }
+}
+
+function lastFailurePermanent() { return lastFailureWasPermanent; }
+
 async function analyzeMatch({ sport, competitorA, competitorB, oddsA, oddsB, startTime, spread, spreadOddsA, spreadOddsB, total, overOdds, underOdds, pregameProjectedTotal, sportKey, verifiedData }) {
   // The preseason sport key is how we know regular-season logic doesn't
   // apply. Without it the model reasons about playoff seeding in August.
@@ -724,6 +752,7 @@ ${JSON_VALIDITY_REMINDER}
     if (!res.ok) {
       const errBody = await res.text().catch(() => '(could not read response body)');
       console.error(`[match-analyst] Anthropic API returned ${res.status} for ${competitorA} vs ${competitorB}: ${errBody}`);
+      noteFailure(res.status, errBody);
       return null;
     }
 
@@ -1210,4 +1239,4 @@ ${jsonInstruction}
   }
 }
 
-module.exports = { analyzeMatch, reassessLiveMatch, reassessLiveTotal, parseClaudeJson, repairJsonViaClaude };
+module.exports = { analyzeMatch, lastFailurePermanent, reassessLiveMatch, reassessLiveTotal, parseClaudeJson, repairJsonViaClaude };

@@ -57,6 +57,18 @@ async function analyzeMatchWithRetry(params, context) {
   try {
     let result = await analyzeMatch(params);
     if (result) return result;
+
+    /* Don't pay twice for a failure that cannot succeed.
+     *
+     * A 400 — exhausted credit, bad key, malformed request — fails the
+     * same way on the retry and is billed the same. Only transient
+     * failures (timeouts, 429, 5xx) are worth a second attempt. */
+    if (typeof lastFailurePermanent === 'function' && lastFailurePermanent()) {
+      console.error(`[match-analyst] ${context}: permanent failure, skipping retry.`);
+      recordAnalysisFailure(context);
+      return null;
+    }
+
     console.warn(`[match-analyst] first attempt failed for ${context} — retrying once before giving up.`);
     recordAnalysisRetry();
     result = await analyzeMatch(params);
@@ -71,7 +83,7 @@ async function analyzeMatchWithRetry(params, context) {
 }
 const { fetchMatches, fetchScores } = require('./fetchMatches');
 const { fetchEspnLiveScores, matchEspnEvent } = require('./fetchEspn');
-const { analyzeMatch, reassessLiveMatch, reassessLiveTotal } = require('./matchAnalyst');
+const { analyzeMatch, reassessLiveMatch, reassessLiveTotal, lastFailurePermanent } = require('./matchAnalyst');
 const { computePregameProjectedTotal, computeLiveProjectedTotal, computeLiveProjectedTotalByInnings } = require('./teamTotals');
 const { computePregameProjectedTotalGames, computeLiveProjectedTotalGames } = require('./tennisTotalGames');
 const { computePregameProjectedTotalGoals, computeLiveProjectedTotalGoals, parseElapsedMinutesFromDisplayClock } = require('./soccerGoalsTotal');
@@ -81,7 +93,31 @@ const { computePregameProjectedTotalGoals, computeLiveProjectedTotalGoals, parse
 // straight who-wins call on every match, regardless of edge size).
 const MODEL_PICK_THRESHOLD = 65;
 
-const SPORTS = ['tennis', 'basketball', 'soccer', 'baseball', 'football'];
+/* WHICH SPORTS COST MONEY.
+ *
+ * Every sport in this list is analysed on every cycle, and every
+ * analysis is a paid Claude call. This array was hardcoded with all
+ * five, which silently re-enabled baseball and soccer when this file was
+ * deployed over a version that had them switched off — real spend, with
+ * no log line saying it had changed.
+ *
+ * Now driven by env so it can be changed from Railway in seconds with no
+ * deploy, and it always logs what it is running so a change like that
+ * can never be silent again:
+ *   DISABLED_SPORTS=baseball,soccer   (default — the expensive ones off)
+ *   DISABLED_SPORTS=                  (empty string enables everything)
+ */
+const ALL_SPORTS = ['tennis', 'basketball', 'soccer', 'baseball', 'football'];
+
+const DISABLED_SPORTS = (process.env.DISABLED_SPORTS === undefined
+  ? 'baseball,soccer'
+  : process.env.DISABLED_SPORTS)
+  .split(',').map((x) => x.trim().toLowerCase()).filter(Boolean);
+
+const SPORTS = ALL_SPORTS.filter((s) => !DISABLED_SPORTS.includes(s));
+
+console.log(`[pipeline] analysing ${SPORTS.join(', ')}` +
+  (DISABLED_SPORTS.length ? ` — disabled: ${DISABLED_SPORTS.join(', ')}` : ' — all sports enabled'));
 
 // Sports with a real, computed pregame/live total formula.
 const TOTAL_FORMULA_SPORTS = ['basketball', 'football', 'baseball', 'tennis', 'soccer'];
