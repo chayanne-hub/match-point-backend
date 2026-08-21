@@ -595,16 +595,38 @@ async function cleanupDuplicateTennis({ dryRun = true } = {}) {
       (k) => k.pickType === pick.pickType && k.market === pick.market);
 
     for (const d of drop) {
-      if (d.picks.length) {
-        const uncovered = d.picks.filter((pk) => !keepCovers(pk));
-        if (uncovered.length) {
-          console.warn(`[tennisCleanup] keeping ${d.externalId}: ${uncovered.length} pick(s) the kept row does not have`);
-          continue;
+      try {
+        if (d.picks.length) {
+          const uncovered = d.picks.filter((pk) => !keepCovers(pk));
+          if (uncovered.length) {
+            console.warn(`[tennisCleanup] keeping ${d.externalId}: ${uncovered.length} pick(s) the kept row does not have`);
+            continue;
+          }
+          console.log(`[tennisCleanup] dropping ${d.externalId}: its ${d.picks.length} pick(s) duplicate ${keep.externalId}`);
         }
-        console.log(`[tennisCleanup] dropping ${d.externalId}: its ${d.picks.length} pick(s) duplicate ${keep.externalId}`);
+
+        if (!dryRun) {
+          /* Delete children first — Match uses RESTRICT, not CASCADE.
+           *
+           * Dropping a duplicate that carries picks means removing its
+           * Result rows, then its Picks, then the Match. Calling
+           * match.delete() directly throws "violates RESTRICT setting of
+           * foreign key constraint Pick_matchId_fkey" — which aborted
+           * the entire dedupe pass every cycle, so nothing was removed
+           * while the log line above claimed it was dropping them. */
+          const pickIds = d.picks.map((pk) => pk.id);
+          if (pickIds.length) {
+            await db.result.deleteMany({ where: { pickId: { in: pickIds } } });
+            await db.pick.deleteMany({ where: { id: { in: pickIds } } });
+          }
+          await db.match.delete({ where: { id: d.id } });
+        }
+        removed++;
+      } catch (e) {
+        // One bad row must not stop the rest of the pass — that is how a
+        // single constraint error blocked every other cleanup this cycle.
+        console.error(`[tennisCleanup] could not drop ${d.externalId}: ${e.message}`);
       }
-      if (!dryRun) await db.match.delete({ where: { id: d.id } });
-      removed++;
     }
     if (dryRun) console.log(`[tennisCleanup] would keep ${keep.externalId}, drop ${drop.map((d) => d.externalId).join(', ')}`);
   }
