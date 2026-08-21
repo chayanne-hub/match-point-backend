@@ -68,7 +68,7 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
   });
   if (!candidates.length) return { analysed: 0, skipped: 0 };
 
-  let analysed = 0, skipped = 0, unpriced = 0, finished = 0, missed = 0;
+  let analysed = 0, skipped = 0, unpriced = 0, finished = 0;
 
   // Nearest first: a match starting soon is the one worth a price now.
   candidates.sort((a, b) => new Date(a.startTime) - new Date(b.startTime));
@@ -131,7 +131,18 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
     const isLive = match.status === 'live' || untilStart < 0;
     const hasLiveOdds = isLive
       && typeof match.liveOddsA === 'number' && typeof match.liveOddsB === 'number';
-    if (isLive && (!hasLiveOdds || typeof reassessLiveMatch !== 'function')) { missed++; continue; }
+
+    /* A live match without a socket price is NOT a lost cause.
+     *
+     * This used to bail here, on my assumption that pre-match odds stop
+     * existing once a match starts. That assumption was wrong and we
+     * disproved it directly: the pre-match endpoint returned a full
+     * Bet365 block for an event whose status was already "Ended". The
+     * opening line stays queryable.
+     *
+     * So a live match falls back to the opening price, which is exactly
+     * what a pre-match pick would have used anyway. Nothing is skipped
+     * for want of a price until every source has actually been tried. */
 
     const resolved = await resolveExtendId(match.competitorA, match.competitorB, match.startTime)
       .catch(() => null);
@@ -177,17 +188,36 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
     const flipped = namesLikelyMatch(match.competitorA, ev.competitorB) &&
                     !namesLikelyMatch(match.competitorA, ev.competitorA);
 
-    let oddsA, oddsB;
+    let oddsA = null, oddsB = null;
+    let priceSource = null;
+
     if (hasLiveOdds) {
       // Already stored in OUR orientation by the socket runner, so the
       // pre-match `flipped` correction must not be applied again here.
       oddsA = match.liveOddsA;
       oddsB = match.liveOddsB;
+      priceSource = 'live';
     } else {
       const priced = await fetchPreMatchOdds(ev.eventId);
-      if (!priced) { unpriced++; continue; }
-      oddsA = flipped ? priced.oddsB : priced.oddsA;
-      oddsB = flipped ? priced.oddsA : priced.oddsB;
+      if (priced) {
+        oddsA = flipped ? priced.oddsB : priced.oddsA;
+        oddsB = flipped ? priced.oddsA : priced.oddsB;
+        priceSource = 'opening';
+      }
+    }
+
+    /* Still no price anywhere.
+     *
+     * For an upcoming match that is a real "wait" — the market may open
+     * shortly, and a pick made with no price cannot be blended or
+     * settled against a line. For a LIVE match there is nothing left to
+     * wait for, so we analyse on the score alone rather than leaving the
+     * row permanently blank. reassessLiveMatch already handles null odds
+     * (its oddsContext branches on it), and the resulting pick is marked
+     * so it is never mistaken for a priced one. */
+    if (oddsA === null || oddsB === null) {
+      if (!isLive || typeof reassessLiveMatch !== 'function') { unpriced++; continue; }
+      priceSource = 'none';
     }
 
     /* STRUCTURED FACTOR DATA.
@@ -220,9 +250,9 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
      * does not read would produce a confident pre-match assessment
      * quoting live prices — a wrong pick rather than a missing one.
      * reassessLiveMatch exists precisely for this and takes the score. */
-    const label = `${match.competitorA} vs ${match.competitorB} (${ev.league || 'tennis'})${hasLiveOdds ? ' [live]' : ''}`;
+    const label = `${match.competitorA} vs ${match.competitorB} (${ev.league || 'tennis'})${isLive ? ` [live/${priceSource}]` : ''}`;
 
-    const analysis = hasLiveOdds
+    const analysis = isLive
       ? await reassessLiveMatch({
           sport: 'tennis',
           competitorA: match.competitorA,
@@ -247,7 +277,7 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
     // Same blend the main pipeline applies, so a Challenger pick's
     // confidence means exactly what a main-tour pick's does.
     const selectionIsA = String(analysis.selection).startsWith(match.competitorA);
-    const blended = typeof blend === 'function'
+    const blended = (priceSource !== 'none') && typeof blend === 'function'
       ? blend(analysis.confidence, oddsA, oddsB, selectionIsA)
       : null;
 
@@ -260,8 +290,12 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
         confidence: blended ? blended.confidence : analysis.confidence,
         rawConfidence: blended ? blended.rawConfidence : analysis.confidence,
         marketProb: blended ? blended.marketProb : null,
-        conviction: analysis.conviction || 'guess',
-        odds: selectionIsA ? oddsA : oddsB,
+        /* A score-only pick has no line to blend against or settle
+           on. Recording 'guess' conviction and a null price keeps it
+           honest: it shows on the board, but nothing downstream can
+           mistake it for a pick taken at a real number. */
+        conviction: priceSource === 'none' ? 'guess' : (analysis.conviction || 'guess'),
+        odds: (oddsA === null || oddsB === null) ? null : (selectionIsA ? oddsA : oddsB),
         rationale: analysis.analysis,
         factsUsed: JSON.stringify(analysis.factors || []),
         // Stored so the closing line can be fetched at start time and
@@ -274,8 +308,8 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
     console.log(`[tennisUpcoming] ${match.competitorA} vs ${match.competitorB} (${ev.league}) -> ${analysis.selection} @ ${selectionIsA ? oddsA : oddsB}`);
   }
 
-  console.log(`[tennisUpcoming] ${analysed} analysed, ${unpriced} not yet priced, ${skipped} skipped, ${finished} closed as finished, ${tooEarly} too early to price, ${missed} started, no live price`);
-  return { analysed, unpriced, skipped, finished, tooEarly, missed };
+  console.log(`[tennisUpcoming] ${analysed} analysed, ${unpriced} not yet priced, ${skipped} skipped, ${finished} closed as finished, ${tooEarly} too early to price`);
+  return { analysed, unpriced, skipped, finished, tooEarly };
 }
 
 module.exports = { analyzeTennisUpcoming };
