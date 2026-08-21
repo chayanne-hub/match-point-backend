@@ -1458,7 +1458,7 @@ async function updateLivePicksForSport(sportSlug, onlyKeys) {
       let liveProjection;
       if (SETS_BASED_SPORTS.includes(sportSlug)) {
         liveProjection = computeLiveProjectedTotalGames({
-          liveSetScore: match.setScore,
+          liveScore: match.setScore,   // liveSetScore is not a column on Match
           league: match.league,
           setsWonA: match.homeScore,
           setsWonB: match.awayScore,

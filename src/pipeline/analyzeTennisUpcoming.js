@@ -169,7 +169,11 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
        * who wins more sets wins the match, which is what the pick was on. */
       const data = { status: 'final' };
       if (resolved.score) {
-        data.liveSetScore = resolved.score;
+        // liveScore, NOT liveSetScore — the latter is not a column on
+        // Match, so this update threw. It sat inside a .catch(() => {}),
+        // which meant every close-out failed SILENTLY: no final status,
+        // no scores, no grading, and nothing in the logs to show for it.
+        data.liveScore = resolved.score;
         data.setScore = resolved.score;
 
         let setsA = 0, setsB = 0;
@@ -187,7 +191,8 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
         }
       }
 
-      await db.match.update({ where: { id: match.id }, data }).catch(() => {});
+      await db.match.update({ where: { id: match.id }, data })
+        .catch((e) => console.error(`[tennisUpcoming] close-out failed for ${match.competitorA} vs ${match.competitorB}: ${e.message}`));
       finished++;
       continue;
     }
@@ -285,7 +290,7 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
           sport: 'tennis',
           competitorA: match.competitorA,
           competitorB: match.competitorB,
-          liveScore: match.liveSetScore || match.setScore || null,
+          liveScore: match.liveScore || match.setScore || null,
           oddsA,
           oddsB,
           priorAnalysis: null,
