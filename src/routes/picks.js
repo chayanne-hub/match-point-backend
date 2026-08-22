@@ -160,8 +160,30 @@ function resolveOptionalUser(req) {
 // Public: returns picks with confidence/selection redacted unless the
 // requester is authenticated and entitled. Attach Authorization header to
 // unlock full detail. "Today" rolls over at midnight Pacific Time.
+/* Sports we no longer analyse are not shown either.
+ *
+ * DISABLED_SPORTS stops NEW analysis, but picks made before a sport was
+ * switched off stay in the database — so baseball and soccer kept
+ * appearing on the board and in "matches analyzed" long after the
+ * pipeline had stopped running them. The board then disagreed with what
+ * the backend was actually doing.
+ *
+ * Filtered at the API so every surface stays consistent without each
+ * one needing its own list. Same variable the pipeline uses, so the two
+ * can never drift apart.
+ */
+function disabledSports() {
+  return (process.env.DISABLED_SPORTS === undefined ? 'baseball,soccer' : process.env.DISABLED_SPORTS)
+    .split(',').map((x) => x.trim().toLowerCase()).filter(Boolean);
+}
+
 router.get('/today', async (req, res) => {
   const { sport, markets } = req.query;
+
+  if (sport && sport !== 'all' && disabledSports().includes(String(sport).toLowerCase())) {
+    return res.json({ picks: [], all: [], disabled: true });
+  }
+
   const { startOfDay, endOfDay } = getTimezoneDayBounds('America/Los_Angeles');
 
   // Try to resolve the requester, but don't require auth for this endpoint.
@@ -176,7 +198,10 @@ router.get('/today', async (req, res) => {
         pickType: { in: ['model', 'winner'] },
         match: {
           startTime: { gte: startOfDay, lte: endOfDay },
-          ...(sport ? { sport: { slug: sport } } : {}),
+          // Without the notIn, an "all" request (no sport filter) still
+          // returned baseball and soccer picks made before those sports
+          // were switched off.
+          ...(sport ? { sport: { slug: sport } } : { sport: { slug: { notIn: disabledSports() } } }),
         },
       },
       include: { match: { include: { sport: true } } },
@@ -228,7 +253,7 @@ router.get('/today', async (req, res) => {
       // once a match has actually finished, so it's only applied in the
       // normal (non-final) mode.
       ...(includeFinal ? {} : { skipAnalysis: false }),
-      ...(sport ? { sport: { slug: sport } } : {}),
+      ...(sport ? { sport: { slug: sport } } : { sport: { slug: { notIn: disabledSports() } } }),
     },
     include: {
       sport: true,
