@@ -383,6 +383,67 @@ async function resolveExtendId(competitorA, competitorB, startTime) {
   return null;
 }
 
+/**
+ * Final result for a completed match, looked up by PLAYER id.
+ *
+ * The reason this exists: nothing else covers every tier. The fixtures
+ * feed's `live` field is null even for matches that have finished (checked
+ * against a completed fixture), and the extend feed holds only a handful
+ * of events. With ESPN off for tennis, a Challenger or ITF match had no
+ * route to a final score at all — it closed unscored and could never be
+ * graded.
+ *
+ * `h2h/recent/{tour}/{playerId}` returns that player's recent matches
+ * across ALL tiers, each with the score, both player ids and `isWin`
+ * RELATIVE TO THE QUERIED PLAYER (verified: Safiullin v Djokovic reads
+ * isWin false, Safiullin v Wawrinka reads isWin true). Matching on
+ * opponent id avoids name matching entirely.
+ *
+ * Results lag — a match finished minutes ago may not be listed yet. That
+ * is fine: the caller retries on later cycles.
+ *
+ * Returns { score, queriedPlayerWon, date } or null.
+ */
+async function fetchPlayerRecentResult(tour, playerId, opponentId, startTime) {
+  if (!playerId || !opponentId) return null;
+
+  let body;
+  try {
+    body = await apiGet(`h2h/recent/${tour}/${encodeURIComponent(playerId)}`);
+  } catch {
+    return null;
+  }
+
+  const games = Array.isArray(body?.games) ? body.games : [];
+  if (!games.length) return null;
+
+  const want = String(opponentId);
+  const target = startTime ? new Date(startTime).getTime() : null;
+
+  const candidates = games.filter((g) => {
+    const p1 = String(g.player1Id), p2 = String(g.player2Id);
+    if (p1 !== want && p2 !== want) return false;
+    if (!g.result) return false;                 // not finished / no score
+    if (target === null || !g.date) return true;
+    // Same fixture, allowing for the feed's own date being day-precision.
+    return Math.abs(new Date(g.date).getTime() - target) < 36 * 60 * 60 * 1000;
+  });
+  if (!candidates.length) return null;
+
+  // Closest in time when a pair has met more than once.
+  if (target !== null) {
+    candidates.sort((a, b) =>
+      Math.abs(new Date(a.date) - target) - Math.abs(new Date(b.date) - target));
+  }
+  const g = candidates[0];
+
+  return {
+    score: String(g.result),
+    queriedPlayerWon: g.isWin === true,
+    date: g.date || null,
+  };
+}
+
 async function fetchPreMatchOdds(eventId) {
   let body;
   try {
@@ -539,6 +600,7 @@ async function discoverOddsPath(sampleEventId) {
 }
 
 module.exports = {
+  fetchPlayerRecentResult,
   tierFromName,
   resolveExtendId,
   apiGet,

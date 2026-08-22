@@ -18,7 +18,7 @@
  * dropped middle names) that broke the ESPN join before.
  */
 
-const { fetchUpcomingFixtures, fetchLiveEvents, fetchMatchOdds, resolveExtendId } = require('./fetchTennisApi.js');
+const { fetchUpcomingFixtures, fetchLiveEvents, fetchMatchOdds, resolveExtendId, fetchPlayerRecentResult } = require('./fetchTennisApi.js');
 // Safe as a top-level require: the runner never requires this file, so the
 // dependency runs one way only (verified against the require graph).
 const { getLiveSnapshot } = require('./tennisLiveRunner.js');
@@ -435,7 +435,16 @@ async function applyTennisLiveState() {
 function setsWonFromScore(score, status) {
   if (!score) return null;
   let a = 0, b = 0;
-  String(score).split(',').forEach((chunk) => {
+  /* Two feeds, two separators.
+   *
+   * The extend endpoint returns "6-2,6-3" while h2h/recent returns
+   * "6-3 6-4" with spaces and tiebreak detail like "7-6(6)". Splitting
+   * on commas alone silently produced ONE set from a space-separated
+   * score, which would have graded matches on a single set.
+   *
+   * Split on either, and strip the tiebreak parenthetical — "7-6(6)"
+   * is a 7-6 set; the tiebreak points do not affect who won it. */
+  String(score).replace(/\([^)]*\)/g, '').split(/[,\s]+/).forEach((chunk) => {
     const [x, y] = chunk.trim().split('-').map(Number);
     if (isNaN(x) || isNaN(y)) return;
     const decided = (x >= 6 || y >= 6) && (Math.abs(x - y) >= 2 || x === 7 || y === 7);
@@ -490,44 +499,96 @@ async function closeStaleScheduledTennis() {
   const stale = await db.match.findMany({
     where: {
       sportId: sport.id,
-      status: 'scheduled',
+      status: { in: ['scheduled', 'live'] },   // live rows must resolve too
       OR: [
         { tourLevel: { in: [0, 1] }, startTime: { lt: lowerCutoff } },
         { tourLevel: { notIn: [0, 1] }, startTime: { lt: mainCutoff } },
         { tourLevel: null, startTime: { lt: mainCutoff } },
       ],
     },
-    select: { id: true, competitorA: true, competitorB: true, startTime: true },
+    select: { id: true, competitorA: true, competitorB: true, startTime: true,
+              playerAId: true, playerBId: true },
   });
   if (!stale.length) return { closed: 0, scored: 0, unscored: 0 };
 
   let scored = 0, unscored = 0;
 
   for (const m of stale) {
-    let resolved = null;
-    try {
-      resolved = await resolveExtendId(m.competitorA, m.competitorB, m.startTime);
-    } catch { /* treated as unresolved below */ }
-
     const data = { status: 'final' };
 
-    if (resolved && resolved.score) {
-      const sets = setsWonFromScore(resolved.score, resolved.status);
-      if (sets) {
-        data.setScore = resolved.score;
-        data.liveScore = resolved.score;
-        data.homeScore = sets.a;
-        data.awayScore = sets.b;
-        scored++;
+    /* PLAYER LOOKUP FIRST — it is the only all-tier result source.
+     *
+     * h2h/recent covers Challenger, ITF and main tour alike and matches
+     * on player id rather than name. The extend resolve is kept as a
+     * fallback for rows without stored player ids. */
+    let byPlayer = null;
+    if (m.playerAId && m.playerBId) {
+      byPlayer = await fetchPlayerRecentResult('atp', m.playerAId, m.playerBId, m.startTime)
+        .catch(() => null);
+      if (!byPlayer) {
+        // Some draws are filed under wta; try the other tour before giving up.
+        byPlayer = await fetchPlayerRecentResult('wta', m.playerAId, m.playerBId, m.startTime)
+          .catch(() => null);
       }
     }
-    if (data.homeScore === undefined) unscored++;
+
+    if (byPlayer && byPlayer.score) {
+      const sets = setsWonFromScore(byPlayer.score, null);
+      data.setScore = byPlayer.score;
+      data.liveScore = byPlayer.score;
+
+      /* isWin is authoritative and relative to the player we queried,
+       * which is competitorA. Derive the scoreline from it rather than
+       * from set counting: a retirement can leave the winner with fewer
+       * completed sets, and this field states the outcome outright. */
+      if (sets) {
+        const aWon = byPlayer.queriedPlayerWon;
+        let hi = Math.max(sets.a, sets.b), lo = Math.min(sets.a, sets.b);
+        // A retirement can leave completed sets level (6-4 2-5 -> 1-1).
+        // gradeMoneyline cannot resolve a tie, and isWin already tells us
+        // who advanced, so the winner is given the higher number.
+        if (hi === lo) hi = lo + 1;
+        data.homeScore = aWon ? hi : lo;
+        data.awayScore = aWon ? lo : hi;
+      } else {
+        data.homeScore = byPlayer.queriedPlayerWon ? 1 : 0;
+        data.awayScore = byPlayer.queriedPlayerWon ? 0 : 1;
+      }
+      scored++;
+    } else {
+      let resolved = null;
+      try {
+        resolved = await resolveExtendId(m.competitorA, m.competitorB, m.startTime);
+      } catch { /* treated as unresolved below */ }
+
+      if (resolved && resolved.score) {
+        const sets = setsWonFromScore(resolved.score, resolved.status);
+        if (sets) {
+          data.setScore = resolved.score;
+          data.liveScore = resolved.score;
+          data.homeScore = sets.a;
+          data.awayScore = sets.b;
+          scored++;
+        }
+      }
+    }
+
+    if (data.homeScore === undefined) {
+      unscored++;
+      /* Leave it alone rather than closing it unscored.
+       *
+       * Results lag by minutes. Closing now would mark it final with no
+       * score, and gradeFinishedMatches only ever looks at picks with no
+       * result on a final match — it would be graded never. Leaving it
+       * open lets the next cycle try again. */
+      continue;
+    }
 
     await db.match.update({ where: { id: m.id }, data })
       .catch((e) => console.error(`[tennisIngest] stale close ${m.competitorA}: ${e.message}`));
   }
 
-  console.log(`[tennisIngest] closed ${stale.length} stale row(s): ${scored} with a final score, ${unscored} unresolved (these cannot be graded)`);
+  console.log(`[tennisIngest] stale sweep: ${scored} closed with a final score, ${unscored} still unresolved (left open, will retry)`);
   return { closed: stale.length, scored, unscored };
 }
 
