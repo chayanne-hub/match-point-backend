@@ -681,6 +681,17 @@ function shapeUnanalyzedMatch(m) {
 // everyone as a teaser — it's the hook that gets people to buy — so it is
 // NOT redacted here, unlike /today.
 router.get('/live', async (req, res) => {
+  const _sportParam = req.query.sport;
+  /* Disabled sports return nothing.
+   *
+   * Guarded at the route entry rather than in each query: /stats alone
+   * has two separate sport filters, and patching them individually is
+   * how one gets missed. Same DISABLED_SPORTS the pipeline reads, so a
+   * sport switched back on brings its history with it. */
+  if (_sportParam && _sportParam !== 'all' && disabledSports().includes(String(_sportParam).toLowerCase())) {
+    return res.json({ matches: [], disabled: true });
+  }
+
   const { sport } = req.query;
   const where = {
     status: 'live',
@@ -737,6 +748,16 @@ router.get('/live', async (req, res) => {
 // that's not a bug, it's just no settled history existing yet.
 router.get('/stats', async (req, res) => {
   const { sport } = req.query;
+  /* Disabled sports return nothing.
+   *
+   * Guarded at the route entry rather than in each query: /stats alone
+   * has two separate sport filters, and patching them individually is
+   * how one gets missed. Same DISABLED_SPORTS the pipeline reads, so a
+   * sport switched back on brings its history with it. */
+  if (sport && sport !== 'all' && disabledSports().includes(String(sport).toLowerCase())) {
+    return res.json({ total: 0, wins: 0, losses: 0, pushes: 0, winRate: null, disabled: true });
+  }
+
 
   // Excludes picks whose recorded odds fall outside a plausible range —
   // these are corrupted rows from before the suspended-market-placeholder
@@ -952,6 +973,17 @@ router.get('/stats', async (req, res) => {
 // — showing which side the model picked for free (even via a highlight
 // box with no text) would leak the selection the paywall exists to gate.
 router.get('/matches-today', async (req, res) => {
+  const _sportParam = req.query.sport;
+  /* Disabled sports return nothing.
+   *
+   * Guarded at the route entry rather than in each query: /stats alone
+   * has two separate sport filters, and patching them individually is
+   * how one gets missed. Same DISABLED_SPORTS the pipeline reads, so a
+   * sport switched back on brings its history with it. */
+  if (_sportParam && _sportParam !== 'all' && disabledSports().includes(String(_sportParam).toLowerCase())) {
+    return res.json({ matches: [], disabled: true });
+  }
+
   const { sport } = req.query;
   const { startOfDay, endOfDay } = getTimezoneDayBounds('America/Los_Angeles');
 
@@ -1910,6 +1942,17 @@ router.get('/:id', async (req, res) => {
 router.get('/archive/results', async (req, res) => {
   const { sport } = req.query;
 
+  /* A per-sport request for a disabled sport returns nothing.
+   *
+   * The tracker calls this route once PER SPORT, so filtering only the
+   * no-sport case left every disabled sport still reporting its full
+   * history — the caller asked for baseball by name and got it. Both
+   * shapes have to be covered or the tracker keeps showing sports the
+   * pipeline no longer runs. */
+  if (sport && disabledSports().includes(String(sport).toLowerCase())) {
+    return res.json({ results: [], disabled: true });
+  }
+
   // Same scoping as /stats — see the comment there. Keeps corrupted
   // -10000-style placeholder-odds rows out of the public archive without
   // deleting the underlying data, and de-duplicates the legacy
@@ -1934,7 +1977,19 @@ router.get('/archive/results', async (req, res) => {
         // entirely, which is exactly why the Activity feed and the Win
         // Rate Tracker reported different totals for the same day.
         odds: { gte: -100000, lte: 100000 },
-        ...(sport ? { match: { sport: { slug: sport } } } : {}),
+        /* Disabled sports stay out of the record too.
+         *
+         * Hiding them from the board was not enough: the tracker reads
+         * this route, so a sport switched off in the pipeline still
+         * counted toward the headline win rate. That made the number on
+         * screen a mix of what the model is running now and what it used
+         * to run — not a figure you could put in front of a member.
+         *
+         * Same DISABLED_SPORTS variable the pipeline uses, so re-enabling
+         * a sport brings its history back with it. Nothing is deleted. */
+        ...(sport
+          ? { match: { sport: { slug: sport } } }
+          : { match: { sport: { slug: { notIn: disabledSports() } } } }),
       },
     },
     include: { pick: { include: { match: { include: { sport: true } } } } },
