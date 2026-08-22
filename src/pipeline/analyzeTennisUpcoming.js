@@ -68,6 +68,7 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
   });
   if (!candidates.length) return { analysed: 0, skipped: 0 };
 
+  let failed = 0;
   let analysed = 0, skipped = 0, unpriced = 0, finished = 0;
 
   // Nearest first: a match starting soon is the one worth a price now.
@@ -95,6 +96,14 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
   let tooEarly = 0;
 
   for (const match of candidates) {
+    /* ONE BAD MATCH MUST NOT END THE CYCLE.
+     *
+     * A single prisma.pick.create() rejection threw straight out of this
+     * loop and failed the whole run — 61 matches on the slate, and the
+     * ones after the bad row were never looked at. Nothing here is worth
+     * sacrificing the rest of the slate for, so each match is isolated
+     * and its failure logged with the players' names. */
+    try {
     if (analysed >= limit) break;
 
     const untilStart = new Date(match.startTime).getTime() - Date.now();
@@ -330,6 +339,23 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
      * so it is never mistaken for a priced one. */
     if (oddsA === null || oddsB === null) {
       if (!isLive || typeof reassessLiveMatch !== 'function') { unpriced++; continue; }
+
+      /* SCORE-ONLY NEEDS AN ACTUAL SCORE.
+       *
+       * "Analyse on the score alone" assumed a live match has one. A
+       * match that has just started is 0-0, so this branch ran with no
+       * price AND no score, and the analyst duly returned a pick whose
+       * four factors were all Neutral, resting on "a marginal edge based
+       * on limited general circuit familiarity" for a W15 player.
+       *
+       * That is a fabricated pick, not a low-confidence one. Nothing
+       * about it is grounded, and it would have been graded and counted
+       * in the published win rate like any other. Wait for a real score
+       * instead: the next cycle is two minutes away. */
+      const sc = String(match.liveScore || match.setScore || '').replace(/[^0-9]/g, '');
+      const hasProgress = sc && /[1-9]/.test(sc);
+      if (!hasProgress) { unpriced++; continue; }
+
       priceSource = 'none';
     }
 
@@ -401,6 +427,30 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
       }).catch(() => {});   // cosmetic — must never block the pick
     }
 
+    /* NO PRICE, NO PICK.
+     *
+     * The block below intended to record a price-less pick with 'guess'
+     * conviction and a null price. But Pick.odds is `Int`, not `Int?`,
+     * so that write threw and took the whole tennis-upcoming run down
+     * with it — every other match in the cycle went unanalysed too.
+     *
+     * The schema has the better instinct. A pick with no price cannot be
+     * settled against a line, cannot produce CLV, and cannot be acted on
+     * by a member: there is nothing to bet. It would still be graded and
+     * counted in the published win rate, which is exactly the kind of
+     * pick that makes a hit rate look better than the P&L behind it.
+     *
+     * Skipped and counted instead, so the number shows up in the cycle
+     * log rather than vanishing. */
+    const pickOdds = (oddsA === null || oddsB === null)
+      ? null : (selectionIsA ? oddsA : oddsB);
+
+    if (pickOdds === null) {
+      unpriced++;
+      console.warn(`[tennisUpcoming] ${match.competitorA} vs ${match.competitorB}: analysed but no price available — not recording a pick.`);
+      continue;
+    }
+
     await db.pick.create({
       data: {
         match: { connect: { id: match.id } },
@@ -410,12 +460,10 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
         confidence: blended ? blended.confidence : analysis.confidence,
         rawConfidence: blended ? blended.rawConfidence : analysis.confidence,
         marketProb: blended ? blended.marketProb : null,
-        /* A score-only pick has no line to blend against or settle
-           on. Recording 'guess' conviction and a null price keeps it
-           honest: it shows on the board, but nothing downstream can
-           mistake it for a pick taken at a real number. */
+        // Score-only picks still carry 'guess' conviction — they have a
+        // price but no pre-match read behind them.
         conviction: priceSource === 'none' ? 'guess' : (analysis.conviction || 'guess'),
-        odds: (oddsA === null || oddsB === null) ? null : (selectionIsA ? oddsA : oddsB),
+        odds: pickOdds,
         rationale: analysis.analysis,
         factsUsed: JSON.stringify(analysis.factors || []),
         // Stored so the closing line can be fetched at start time and
@@ -426,9 +474,16 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
 
     analysed++;
     console.log(`[tennisUpcoming] ${match.competitorA} vs ${match.competitorB} (${ev.league}) -> ${analysis.selection} @ ${selectionIsA ? oddsA : oddsB}`);
+    } catch (err) {
+      failed++;
+      console.error(`[tennisUpcoming] ${match.competitorA} vs ${match.competitorB}: ${err.message}`);
+    }
   }
 
-  console.log(`[tennisUpcoming] ${analysed} analysed, ${unpriced} not yet priced, ${skipped} skipped, ${finished} closed as finished, ${tooEarly} too early to price`);
+  // `failed` is appended only when non-zero: a clean cycle should not
+  // carry a permanent "0 failed" that trains the eye to ignore it.
+  console.log(`[tennisUpcoming] ${analysed} analysed, ${unpriced} not yet priced, ${skipped} skipped, ${finished} closed as finished, ${tooEarly} too early to price`
+    + (failed ? `, ${failed} FAILED` : ''));
   return { analysed, unpriced, skipped, finished, tooEarly };
 }
 
