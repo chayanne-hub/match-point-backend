@@ -29,6 +29,12 @@ const ENABLED = process.env.TENNIS_SOCKET_ENABLED !== 'false';
 // eventId -> { unsubscribe, matchId }
 const joined = new Map();
 
+/* When a joined event was last present in any push. An event missing
+ * from a single push is common and means nothing; missing for minutes
+ * means the match is genuinely over. */
+const lastSeenAt = new Map();
+const LEAVE_AFTER_MS = Number(process.env.TENNIS_LIVE_LEAVE_AFTER_MS || 180000);   // 3 min
+
 /* LIVE SNAPSHOT.
  *
  * The ingest used to ask REST (`extend/api/events/live`) which matches
@@ -294,9 +300,29 @@ async function startTennisLive() {
         lastPushLog = now;
       }
 
-      // Anything we're joined to that's no longer in the feed has finished.
+      /* ABSENT FROM ONE PUSH IS NOT "FINISHED".
+       *
+       * This left any joined event missing from the current push, and
+       * the very next push containing it again caused an immediate
+       * rejoin — an endless leave/join cycle on the same match, several
+       * times a minute, visible in the logs as alternating "left
+       * finished event N" and "joined N".
+       *
+       * The feed's pushes are not a complete census: the event count
+       * moved between 3 and 4 while the same matches were still in play.
+       * A match is only treated as over once it has been missing for a
+       * sustained period. */
+      const nowSeen = Date.now();
+      for (const id of seen) lastSeenAt.set(id, nowSeen);
+
       for (const id of [...joined.keys()]) {
-        if (!seen.has(id)) { leaveEvent(id); console.log(`[tennisLive] left finished event ${id}`); }
+        const last = lastSeenAt.get(id);
+        if (last === undefined) { lastSeenAt.set(id, nowSeen); continue; }
+        if (nowSeen - last > LEAVE_AFTER_MS) {
+          leaveEvent(id);
+          lastSeenAt.delete(id);
+          console.log(`[tennisLive] left event ${id} (absent ${Math.round((nowSeen - last) / 1000)}s)`);
+        }
       }
     });
 

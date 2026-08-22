@@ -166,6 +166,55 @@ async function ingestTennisFixtures() {
       if (Object.keys(enrich).length) {
         await db.match.update({ where: { id: existing.id }, data: enrich });
       }
+
+      /* PRICE EXISTING ROWS TOO.
+       *
+       * This branch used to `continue` straight past the odds fetch
+       * further down, so only a fixture seen for the FIRST time ever got
+       * a price. Every row ingested on an earlier cycle came back as
+       * "already covered", skipped pricing, and stayed unpriced forever —
+       * which is why the board read "0 analysed, N not yet priced" every
+       * cycle with 57 covered fixtures sitting there.
+       *
+       * Tennis prices appear late (often under an hour before start, and
+       * later still at ITF level), so the fixture is nearly always
+       * created BEFORE its price exists. Pricing only on first sight is
+       * therefore pricing at exactly the moment the odds are least
+       * likely to be available. */
+      /* Bounded by start time, or this costs a call per covered fixture
+       * per cycle — 57 rows every 15 minutes, nearly all of them for
+       * matches hours away whose price does not exist yet. Six hours is
+       * comfortably wider than the window in which tennis prices
+       * actually appear, and env-tunable if that proves wrong. */
+      const hoursOut = (new Date(existing.startTime).getTime() - Date.now()) / 3600000;
+      const priceLookaheadH = Number(process.env.TENNIS_PRICE_LOOKAHEAD_H || 6);
+      const worthPricing = hoursOut > -2 && hoursOut < priceLookaheadH;
+
+      if (worthPricing && (existing.oddsA === null || existing.oddsB === null)) {
+        const odds = await fetchMatchOdds({
+          tour: f.tour || 'atp',
+          player1Id: f.playerAId ?? existing.playerAId,
+          player2Id: f.playerBId ?? existing.playerBId,
+          tournamentId: f.tournamentId ?? existing.tournamentId,
+          roundId: f.roundId ?? existing.roundId,
+        }).catch(() => null);
+
+        if (odds && odds.oddsA !== null && odds.oddsB !== null) {
+          await db.match.update({
+            where: { id: existing.id },
+            data: {
+              oddsA: odds.oddsA,
+              oddsB: odds.oddsB,
+              ...(odds.bestOddsA != null ? { bestOddsA: odds.bestOddsA } : {}),
+              ...(odds.bestOddsB != null ? { bestOddsB: odds.bestOddsB } : {}),
+            },
+          });
+          priced++;
+        } else {
+          unpriced++;
+        }
+      }
+
       skipped++;
       continue;
     }
