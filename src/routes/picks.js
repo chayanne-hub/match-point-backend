@@ -1131,6 +1131,64 @@ router.get('/insiders', async (req, res) => {
  * (playerAId / playerBId), so the match drawer can show who these two
  * are and how they match up, not just why the model picked one.
  */
+/* PLAYER PHOTO PROXY.
+ *
+ * The provider's image URLs load fine in curl but the browser refuses
+ * them with ERR_BLOCKED_BY_ORB: Opaque Response Blocking rejects a
+ * cross-origin response requested as an image whose Content-Type does
+ * not look like one. curl does not apply ORB, which is why the URL
+ * tested clean and still failed on the page.
+ *
+ * Fetching server-side and re-serving with an explicit image
+ * Content-Type from our own origin removes the cross-origin question
+ * entirely. Cached hard — a player headshot does not change.
+ */
+const PHOTO_TTL_SECONDS = 7 * 24 * 60 * 60;
+const photoCache = new Map();          // key -> { buf, type, at }
+const PHOTO_MEM_TTL_MS = 60 * 60 * 1000;
+
+router.get('/player-photo/:tour/:id', async (req, res) => {
+  const tour = String(req.params.tour || 'atp').toLowerCase();
+  const id = String(req.params.id || '').replace(/[^0-9]/g, '');
+  if (!id || (tour !== 'atp' && tour !== 'wta')) return res.status(400).end();
+
+  const key = `${tour}/${id}`;
+  const hit = photoCache.get(key);
+  if (hit && Date.now() - hit.at < PHOTO_MEM_TTL_MS) {
+    if (hit.missing) return res.status(404).end();
+    res.set('Content-Type', hit.type);
+    res.set('Cache-Control', `public, max-age=${PHOTO_TTL_SECONDS}`);
+    return res.send(hit.buf);
+  }
+
+  try {
+    const url = `https://api.sportsapi365.com/v1/tennis/api2/uploads/Photo/${tour}/${id}.jpg`;
+    const upstream = await fetch(url, {
+      headers: { 'X-Gravitee-Api-Key': process.env.TENNIS_API_KEY || '' },
+    });
+
+    if (!upstream.ok) {
+      // Remember the miss: without this, every render of a player who has
+      // no photo re-requests it from the provider on every page view.
+      photoCache.set(key, { missing: true, at: Date.now() });
+      return res.status(404).end();
+    }
+
+    const buf = Buffer.from(await upstream.arrayBuffer());
+    // Trust the extension over the upstream header — the wrong header is
+    // the whole reason the browser blocked these in the first place.
+    const type = 'image/jpeg';
+
+    photoCache.set(key, { buf, type, at: Date.now() });
+    res.set('Content-Type', type);
+    res.set('Cache-Control', `public, max-age=${PHOTO_TTL_SECONDS}`);
+    return res.send(buf);
+  } catch (err) {
+    console.error(`[player-photo] ${key}: ${err.message}`);
+    return res.status(404).end();
+  }
+});
+
 router.get('/h2h/:tour/:id1/:id2', async (req, res) => {
   try {
     const tour = String(req.params.tour || 'atp').toLowerCase();
