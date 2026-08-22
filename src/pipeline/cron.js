@@ -853,6 +853,32 @@ async function reanalyzeUpcoming(sportSlug, { limit = 50, dryRun = true, mode = 
     };
   }
 
+  /* TENNIS NO LONGER COMES FROM THE ODDS API.
+   *
+   * This loop priced each candidate by re-fetching from fetchMatches(),
+   * which now returns [] for tennis — so every match failed the price
+   * check and the Analyze / Re-run buttons silently did nothing. They
+   * looked broken because, for tennis, they were.
+   *
+   * Tennis is delegated to analyzeTennisUpcoming, which owns the whole
+   * provider chain (core odds, extend fallback, live prices) rather than
+   * duplicating a slice of it here and drifting out of step again. */
+  if (sportSlug === 'tennis') {
+    const { analyzeTennisUpcoming } = require('./analyzeTennisUpcoming.js');
+    const out = await analyzeTennisUpcoming({
+      analyze: analyzeMatchWithRetry,
+      blend: blendWithMarket,
+      reassessLiveMatch,
+      limit,
+    });
+    return {
+      sport: sportSlug,
+      reanalysed: out.analysed || 0,
+      failed: (out.unpriced || 0) + (out.skipped || 0),
+      note: 'tennis routed through analyzeTennisUpcoming',
+    };
+  }
+
   let done = 0, failed = 0;
   for (const match of candidates) {
     try {
