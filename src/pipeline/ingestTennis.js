@@ -479,8 +479,22 @@ async function closeStaleScheduledTennis() {
    * Four hours is still roughly double a long best-of-three, so it
    * closes promptly without risking a match still on court. Main tour
    * keeps the longer window since ESPN closes those anyway. */
-  const lowerCutoff = new Date(Date.now() - 4 * 60 * 60 * 1000);
-  const mainCutoff = new Date(Date.now() - 8 * 60 * 60 * 1000);
+  /* THE RESULT DECIDES, NOT A TIMER.
+   *
+   * These cutoffs were 4h and 8h past start, so a match that finished in
+   * 70 minutes stayed in "Match Analyzed" for another three hours —
+   * advertised as upcoming while the result was already published.
+   *
+   * The h2h lookup tells us definitively whether a match is over, so we
+   * start ASKING once a match is plausibly finished rather than waiting
+   * out a worst-case duration. 45 minutes is shorter than any real
+   * completed match, so a lookup that returns a score at that point is
+   * reporting a genuine result, not a match in progress.
+   *
+   * Nothing is closed without a result until the 12h backstop below, so
+   * asking early is cheap and cannot close a live match early. */
+  const lowerCutoff = new Date(Date.now() - 45 * 60 * 1000);
+  const mainCutoff = new Date(Date.now() - 45 * 60 * 1000);
 
   /* TRY FOR A REAL RESULT BEFORE CLOSING.
    *
