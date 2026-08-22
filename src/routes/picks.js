@@ -13,7 +13,7 @@ const { isAdminEmail } = require('./auth');
 const { fetchBasketballPlayerProps } = require('../pipeline/fetchPlayerProps');
 const { analyzePlayerProps } = require('../pipeline/propsAnalyst');
 const { fetchEspnLiveScores, matchEspnEvent } = require('../pipeline/fetchEspn');
-const { fetchLatestRankings, fetchPlayerProfile } = require('../pipeline/fetchTennisApi');
+const { fetchLatestRankings, fetchPlayerProfile, fetchH2HFull } = require('../pipeline/fetchTennisApi');
 const { analyzeStartSit } = require('../pipeline/fantasyAnalyst');
 const { triggerManualRun, triggerManualRunTomorrow } = require('../pipeline/cron');
 
@@ -1125,6 +1125,27 @@ router.get('/insiders', async (req, res) => {
  * rather than as its own "rankings" page, where it was pretending to be
  * a ranking; on a profile it is context next to the career numbers.
  */
+/* HEAD TO HEAD for a match.
+ *
+ * Takes the two player ids we already store on every tennis Match
+ * (playerAId / playerBId), so the match drawer can show who these two
+ * are and how they match up, not just why the model picked one.
+ */
+router.get('/h2h/:tour/:id1/:id2', async (req, res) => {
+  try {
+    const tour = String(req.params.tour || 'atp').toLowerCase();
+    if (tour !== 'atp' && tour !== 'wta') {
+      return res.status(400).json({ error: 'tour must be atp or wta' });
+    }
+    const data = await fetchH2HFull(tour, req.params.id1, req.params.id2);
+    if (!data) return res.status(404).json({ error: 'h2h unavailable' });
+    res.json(data);
+  } catch (err) {
+    console.error('[h2h] failed:', err.message);
+    res.status(500).json({ error: 'h2h unavailable' });
+  }
+});
+
 router.get('/player/:tour/:id', async (req, res) => {
   try {
     const tour = String(req.params.tour || 'atp').toLowerCase();
@@ -1938,6 +1959,11 @@ router.get('/:id', async (req, res) => {
     league: pick.match.league,
     matchup: `${pick.match.competitorA} vs ${pick.match.competitorB}`,
     competitorA: pick.match.competitorA,
+    // Player ids so the drawer can request head-to-head without a second
+    // lookup or any name matching.
+    playerAId: pick.match.playerAId || null,
+    playerBId: pick.match.playerBId || null,
+    tourLevel: pick.match.tourLevel ?? null,
     competitorB: pick.match.competitorB,
     startTime: pick.match.startTime,
     surface: pick.match.surface,

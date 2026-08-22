@@ -484,6 +484,97 @@ async function fetchLatestRankings(tour, { maxWeeksBack = 6 } = {}) {
  *   levelFinals.total   = NOT finals. It duplicates the season W-L, so
  *                        it is deliberately ignored below.
  */
+/* Absolute URL for a player headshot.
+ *
+ * The API returns image paths like "/tennis/api2/uploads/Photo/atp/47275.jpg".
+ * Those resolve under https://api.sportsapi365.com/v1 — and, unusually
+ * for this API, they need NO key, so the browser can load them directly
+ * rather than proxying every image through us.
+ */
+const IMAGE_BASE = 'https://api.sportsapi365.com/v1';
+
+function playerImageUrl(path) {
+  if (!path || typeof path !== 'string') return null;
+  return path.startsWith('http') ? path : `${IMAGE_BASE}${path}`;
+}
+
+/**
+ * Head-to-head between two players: both profiles plus the match-up
+ * statistics accumulated across their meetings.
+ *
+ * Two endpoints because they carry different things — `h2h/profile` has
+ * the players (career, YTD, form, images), `h2h/stats` has the serve,
+ * return, tiebreak and deciding-set splits BETWEEN them specifically.
+ *
+ * NOTE ON THE RECORD: the two disagree. h2h/stats reports matchesWon 7
+ * and 9 (16) while matchesCount says 17 and surfaceData totals 7 and 10.
+ * surfaceData reconciles with matchesCount, so it is used for the
+ * headline record; the discrepancy is most likely a walkover counted in
+ * one place and not the other.
+ */
+async function fetchH2HFull(tour, id1, id2) {
+  const [profile, stats] = await Promise.all([
+    apiGet(`h2h/profile/${tour}/${id1}/${id2}/false`).catch(() => null),
+    apiGet(`h2h/stats/${tour}/${id1}/${id2}`).catch(() => null),
+  ]);
+  if (!profile && !stats) return null;
+
+  const shapePlayer = (pl) => {
+    if (!pl) return null;
+    return {
+      id: pl.id,
+      name: pl.name,
+      country: pl.contryAcr || null,          // sic — misspelled at source
+      countryName: pl.country || null,
+      image: playerImageUrl(pl.image),
+      rank: pl.currentRank ?? null,
+      bestRank: pl.bestRank ?? null,
+      plays: pl.plays || null,
+      birthday: pl.birthday || null,
+      ytd: { wins: pl.ytdWon ?? null, losses: pl.ytdLost ?? null,
+             pct: pl.ytdWLPercentage ?? null, titles: pl.ytdTitles ?? null },
+      career: { wins: pl.careerWin ?? null, losses: pl.careerLose ?? null,
+                pct: pl.careerWLPercentage ?? null, titles: pl.totalTitles ?? null },
+      // Oldest-first in the payload; reversed so the most recent match
+      // reads left-to-right like every other form guide.
+      form: Array.isArray(pl.recentGames) ? [...pl.recentGames].reverse() : [],
+    };
+  };
+
+  const sd = profile?.surfaceData || stats?.surfaceData || {};
+  const s1 = stats?.player1 || {};
+  const s2 = stats?.player2 || {};
+
+  const splits = (a, b) => ([
+    { label: 'Matches won',      a: a.matchesWon,                  b: b.matchesWon },
+    { label: '1st serve won',    a: a.winningOnFirstServePercentage,  b: b.winningOnFirstServePercentage, pct: true },
+    { label: '2nd serve won',    a: a.winningOnSecondServePercentage, b: b.winningOnSecondServePercentage, pct: true },
+    { label: 'Return pts won',   a: a.returnPtsWinPercentage,      b: b.returnPtsWinPercentage, pct: true },
+    { label: 'Break pts won',    a: a.breakpointsWonPercentage,    b: b.breakpointsWonPercentage, pct: true },
+    { label: 'Tiebreaks won',    a: a.tiebreakWon,                 b: b.tiebreakWon },
+    { label: 'Deciding sets',    a: a.decidingSetWin,              b: b.decidingSetWin },
+    { label: 'Aces',             a: a.acesCount,                   b: b.acesCount },
+    { label: 'Double faults',    a: a.doubleFaultsCount,           b: b.doubleFaultsCount, lowerIsBetter: true },
+    { label: 'Sets won',         a: a.setsWon,                     b: b.setsWon },
+  ]);
+
+  return {
+    player1: shapePlayer(profile?.player1),
+    player2: shapePlayer(profile?.player2),
+    meetings: stats?.matchesCount ?? null,
+    record: { p1: sd.total1 ?? null, p2: sd.total2 ?? null },
+    surfaces: [
+      { court: 'Hard',   p1: sd.hard1 ?? 0,  p2: sd.hard2 ?? 0 },
+      { court: 'Clay',   p1: sd.clay1 ?? 0,  p2: sd.clay2 ?? 0 },
+      { court: 'Grass',  p1: sd.grass1 ?? 0, p2: sd.grass2 ?? 0 },
+      { court: 'Indoor', p1: sd.iHard1 ?? 0, p2: sd.iHard2 ?? 0 },
+    ].filter((r) => r.p1 || r.p2),
+    splits: (stats ? splits(s1, s2) : []).filter((r) =>
+      r.a !== undefined && r.a !== null && r.b !== undefined && r.b !== null),
+    avgMatchTime: s1.avgTime || null,
+  };
+}
+
 async function fetchPlayerProfile(tour, playerId) {
   const id = encodeURIComponent(playerId);
 
@@ -545,6 +636,10 @@ async function fetchPlayerProfile(tour, playerId) {
     playerId: Number(playerId),
     name: bio?.name || recent?.name || null,
     country: bio?.countryAcr || null,
+    // Headshot, from the same public path h2h/profile exposes. Built by
+    // convention rather than returned here, so it is verified before use
+    // on the client (a missing file falls back to initials).
+    image: playerImageUrl(`/tennis/api2/uploads/Photo/${tour}/${playerId}.jpg`),
     birthday: bio?.birthday || null,
     currentRank: bio?.currentRank ?? null,
     careerHigh: bio?.ch ?? null,
@@ -803,6 +898,8 @@ async function discoverOddsPath(sampleEventId) {
 }
 
 module.exports = {
+  fetchH2HFull,
+  playerImageUrl,
   fetchPlayerProfile,
   fetchLatestRankings,
   fetchRankingsForDate,
