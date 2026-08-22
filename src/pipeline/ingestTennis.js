@@ -513,15 +513,29 @@ async function closeStaleScheduledTennis() {
   const stale = await db.match.findMany({
     where: {
       sportId: sport.id,
-      status: { in: ['scheduled', 'live'] },   // live rows must resolve too
+      /* Also revisit FINAL rows that were closed without a score.
+       *
+       * The sweep only looked at scheduled and live rows, so a match
+       * closed unscored — by the 12h backstop, or by an earlier version
+       * of this code — was never looked at again. Its pick could never
+       * grade, and it vanished from the record silently: final on the
+       * board, absent from the win rate.
+       *
+       * Results publish late, so a row unresolvable an hour ago is often
+       * resolvable now. Bounded to the last 48h; past that the feed has
+       * moved on and the match is genuinely lost. */
       OR: [
-        { tourLevel: { in: [0, 1] }, startTime: { lt: lowerCutoff } },
-        { tourLevel: { notIn: [0, 1] }, startTime: { lt: mainCutoff } },
-        { tourLevel: null, startTime: { lt: mainCutoff } },
+        { status: { in: ['scheduled', 'live'] } },
+        { status: 'final', homeScore: null,
+          startTime: { gte: new Date(Date.now() - 48 * 60 * 60 * 1000) } },
       ],
+      // Both tiers now share the same 45-minute threshold, so this is a
+      // single condition rather than an OR that would clash with the
+      // status OR above.
+      startTime: { lt: lowerCutoff },
     },
     select: { id: true, competitorA: true, competitorB: true, startTime: true,
-              playerAId: true, playerBId: true },
+              playerAId: true, playerBId: true, status: true },
   });
   if (!stale.length) return { closed: 0, scored: 0, unscored: 0 };
 
@@ -589,6 +603,8 @@ async function closeStaleScheduledTennis() {
 
     if (data.homeScore === undefined) {
       unscored++;
+      // Already final and still unresolvable — nothing to do but leave it.
+      if (m.status === 'final') continue;
 
       /* Retry, but not forever.
        *
