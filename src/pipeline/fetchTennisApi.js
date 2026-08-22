@@ -468,6 +468,111 @@ async function fetchLatestRankings(tour, { maxWeeksBack = 6 } = {}) {
   return { at: Date.now(), date: null, rows: [] };
 }
 
+/**
+ * Everything a player profile needs, from three endpoints.
+ *
+ * There is no single player endpoint — `/{tour}/player/{id}` 404s. The
+ * biography actually lives inside h2h/recent's player object (birthday,
+ * currentRank, points, career high, prize money), which is also where
+ * recent matches come from, so one call covers both.
+ *
+ * FIELD MEANINGS, verified against Sinner's 2024 season rather than
+ * assumed from the names:
+ *   aw / al            = wins / losses  (2024 total 73-6, correct)
+ *   levelFinals.<lvl>.w = TITLES won at that level (2024: 3 Masters,
+ *                        2 Slams — both correct)
+ *   levelFinals.total   = NOT finals. It duplicates the season W-L, so
+ *                        it is deliberately ignored below.
+ */
+async function fetchPlayerProfile(tour, playerId) {
+  const id = encodeURIComponent(playerId);
+
+  const [recent, surfaces, perf] = await Promise.all([
+    apiGet(`h2h/recent/${tour}/${id}`).catch(() => null),
+    apiGet(`${tour}/player/surface-summary/${id}`).catch(() => null),
+    apiGet(`${tour}/player/perf-breakdown/${id}`).catch(() => null),
+  ]);
+
+  if (!recent && !surfaces && !perf) return null;
+
+  // The bio sits on whichever side of a recent match is our player.
+  let bio = null;
+  const games = Array.isArray(recent?.games) ? recent.games : [];
+  for (const g of games) {
+    if (String(g.player1?.id) === String(playerId)) { bio = g.player1; break; }
+    if (String(g.player2?.id) === String(playerId)) { bio = g.player2; break; }
+  }
+
+  const years = perf?.data || {};
+  const yearKeys = Object.keys(years).sort((a, b) => Number(b) - Number(a));
+
+  // Career totals, summed from the per-year level totals.
+  let careerW = 0, careerL = 0, titles = 0, slams = 0, masters = 0;
+  for (const y of yearKeys) {
+    const lv = years[y]?.level?.total || {};
+    careerW += Number(lv.aw || 0);
+    careerL += Number(lv.al || 0);
+    const f = years[y]?.levelFinals || {};
+    // total is skipped on purpose — see the note above.
+    for (const key of ['masters', 'tourFinals', 'mainTour', 'grandSlam', 'challengers', 'futures', 'cups']) {
+      titles += Number(f[key]?.w || 0);
+    }
+    slams += Number(f.grandSlam?.w || 0);
+    masters += Number(f.masters?.w || 0);
+  }
+
+  const currentYear = yearKeys[0];
+  const cy = years[currentYear] || {};
+
+  return {
+    playerId: Number(playerId),
+    name: bio?.name || recent?.name || null,
+    country: bio?.countryAcr || null,
+    birthday: bio?.birthday || null,
+    currentRank: bio?.currentRank ?? null,
+    careerHigh: bio?.ch ?? null,
+    points: bio?.points ?? null,
+    prize: bio?.prize ?? null,
+
+    career: { wins: careerW, losses: careerL, titles, slams, masters },
+
+    season: {
+      year: currentYear ? Number(currentYear) : null,
+      wins: Number(cy.level?.total?.aw || 0),
+      losses: Number(cy.level?.total?.al || 0),
+      // Record against ranked opposition — the number that separates a
+      // top-10 player from someone padding a record on lower tiers.
+      vsTop10: { wins: Number(cy.rank?.top10?.aw || 0), losses: Number(cy.rank?.top10?.al || 0) },
+      vsTop50: { wins: Number(cy.rank?.top50?.aw || 0), losses: Number(cy.rank?.top50?.al || 0) },
+    },
+
+    surfaces: (surfaces?.data || []).map((row) => ({
+      year: row.year,
+      courts: (row.surfaces || []).map((c) => ({
+        court: c.court, wins: c.courtWins, losses: c.courtLosses,
+      })),
+    })),
+
+    recent: games.slice(0, 10).map((g) => {
+      const meIsP1 = String(g.player1Id) === String(playerId);
+      const opp = meIsP1 ? g.player2 : g.player1;
+      return {
+        date: g.date,
+        opponent: opp?.name || null,
+        opponentId: opp?.id ?? null,
+        opponentRank: opp?.currentRank ?? null,
+        score: g.result || null,
+        won: g.isWin === true,
+        tournament: g.tournament?.name || null,
+        tier: g.tournament?.tier || null,
+        // Decimal odds as they stood — useful context on the profile and
+        // the only place this API surfaces a historical price.
+        odds: meIsP1 ? g.odd1 : g.odd2,
+      };
+    }),
+  };
+}
+
 async function fetchPlayerRecentResult(tour, playerId, opponentId, startTime) {
   if (!playerId || !opponentId) return null;
 
@@ -664,6 +769,7 @@ async function discoverOddsPath(sampleEventId) {
 }
 
 module.exports = {
+  fetchPlayerProfile,
   fetchLatestRankings,
   fetchRankingsForDate,
   fetchPlayerRecentResult,

@@ -13,7 +13,7 @@ const { isAdminEmail } = require('./auth');
 const { fetchBasketballPlayerProps } = require('../pipeline/fetchPlayerProps');
 const { analyzePlayerProps } = require('../pipeline/propsAnalyst');
 const { fetchEspnLiveScores, matchEspnEvent } = require('../pipeline/fetchEspn');
-const { fetchLatestRankings } = require('../pipeline/fetchTennisApi');
+const { fetchLatestRankings, fetchPlayerProfile } = require('../pipeline/fetchTennisApi');
 const { analyzeStartSit } = require('../pipeline/fantasyAnalyst');
 const { triggerManualRun, triggerManualRunTomorrow } = require('../pipeline/cron');
 
@@ -1117,6 +1117,61 @@ router.get('/insiders', async (req, res) => {
  * ?tour=atp|wta (default atp). Serves the most recent published week —
  * see fetchLatestRankings for why that is not simply "this Monday".
  */
+/* PLAYER PROFILE — tour data plus our own record on them.
+ *
+ * The tour half is what an ATP/WTA profile shows: career record, titles,
+ * surface splits, form. The second half is the thing only we have — how
+ * the model has actually fared backing this player. That belongs here
+ * rather than as its own "rankings" page, where it was pretending to be
+ * a ranking; on a profile it is context next to the career numbers.
+ */
+router.get('/player/:tour/:id', async (req, res) => {
+  try {
+    const tour = String(req.params.tour || 'atp').toLowerCase();
+    if (tour !== 'atp' && tour !== 'wta') {
+      return res.status(400).json({ error: 'tour must be atp or wta' });
+    }
+
+    const profile = await fetchPlayerProfile(tour, req.params.id);
+    if (!profile) return res.status(404).json({ error: 'player not found' });
+
+    /* Our record on this player, matched on the selection text.
+     * Picks store "<name> ML", so the name is the only join available —
+     * there is no player id on a Pick. Scoped to graded moneyline picks
+     * so it means the same thing as the win rate everywhere else. */
+    let model = null;
+    if (profile.name) {
+      const picks = await db.pick.findMany({
+        where: {
+          pickType: { in: ['model', 'winner'] },
+          market: 'moneyline',
+          selection: { startsWith: profile.name },
+          result: { isNot: null },
+        },
+        include: { result: true },
+      }).catch(() => []);
+
+      const decided = picks.filter((p) => p.result && p.result.outcome !== 'push');
+      if (decided.length) {
+        const wins = decided.filter((p) => p.result.outcome === 'win').length;
+        model = {
+          picked: decided.length,
+          wins,
+          losses: decided.length - wins,
+          winRate: Math.round((wins / decided.length) * 100),
+          avgConfidence: Math.round(
+            decided.reduce((a, p) => a + (p.confidence || 0), 0) / decided.length),
+        };
+      }
+    }
+
+    res.json({ ...profile, model });
+  } catch (err) {
+    console.error('[player] failed:', err.message);
+    res.status(500).json({ error: 'player profile unavailable' });
+  }
+});
+
 router.get('/rankings', async (req, res) => {
   try {
     const tour = String(req.query.tour || 'atp').toLowerCase();
