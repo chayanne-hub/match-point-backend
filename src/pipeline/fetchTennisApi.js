@@ -487,13 +487,30 @@ async function fetchLatestRankings(tour, { maxWeeksBack = 6 } = {}) {
 async function fetchPlayerProfile(tour, playerId) {
   const id = encodeURIComponent(playerId);
 
-  const [recent, surfaces, perf] = await Promise.all([
+  const [recent, surfaces, perf, prof] = await Promise.all([
     apiGet(`h2h/recent/${tour}/${id}`).catch(() => null),
     apiGet(`${tour}/player/surface-summary/${id}`).catch(() => null),
     apiGet(`${tour}/player/perf-breakdown/${id}`).catch(() => null),
+    apiGet(`${tour}/player/profile/${id}`).catch(() => null),
   ]);
 
-  if (!recent && !surfaces && !perf) return null;
+  if (!recent && !surfaces && !perf && !prof) return null;
+
+  /* Biographical detail: coach, handedness, birthplace, physique.
+   *
+   * NOT taken from this endpoint: `points`. It reports 3350 for Sinner
+   * where the rankings feed says 13450 — a different measure entirely
+   * (race points, most likely). Mixing the two would put a number on the
+   * profile that contradicts the ranking table one click away.
+   *
+   * The social fields are scrambled at source: `twitter` holds an
+   * atptour.com URL, `page` holds x.com, `instagram` holds facebook.com,
+   * `facebook` holds instagram.com. Rather than trust the labels, links
+   * are sorted by what the URL actually points at. */
+  const info = prof?.data?.information || {};
+  const socialRaw = [info.twitter, info.page, info.instagram, info.facebook, info.site]
+    .filter((u) => typeof u === 'string' && u.startsWith('http'));
+  const pickSocial = (re) => socialRaw.find((u) => re.test(u)) || null;
 
   // The bio sits on whichever side of a recent match is our player.
   let bio = null;
@@ -533,6 +550,23 @@ async function fetchPlayerProfile(tour, playerId) {
     careerHigh: bio?.ch ?? null,
     points: bio?.points ?? null,
     prize: bio?.prize ?? null,
+
+    // From player/profile — the detail that makes this read like a
+    // profile rather than a stat dump.
+    status: prof?.data?.playerStatus || null,
+    coach: prof?.data?.coach || info.coach || null,
+    turnedPro: info.turnedPro || null,
+    heightCm: info.height ? Number(info.height) : null,
+    weightKg: info.weight ? Number(info.weight) : null,
+    birthplace: info.birthplace || null,
+    residence: info.residence || null,
+    plays: info.plays || null,
+    links: {
+      atp: pickSocial(/atptour\.com|wtatennis\.com/i),
+      x: pickSocial(/x\.com|twitter\.com/i),
+      instagram: pickSocial(/instagram\.com/i),
+      facebook: pickSocial(/facebook\.com/i),
+    },
 
     career: { wins: careerW, losses: careerL, titles, slams, masters },
 
