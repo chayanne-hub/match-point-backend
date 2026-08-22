@@ -578,6 +578,15 @@ async function fetchH2HFull(tour, id1, id2) {
 async function fetchPlayerProfile(tour, playerId) {
   const id = encodeURIComponent(playerId);
 
+  /* The name-keyed endpoints are a SEPARATE family from the id-keyed
+   * ones, and richer in places: /profile/{name} splits backhand out as
+   * its own field, /interesting gives notable rivalries with H2H
+   * records, /finals/{year} lists actual titles with surface and venue.
+   *
+   * They key on the exact display NAME, which is why the name is looked
+   * up from the id-based data first rather than passed in from our own
+   * Match rows — our stored names differ in accents and word order, and
+   * that mismatch is what broke matching repeatedly elsewhere. */
   const [recent, surfaces, perf, prof] = await Promise.all([
     apiGet(`h2h/recent/${tour}/${id}`).catch(() => null),
     apiGet(`${tour}/player/surface-summary/${id}`).catch(() => null),
@@ -610,6 +619,18 @@ async function fetchPlayerProfile(tour, playerId) {
     if (String(g.player1?.id) === String(playerId)) { bio = g.player1; break; }
     if (String(g.player2?.id) === String(playerId)) { bio = g.player2; break; }
   }
+
+  /* Second round of calls, keyed on the resolved name. Only attempted
+   * once we actually have a name — without one these would 404. */
+  const displayName = bio?.name || recent?.name || prof?.data?.name || null;
+  const thisYear = new Date().getFullYear();
+
+  const [rivalries, finals] = displayName
+    ? await Promise.all([
+        apiGet(`profile/${encodeURIComponent(displayName)}/interesting`).catch(() => null),
+        apiGet(`profile/${encodeURIComponent(displayName)}/finals/${thisYear}`).catch(() => null),
+      ])
+    : [null, null];
 
   const years = perf?.data || {};
   const yearKeys = Object.keys(years).sort((a, b) => Number(b) - Number(a));
@@ -656,6 +677,10 @@ async function fetchPlayerProfile(tour, playerId) {
     birthplace: info.birthplace || null,
     residence: info.residence || null,
     plays: info.plays || null,
+    // The name-keyed profile splits this out; the id-keyed one folds it
+    // into `plays` as one string.
+    backhand: prof?.data?.information?.backhand || null,
+    careerMoney: prof?.data?.careerMoney ?? null,
     links: {
       atp: pickSocial(/atptour\.com|wtatennis\.com/i),
       x: pickSocial(/x\.com|twitter\.com/i),
@@ -664,6 +689,27 @@ async function fetchPlayerProfile(tour, playerId) {
     },
 
     career: { wins: careerW, losses: careerL, titles, slams, masters },
+
+    /* Notable rivalries — the H2H records against the opponents this
+     * player has met most. "13-0 vs De Minaur" says more about a player
+     * than another aggregate win rate does. */
+    rivalries: (Array.isArray(rivalries) ? rivalries : []).slice(0, 8).map((r) => {
+      const [w, l] = String(r.h2h || '').split('-').map(Number);
+      return {
+        opponent: r.opponent || null,
+        wins: isNaN(w) ? null : w,
+        losses: isNaN(l) ? null : l,
+        record: r.h2h || null,
+      };
+    }).filter((r) => r.opponent),
+
+    // Titles won this year, with where and on what.
+    titlesThisYear: (finals?.titles || []).map((t) => ({
+      name: t.name || null,
+      court: t.court || null,
+      country: t.country?.acronym || null,
+      date: t.date || null,
+    })).sort((a, b) => new Date(a.date) - new Date(b.date)),
 
     season: {
       year: currentYear ? Number(currentYear) : null,
