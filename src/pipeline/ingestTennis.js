@@ -575,13 +575,23 @@ async function closeStaleScheduledTennis() {
 
     if (data.homeScore === undefined) {
       unscored++;
-      /* Leave it alone rather than closing it unscored.
+
+      /* Retry, but not forever.
        *
-       * Results lag by minutes. Closing now would mark it final with no
-       * score, and gradeFinishedMatches only ever looks at picks with no
-       * result on a final match — it would be graded never. Leaving it
-       * open lets the next cycle try again. */
-      continue;
+       * Results lag by minutes, so leaving a match open lets the next
+       * cycle try again — that part is right. With no limit, though, a
+       * match whose result never arrives stays `scheduled` permanently
+       * and sits in "Match Analyzed" long after it finished. That is
+       * exactly what happened to Safiullin and Royer.
+       *
+       * So retry for 12 hours, then close it anyway. An ungraded
+       * finished match is a small hole in the record; a completed match
+       * advertised on the board as upcoming is a visible lie about what
+       * the product is showing. */
+      const age = Date.now() - new Date(m.startTime).getTime();
+      if (age < 12 * 60 * 60 * 1000) continue;
+
+      console.warn(`[tennisIngest] closing ${m.competitorA} vs ${m.competitorB} with no result after 12h — it cannot be graded`);
     }
 
     await db.match.update({ where: { id: m.id }, data })
