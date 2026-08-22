@@ -699,7 +699,7 @@ ${JSON_VALIDITY_REMINDER}
    * analyst falls back to search exactly as before.
    */
   const matchDescription = `${competitorA} vs ${competitorB} (${sport}), ${new Date(startTime).toISOString()}. ${oddsContext} ${spreadContext} ${totalContext}`
-    + (verifiedData ? `\n${verifiedData}\nThese figures come from the tennis data provider and are accurate — do not re-research them. Use search only for what they do not cover: injury and physical condition, travel and scheduling, motivation, court speed at this venue, and crowd.` : '');
+    + (verifiedData ? `\n${verifiedData}\nThese figures come from the tennis data provider and are accurate — do not re-research them. Use search only for what they do not cover: injury and physical condition, motivation, court speed at this venue, and crowd. Match workload and venue history are in the data above when known \u2014 do not search for them.` : '');
 
   // Real research with web search can legitimately take a while, but a
   // single hung request must never be allowed to block the entire

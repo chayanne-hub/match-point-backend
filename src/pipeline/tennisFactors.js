@@ -202,8 +202,66 @@ async function fetchTierRecord(tour, playerId) {
  * these are independent reads, and doing them in series would add
  * seconds to every analysis.
  */
+/* MATCH LOAD / FATIGUE.  h2h/recent/{type}/{playerId}
+ *
+ * The factor the market prices worst at Challenger and ITF level, where
+ * a player can be in their fourth match in five days across singles and
+ * qualifying and nothing in the price reflects it.
+ *
+ * Two things matter and both are in the recent-match payload: how many
+ * matches in the last 7 and 14 days, and how long they lasted. `stat.mt`
+ * is match duration in "0000-00-00 HH:MM:SS" form — the date part is
+ * padding, only the time is real.
+ *
+ * Minutes matter more than match count: three straight-sets wins is a
+ * different week from two three-hour three-setters.
+ */
+function parseMatchMinutes(mt) {
+  if (!mt || typeof mt !== 'string') return null;
+  // "0000-00-00 01:11:47" -> 71 minutes. Take the LAST time-looking part.
+  const m = mt.match(/(\d{1,2}):(\d{2}):(\d{2})\s*$/);
+  if (!m) return null;
+  const mins = Number(m[1]) * 60 + Number(m[2]);
+  // A tennis match under 20 or over 360 minutes is a parse artefact.
+  return (mins >= 20 && mins <= 360) ? mins : null;
+}
+
+async function fetchMatchLoad(tour, playerId) {
+  if (!playerId) return null;
+  let body;
+  try {
+    body = await apiGet(`h2h/recent/${tour}/${encodeURIComponent(playerId)}`);
+  } catch {
+    return null;
+  }
+  const games = Array.isArray(body?.games) ? body.games : [];
+  if (!games.length) return null;
+
+  const now = Date.now();
+  const DAY = 24 * 60 * 60 * 1000;
+  let m7 = 0, m14 = 0, min7 = 0, min14 = 0, longest7 = 0, lastGapDays = null;
+
+  games.forEach((g, i) => {
+    if (!g.date) return;
+    const age = now - new Date(g.date).getTime();
+    if (age < 0) return;                       // scheduled, not played
+    if (i === 0) lastGapDays = Math.floor(age / DAY);
+
+    const mins = parseMatchMinutes(g.stat?.mt);
+    if (age <= 7 * DAY)  { m7++;  if (mins) { min7 += mins; longest7 = Math.max(longest7, mins); } }
+    if (age <= 14 * DAY) { m14++; if (mins) min14 += mins; }
+  });
+
+  return {
+    matches7: m7, matches14: m14,
+    minutes7: min7 || null, minutes14: min14 || null,
+    longestMinutes7: longest7 || null,
+    daysSinceLastMatch: lastGapDays,
+  };
+}
+
 async function buildFactorBrief({ tour = 'atp', nameA, nameB, playerAId, playerBId, tournamentId }) {
-  const [h2h, surfA, surfB, formA, formB, venueA, venueB, rankA, rankB, tierA, tierB] = await Promise.all([
+  const [h2h, surfA, surfB, formA, formB, venueA, venueB, rankA, rankB, tierA, tierB, loadA, loadB] = await Promise.all([
     fetchH2H(tour, nameA, nameB),
     fetchSurfaceRecord(tour, nameA),
     fetchSurfaceRecord(tour, nameB),
@@ -215,12 +273,14 @@ async function buildFactorBrief({ tour = 'atp', nameA, nameB, playerAId, playerB
     fetchRankingTrend(tour, playerBId),
     fetchTierRecord(tour, playerAId),
     fetchTierRecord(tour, playerBId),
+    fetchMatchLoad(tour, playerAId),
+    fetchMatchLoad(tour, playerBId),
   ]);
 
   return {
     h2h,
-    playerA: { name: nameA, surface: surfA, form: formA, venue: venueA, ranking: rankA, tiers: tierA },
-    playerB: { name: nameB, surface: surfB, form: formB, venue: venueB, ranking: rankB, tiers: tierB },
+    playerA: { name: nameA, surface: surfA, form: formA, venue: venueA, ranking: rankA, tiers: tierA, load: loadA },
+    playerB: { name: nameB, surface: surfB, form: formB, venue: venueB, ranking: rankB, tiers: tierB, load: loadB },
   };
 }
 
@@ -265,6 +325,25 @@ function renderFactorBrief(brief, { surface = null } = {}) {
       parts.push(`career ${s.career[0]}-${s.career[1]}, ${rel}`);
     }
     if (P.venue) parts.push(`at this event: ${P.venue.record} over ${P.venue.appearances} appearances, best ${P.venue.best}`);
+
+    /* MATCH LOAD. Stated as raw counts and minutes, never as
+     * "fresh" or "tired" — the analyst weighs it, and pre-judging it
+     * here would bury a decision inside the input.
+     *
+     * Days since the last match is included because it cuts both ways:
+     * one day is fatigue, but three weeks is rust, and only the analyst
+     * should decide which matters for this match-up. */
+    if (P.load && (P.load.matches7 || P.load.daysSinceLastMatch != null)) {
+      const l = P.load;
+      const bits = [];
+      if (l.matches7) {
+        bits.push(`${l.matches7} match${l.matches7 === 1 ? '' : 'es'} in 7 days` +
+          (l.minutes7 ? ` (${l.minutes7} min on court, longest ${l.longestMinutes7})` : ''));
+      }
+      if (l.matches14 && l.matches14 !== l.matches7) bits.push(`${l.matches14} in 14 days`);
+      if (l.daysSinceLastMatch != null) bits.push(`last played ${l.daysSinceLastMatch}d ago`);
+      if (bits.length) parts.push(`workload: ${bits.join(', ')}`);
+    }
     if (P.tiers) {
       const t = [];
       if (P.tiers.vsTop10) t.push(`top10 ${P.tiers.vsTop10}`);
