@@ -546,6 +546,24 @@ function renderFactorBrief(brief, { surface = null } = {}) {
     if (parts.length) L.push(`${P.name.toUpperCase()}: ${parts.join(' | ')}`);
   }
 
+  /* FLAG UNEVEN COVERAGE.
+   *
+   * At Challenger and ITF level one player is often well documented and
+   * the other barely at all. Rendered plainly, that reads as seven facts
+   * about A and one about B — and the natural inference is that B is
+   * unremarkable, when the truth is only that we know less about them.
+   *
+   * The prompt already says an absent line means unavailable, but a
+   * per-player imbalance is subtler than a missing line, so it is stated
+   * outright. Only when the gap is large enough to mislead. */
+  const detailCount = (P) => [P.ranking, P.form, P.surface, P.venue, P.tiers,
+    P.load, P.ctx, P.style].filter(Boolean).length;
+  const dA = detailCount(A), dB = detailCount(B);
+  if (L.length && Math.abs(dA - dB) >= 3) {
+    const thin = dA < dB ? A.name : B.name;
+    L.push(`NOTE: markedly less data available for ${thin}. Treat that as missing information, not as evidence against them.`);
+  }
+
   return L.length ? `\nVERIFIED DATA (from the tennis data provider, not search):\n${L.join('\n')}\n` : '';
 }
 
