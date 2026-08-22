@@ -98,7 +98,18 @@ async function fetchSurfaceRecord(tour, name) {
  * two upsets, and the scoreline alone can't tell them apart.
  */
 async function fetchRecentForm(tour, name, playerId) {
-  const b = await safe(() => apiGet(`h2h/recent/${tour}/${encodeURIComponent(name)}`));
+  /* Keyed on the player ID, not the name.
+   *
+   * This endpoint accepts either, but load and travel context request it
+   * by id — so calling it by name here missed the shared cache and fired
+   * a second identical request per player. The id is also the safer key:
+   * names differ in accents and word order between feeds, which is what
+   * broke matching elsewhere.
+   *
+   * Falls back to the name when no id is stored (older rows). */
+  const b = playerId
+    ? await fetchRecentCached(tour, playerId)
+    : await safe(() => apiGet(`h2h/recent/${tour}/${encodeURIComponent(name)}`));
   const games = Array.isArray(b?.games) ? b.games : null;
   if (!games || !games.length) return null;
 
@@ -226,14 +237,45 @@ function parseMatchMinutes(mt) {
   return (mins >= 20 && mins <= 360) ? mins : null;
 }
 
-async function fetchMatchLoad(tour, playerId) {
-  if (!playerId) return null;
-  let body;
+/* Short-lived cache for h2h/recent.
+ *
+ * Recent form, match load and travel context all read the SAME endpoint
+ * for the same player, so building one brief fired three identical
+ * requests per side — six wasted calls a match, and this pass runs every
+ * two minutes across the whole slate.
+ *
+ * 60 seconds is long enough to cover a single brief build (and the
+ * several matches a player may appear in during one cycle) while short
+ * enough that a result landing mid-cycle is picked up on the next pass.
+ */
+const recentCache = new Map();
+const RECENT_TTL_MS = 60 * 1000;
+
+async function fetchRecentCached(tour, playerId) {
+  const key = `${tour}|${playerId}`;
+  const hit = recentCache.get(key);
+  if (hit && Date.now() - hit.at < RECENT_TTL_MS) return hit.body;
+
+  let body = null;
   try {
     body = await apiGet(`h2h/recent/${tour}/${encodeURIComponent(playerId)}`);
   } catch {
-    return null;
+    body = null;
   }
+  recentCache.set(key, { body, at: Date.now() });
+
+  // Bound the map: a long-running process would otherwise accumulate an
+  // entry per player seen, forever.
+  if (recentCache.size > 400) {
+    const cutoff = Date.now() - RECENT_TTL_MS;
+    for (const [k, v] of recentCache) if (v.at < cutoff) recentCache.delete(k);
+  }
+  return body;
+}
+
+async function fetchMatchLoad(tour, playerId) {
+  if (!playerId) return null;
+  const body = await fetchRecentCached(tour, playerId);
   const games = Array.isArray(body?.games) ? body.games : [];
   if (!games.length) return null;
 
@@ -260,8 +302,125 @@ async function fetchMatchLoad(tour, playerId) {
   };
 }
 
+/* TRAVEL, CROWD, STYLE and PHYSICAL — the remaining derivable factors.
+ *
+ * None of these has a dedicated endpoint. All four come out of data we
+ * already fetch, which is why they are worth adding: no extra API cost.
+ *
+ * Court speed and motivation are deliberately NOT here. Neither exists
+ * in any payload, and inventing a proxy (aces-per-game as "speed",
+ * round number as "motivation") would put a fabricated number in front
+ * of the analyst wearing the same clothes as the measured ones.
+ */
+const EARTH_KM = 6371;
+
+function haversineKm(a, b) {
+  if (!a || !b || a.lat == null || b.lat == null) return null;
+  const toRad = (d) => (d * Math.PI) / 180;
+  const dLat = toRad(b.lat - a.lat), dLon = toRad(b.lon - a.lon);
+  const h = Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLon / 2) ** 2;
+  return Math.round(2 * EARTH_KM * Math.asin(Math.sqrt(h)));
+}
+
+/* Rough timezone shift from longitude — 15 degrees per hour.
+ * Not exact (timezones follow borders, not meridians) but the thing that
+ * matters for jet lag is the size of the east-west jump, and longitude
+ * captures that faithfully enough to be worth stating. */
+function tzShiftHours(a, b) {
+  if (!a || !b || a.lon == null || b.lon == null) return null;
+  let d = (b.lon - a.lon) / 15;
+  if (d > 12) d -= 24;
+  if (d < -12) d += 24;
+  return Math.round(d);
+}
+
+/* A retirement leaves an unfinished set in the score string: "6-4 2-5"
+ * rather than a completed "6-4 6-3". Two retirements in recent matches
+ * is a physical signal the price rarely reflects at lower tiers. */
+function looksRetired(score) {
+  if (!score) return false;
+  const sets = String(score).replace(/\([^)]*\)/g, '').trim().split(/[,\s]+/);
+  const last = sets[sets.length - 1];
+  if (!last) return false;
+  const [x, y] = last.split('-').map(Number);
+  if (isNaN(x) || isNaN(y)) return false;
+  const decided = (x >= 6 || y >= 6) && (Math.abs(x - y) >= 2 || x === 7 || y === 7);
+  return !decided;
+}
+
+/**
+ * Context derived from a player's recent matches: where they last played,
+ * how far that is from here, and whether they have retired lately.
+ */
+async function fetchContext(tour, playerId, currentTournamentId) {
+  if (!playerId) return null;
+  const body = await fetchRecentCached(tour, playerId);
+  const games = Array.isArray(body?.games) ? body.games : [];
+  if (!games.length) return null;
+
+  const coordOf = (g) => {
+    const t = g.tournament || {};
+    return (t.latitude == null || t.longitude == null)
+      ? null : { lat: Number(t.latitude), lon: Number(t.longitude), country: t.countryAcr || null };
+  };
+
+  // Where this event is: taken from a previous round at the SAME
+  // tournament when there is one. On a first-round match there is no
+  // earlier round to read, and the factor is simply omitted.
+  let here = null;
+  for (const g of games) {
+    if (currentTournamentId && String(g.tournamentId) === String(currentTournamentId)) {
+      here = coordOf(g); if (here) break;
+    }
+  }
+
+  // The last event they played somewhere ELSE.
+  let previous = null;
+  for (const g of games) {
+    if (currentTournamentId && String(g.tournamentId) === String(currentTournamentId)) continue;
+    previous = coordOf(g); if (previous) break;
+  }
+
+  const retirements = games.slice(0, 5).filter((g) => looksRetired(g.result)).length;
+
+  return {
+    hereCountry: here ? here.country : null,
+    travelKm: haversineKm(previous, here),
+    tzShift: tzShiftHours(previous, here),
+    recentRetirements: retirements,
+  };
+}
+
+/* Handedness, backhand and nationality, from the name-keyed profile.
+ * Cheap and static — cached for the process lifetime since a player's
+ * playing hand does not change between matches. */
+const styleCache = new Map();
+
+async function fetchStyle(tour, name) {
+  if (!name) return null;
+  const key = `${tour}|${name}`;
+  if (styleCache.has(key)) return styleCache.get(key);
+
+  let body;
+  try {
+    body = await apiGet(`profile/${encodeURIComponent(name)}`);
+  } catch {
+    styleCache.set(key, null);
+    return null;
+  }
+  const info = body?.information || {};
+  const out = {
+    plays: info.plays || null,
+    backhand: info.backhand || null,
+    country: body?.country?.acronym || null,
+  };
+  styleCache.set(key, out);
+  return out;
+}
+
 async function buildFactorBrief({ tour = 'atp', nameA, nameB, playerAId, playerBId, tournamentId }) {
-  const [h2h, surfA, surfB, formA, formB, venueA, venueB, rankA, rankB, tierA, tierB, loadA, loadB] = await Promise.all([
+  const [h2h, surfA, surfB, formA, formB, venueA, venueB, rankA, rankB, tierA, tierB, loadA, loadB, ctxA, ctxB, styleA, styleB] = await Promise.all([
     fetchH2H(tour, nameA, nameB),
     fetchSurfaceRecord(tour, nameA),
     fetchSurfaceRecord(tour, nameB),
@@ -275,12 +434,16 @@ async function buildFactorBrief({ tour = 'atp', nameA, nameB, playerAId, playerB
     fetchTierRecord(tour, playerBId),
     fetchMatchLoad(tour, playerAId),
     fetchMatchLoad(tour, playerBId),
+    fetchContext(tour, playerAId, tournamentId),
+    fetchContext(tour, playerBId, tournamentId),
+    fetchStyle(tour, nameA),
+    fetchStyle(tour, nameB),
   ]);
 
   return {
     h2h,
-    playerA: { name: nameA, surface: surfA, form: formA, venue: venueA, ranking: rankA, tiers: tierA, load: loadA },
-    playerB: { name: nameB, surface: surfB, form: formB, venue: venueB, ranking: rankB, tiers: tierB, load: loadB },
+    playerA: { name: nameA, surface: surfA, form: formA, venue: venueA, ranking: rankA, tiers: tierA, load: loadA, ctx: ctxA, style: styleA, country: styleA ? styleA.country : null },
+    playerB: { name: nameB, surface: surfB, form: formB, venue: venueB, ranking: rankB, tiers: tierB, load: loadB, ctx: ctxB, style: styleB, country: styleB ? styleB.country : null },
   };
 }
 
@@ -343,6 +506,36 @@ function renderFactorBrief(brief, { surface = null } = {}) {
       if (l.matches14 && l.matches14 !== l.matches7) bits.push(`${l.matches14} in 14 days`);
       if (l.daysSinceLastMatch != null) bits.push(`last played ${l.daysSinceLastMatch}d ago`);
       if (bits.length) parts.push(`workload: ${bits.join(', ')}`);
+    }
+
+    /* TRAVEL, CROWD, PHYSICAL — only stated when actually known.
+     *
+     * Travel needs a previous event AND this one's coordinates, which
+     * means a first-round match has no travel line at all. Omitting it
+     * is correct: a silent gap is honest, whereas "travel: unknown"
+     * invites the analyst to reason about a number that does not exist.
+     *
+     * Home country is the crowd proxy — thin, but real and free. */
+    if (P.ctx) {
+      const c = P.ctx;
+      if (c.travelKm != null && c.travelKm > 500) {
+        parts.push(`travel: ${c.travelKm}km since last event` +
+          (c.tzShift ? `, ${Math.abs(c.tzShift)}h timezone shift` : ''));
+      }
+      if (c.hereCountry && P.country && c.hereCountry === P.country) {
+        parts.push('playing at home');
+      }
+      if (c.recentRetirements) {
+        parts.push(`${c.recentRetirements} retirement${c.recentRetirements === 1 ? '' : 's'} in last 5`);
+      }
+    }
+
+    /* STYLE. Handedness matters most as a mismatch — a leftie against a
+     * righty who rarely faces one is a genuine edge, and the analyst can
+     * only see that if both are stated. */
+    if (P.style && (P.style.plays || P.style.backhand)) {
+      parts.push(`style: ${[P.style.plays, P.style.backhand ? P.style.backhand + ' backhand' : null]
+        .filter(Boolean).join(', ')}`);
     }
     if (P.tiers) {
       const t = [];
