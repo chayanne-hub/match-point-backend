@@ -13,6 +13,7 @@ const { isAdminEmail } = require('./auth');
 const { fetchBasketballPlayerProps } = require('../pipeline/fetchPlayerProps');
 const { analyzePlayerProps } = require('../pipeline/propsAnalyst');
 const { fetchEspnLiveScores, matchEspnEvent } = require('../pipeline/fetchEspn');
+const { fetchLatestRankings } = require('../pipeline/fetchTennisApi');
 const { analyzeStartSit } = require('../pipeline/fantasyAnalyst');
 const { triggerManualRun, triggerManualRunTomorrow } = require('../pipeline/cron');
 
@@ -1105,80 +1106,47 @@ router.get('/insiders', async (req, res) => {
 // IMPORTANT: registered before GET /:id — same Express route-ordering
 // rule as /news and /insiders above, or "rankings" gets swallowed as a
 // pick id.
+/* TOUR RANKINGS — ATP and WTA, straight from the provider.
+ *
+ * This route used to rank OUR OWN PICKS by how often each player won,
+ * which is a different thing wearing the same name: a member opening a
+ * "Rankings" page expects the tour ranking, not our hit rate per player.
+ * Replaced outright rather than kept alongside, since two tables both
+ * called rankings on one page is worse than either alone.
+ *
+ * ?tour=atp|wta (default atp). Serves the most recent published week —
+ * see fetchLatestRankings for why that is not simply "this Monday".
+ */
 router.get('/rankings', async (req, res) => {
   try {
-    const { sport } = req.query;
+    const tour = String(req.query.tour || 'atp').toLowerCase();
+    if (tour !== 'atp' && tour !== 'wta') {
+      return res.status(400).json({ error: 'tour must be atp or wta' });
+    }
 
-    const picks = await db.pick.findMany({
-      where: {
-        pickType: { in: ['model', 'winner'] },
-        market: 'moneyline',
-        ...(sport ? { match: { sport: { slug: sport } } } : {}),
-      },
-      include: {
-        result: true,
-        match: { include: { sport: true } },
-      },
+    const { date, rows } = await fetchLatestRankings(tour);
+
+    res.json({
+      tour,
+      // The week these rankings were published, so the page can say so
+      // rather than implying they are live.
+      publishedAt: date,
+      players: rows.map((r) => ({
+        position: r.position,
+        name: r.player?.name || null,
+        playerId: r.player?.id ?? null,
+        country: r.player?.countryAcr || null,
+        points: r.pts ?? null,
+        // `wk` is places moved since last week: positive is UP the table
+        // (Shelton went 10 -> 6 and reads wk: 4).
+        weekMove: typeof r.wk === 'number' ? r.wk : 0,
+        yearMove: typeof r.yr === 'number' ? r.yr : 0,
+        pointsMove: typeof r.wkPts === 'number' ? r.wkPts : 0,
+      })),
     });
-
-    const byName = {};
-    for (const p of picks) {
-      const name = p.selection.replace(/\s*ML$/, '').trim();
-      if (!name) continue;
-      const key = `${p.match.sport.slug}|${name}`;
-      if (!byName[key]) {
-        byName[key] = { name, sport: p.match.sport.slug, timesPicked: 0, confidenceSum: 0, wins: 0, losses: 0, pushes: 0 };
-      }
-      const row = byName[key];
-      row.timesPicked++;
-      row.confidenceSum += p.confidence;
-      if (p.result) {
-        if (p.result.outcome === 'win') row.wins++;
-        else if (p.result.outcome === 'loss') row.losses++;
-        else if (p.result.outcome === 'push') row.pushes++;
-      }
-    }
-
-    const rankings = Object.values(byName)
-      .map((r) => {
-        const decided = r.wins + r.losses;
-        return {
-          name: r.name,
-          sport: r.sport,
-          timesPicked: r.timesPicked,
-          avgConfidence: Math.round(r.confidenceSum / r.timesPicked),
-          wins: r.wins,
-          losses: r.losses,
-          pushes: r.pushes,
-          winRate: decided > 0 ? Math.round((r.wins / decided) * 100) : null,
-        };
-      })
-      // avg confidence is the ranking key — it's literally "how the
-      // model rates them"; record/win rate are shown alongside as the
-      // evidence. Ties break toward the larger sample.
-      .sort((a, b) => b.avgConfidence - a.avgConfidence || b.timesPicked - a.timesPicked);
-
-    // Join each team's REAL season record (ESPN standings) onto the
-    // model's view of them. Best-effort: tennis has no standings, and a
-    // name that doesn't match an ESPN displayName just gets null — the
-    // model rankings still render fully without it.
-    if (sport && sport !== 'tennis') {
-      try {
-        const recordMap = await getRecordMap(sport);
-        rankings.forEach((r) => {
-          const rec = recordMap[r.name];
-          r.seasonRecord = rec ? rec.record : null;
-          r.seasonLeague = rec ? rec.league : null;
-        });
-      } catch (err) {
-        console.error('[rankings] season record join failed:', err.message);
-      }
-    }
-
-    res.json({ rankings });
   } catch (err) {
-    console.error('[rankings] GET /rankings failed:', err.message);
-    res.status(500).json({ error: err.message });
+    console.error('[rankings] failed:', err.message);
+    res.status(500).json({ error: 'rankings unavailable' });
   }
 });
 

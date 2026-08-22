@@ -404,6 +404,70 @@ async function resolveExtendId(competitorA, competitorB, startTime) {
  *
  * Returns { score, queriedPlayerWon, date } or null.
  */
+/**
+ * ATP/WTA rankings for one publication date.
+ *
+ * Quirks confirmed against the live API, all of which differ from every
+ * other endpoint here:
+ *   - date format is DD.MM.YYYY, not the ISO YYYY-MM-DD used elsewhere
+ *   - `group` is required and must be the string "singles"
+ *   - an unpublished date returns [] rather than an error, so an empty
+ *     result is "no ranking that week", not a failure
+ *
+ * Returns the raw array, newest position first.
+ */
+async function fetchRankingsForDate(tour, date) {
+  const d = new Date(date);
+  const dd = String(d.getUTCDate()).padStart(2, '0');
+  const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const yyyy = d.getUTCFullYear();
+
+  let body;
+  try {
+    body = await apiGet(`ranking/${tour}?date=${dd}.${mm}.${yyyy}&group=singles`);
+  } catch {
+    return [];
+  }
+  return Array.isArray(body) ? body : [];
+}
+
+/**
+ * The most recent PUBLISHED rankings.
+ *
+ * Rankings land on Mondays, but not every Monday has one — 17.08.2026
+ * came back empty while 10.08.2026 was full. Asking for "this Monday"
+ * would therefore show an empty table for part of each week, so we walk
+ * back until we find a week that exists.
+ *
+ * Cached in memory: this changes once a week at most, and the page would
+ * otherwise re-request 100 rows on every visit.
+ */
+const rankingCache = new Map();   // tour -> { at, date, rows }
+const RANKING_TTL_MS = 6 * 60 * 60 * 1000;
+
+async function fetchLatestRankings(tour, { maxWeeksBack = 6 } = {}) {
+  const cached = rankingCache.get(tour);
+  if (cached && Date.now() - cached.at < RANKING_TTL_MS) return cached;
+
+  // Start from the most recent Monday, inclusive of today if it is one.
+  const now = new Date();
+  const day = now.getUTCDay();                 // 0 Sun .. 6 Sat
+  const back = day === 0 ? 6 : day - 1;        // days since Monday
+  const monday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - back));
+
+  for (let i = 0; i < maxWeeksBack; i++) {
+    const probe = new Date(monday.getTime() - i * 7 * 24 * 60 * 60 * 1000);
+    const rows = await fetchRankingsForDate(tour, probe);
+    if (rows.length) {
+      const out = { at: Date.now(), date: probe.toISOString().slice(0, 10), rows };
+      rankingCache.set(tour, out);
+      return out;
+    }
+  }
+
+  return { at: Date.now(), date: null, rows: [] };
+}
+
 async function fetchPlayerRecentResult(tour, playerId, opponentId, startTime) {
   if (!playerId || !opponentId) return null;
 
@@ -600,6 +664,8 @@ async function discoverOddsPath(sampleEventId) {
 }
 
 module.exports = {
+  fetchLatestRankings,
+  fetchRankingsForDate,
   fetchPlayerRecentResult,
   tierFromName,
   resolveExtendId,
