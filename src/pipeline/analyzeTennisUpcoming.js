@@ -190,7 +190,44 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
      * odds, and inflated "not yet priced" — while staying `scheduled` on
      * the board. This is also the close-out path lower tiers never had:
      * ESPN doesn't carry Challengers, so nothing else can finalise them. */
-    if (resolved && resolved.status && /ended|finished|retired|walkover/i.test(resolved.status)) {
+    /* ALREADY ON COURT? THEN IT IS NOT A PRE-MATCH BET.
+     *
+     * startTime is an ESTIMATE in tennis — a match starts when the
+     * previous one on that court ends, so the scheduled time drifts by
+     * hours. A Cincinnati semi-final was in its SECOND SET while the row
+     * still read `scheduled`, "starts in 1h32m". It was duly analysed as
+     * a pre-match bet and published at +105: a price that no longer
+     * existed, on a match already half-decided. Unbettable, and still
+     * counted in the record.
+     *
+     * The provider knows. resolveExtendId returns the real status, and
+     * this check already used it for finished matches — it simply never
+     * asked about in-play ones. A match on court is promoted to live so
+     * the live path (which reprices from live odds and the score) picks
+     * it up on the next cycle instead. */
+    /* "NotStarted" contains "started" — a substring test promoted
+     * matches that had not begun. Not-started is therefore excluded
+     * explicitly before the in-play test, rather than relying on the
+     * in-play patterns to be mutually exclusive. */
+    const rStatus = String(resolved?.status || '');
+    const notStarted = /not.?started|scheduled|upcoming|postponed|cancell?ed/i.test(rStatus);
+    const isDone = /ended|finished|retired|walkover/i.test(rStatus);
+    const isInPlay = !notStarted && !isDone
+      && /inprogress|in.?play|\blive\b|started|set\s*\d/i.test(rStatus);
+
+    if (isInPlay) {
+      if (match.status !== 'live') {
+        await db.match.update({
+          where: { id: match.id },
+          data: { status: 'live', ...(resolved.score ? { liveScore: resolved.score } : {}) },
+        }).catch(() => {});
+        console.log(`[tennisUpcoming] ${match.competitorA} vs ${match.competitorB}: already in play (${resolved.status}) — promoted to live, no pre-match pick.`);
+      }
+      skipped++;
+      continue;
+    }
+
+    if (isDone) {
       /* Record the SETS WON as home/away score, not just the string.
        *
        * gradePick() returns null unless homeScore and awayScore are set.
