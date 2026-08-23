@@ -46,10 +46,23 @@ const ENABLED = process.env.TENNIS_UPCOMING_ANALYSIS !== 'false';
  * are the behaviour under test.
  */
 async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit = 15, onlyMatchId = null } = {}) {
-  if (!ENABLED || typeof analyze !== 'function') return { analysed: 0, skipped: 0 };
+  /* WHY a single match was skipped. Declared FIRST, above every early
+   * return that reports it — three of those sit near the top of this
+   * function, and declaring this beside the other counters put it in a
+   * temporal dead zone. (Fifth instance of that pattern today; caught
+   * before shipping this time.)
+   *
+   * Aggregate counters answer "how many" for a scheduled cycle, but a
+   * debug re-run needs "why this one" — "skipped: 1" is as
+   * uninformative as no answer. Recorded only for a single-match run,
+   * so a full cycle keeps its cheap counters. */
+  const reasons = [];
+  const note = (why) => { if (onlyMatchId) reasons.push(why); };
+
+  if (!ENABLED || typeof analyze !== 'function') return { analysed: 0, skipped: 0 , reasons };
 
   const sport = await db.sport.findFirst({ where: { slug: 'tennis' } });
-  if (!sport) return { analysed: 0, skipped: 0 };
+  if (!sport) return { analysed: 0, skipped: 0 , reasons };
 
   /* DRIVEN BY OUR ROWS, NOT BY THE FEED.
    *
@@ -80,10 +93,12 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
           picks: { none: { pickType: 'model', market: 'moneyline' } },
         },
       });
-  if (!candidates.length) return { analysed: 0, skipped: 0 };
+  if (!candidates.length) return { analysed: 0, skipped: 0 , reasons };
 
   let failed = 0;
   let noEvidence = 0;
+
+
   let analysed = 0, skipped = 0, unpriced = 0, finished = 0;
 
   // Nearest first: a match starting soon is the one worth a price now.
@@ -154,8 +169,8 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
      * happens to carry a speculative number. */
     const hasStoredPrice = match.bestOddsA !== null && match.bestOddsB !== null;
     if (!onlyMatchId) {
-      if (!hasStoredPrice && untilStart > WINDOW_MS) { tooEarly++; continue; }
-      if (untilStart > OUTER_BOUND_MS) { tooEarly++; continue; }
+      if (!hasStoredPrice && untilStart > WINDOW_MS) { tooEarly++; note('starts beyond the analysis window and has no stored price'); continue; }
+      if (untilStart > OUTER_BOUND_MS) { tooEarly++; note('starts beyond the 72h outer bound'); continue; }
     }
 
     /* A match already in play cannot be priced from this path.
@@ -252,7 +267,7 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
       .catch(() => null);
 
     // Only give up when BOTH paths are dry.
-    if (!resolved && !coreOdds) { unpriced++; continue; }
+    if (!resolved && !coreOdds) { unpriced++; note('provider returned neither a resolved event nor core odds'); continue; }
 
     /* Close finished matches instead of retrying them forever.
      *
@@ -295,6 +310,7 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
         console.log(`[tennisUpcoming] ${match.competitorA} vs ${match.competitorB}: already in play (${resolved.status}) — promoted to live, no pre-match pick.`);
       }
       skipped++;
+      note(`already in play (${rStatus}) — promoted to live, pre-match pick withheld`);
       continue;
     }
 
@@ -444,7 +460,7 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
      * (its oddsContext branches on it), and the resulting pick is marked
      * so it is never mistaken for a priced one. */
     if (oddsA === null || oddsB === null) {
-      if (!isLive || typeof reassessLiveMatch !== 'function') { unpriced++; continue; }
+      if (!isLive || typeof reassessLiveMatch !== 'function') { unpriced++; note('no price available and the match is not live'); continue; }
 
       /* SCORE-ONLY NEEDS AN ACTUAL SCORE.
        *
@@ -460,7 +476,7 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
        * instead: the next cycle is two minutes away. */
       const sc = String(match.liveScore || match.setScore || '').replace(/[^0-9]/g, '');
       const hasProgress = sc && /[1-9]/.test(sc);
-      if (!hasProgress) { unpriced++; continue; }
+      if (!hasProgress) { unpriced++; note('live but no score yet — nothing to analyse from'); continue; }
 
       priceSource = 'none';
     }
@@ -542,6 +558,7 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
 
     if (requireEvidence && !hasEvidence) {
       noEvidence++;
+      note('no verified data could be built for either player');
       console.log(`[tennisUpcoming] ${match.competitorA} vs ${match.competitorB}: no verified data available — not publishing a pick.`);
       continue;
     }
@@ -575,7 +592,7 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
           verifiedData,
         }, label);
 
-    if (!analysis) { skipped++; continue; }
+    if (!analysis) { skipped++; note('the analyst returned nothing (API error, or it declined to pick)'); continue; }
 
     // Same blend the main pipeline applies, so a Challenger pick's
     // confidence means exactly what a main-tour pick's does.
@@ -611,6 +628,7 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
 
     if (pickOdds === null) {
       unpriced++;
+      note('analysed, but no price to record the pick at');
       console.warn(`[tennisUpcoming] ${match.competitorA} vs ${match.competitorB}: analysed but no price available — not recording a pick.`);
       continue;
     }
@@ -649,7 +667,7 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
   console.log(`[tennisUpcoming] ${analysed} analysed, ${unpriced} not yet priced, ${skipped} skipped, ${finished} closed as finished, ${tooEarly} too early to price`
     + (noEvidence ? `, ${noEvidence} no data` : '')
     + (failed ? `, ${failed} FAILED` : ''));
-  return { analysed, unpriced, skipped, finished, tooEarly };
+  return { analysed, unpriced, skipped, finished, tooEarly , reasons };
 }
 
 module.exports = { analyzeTennisUpcoming };

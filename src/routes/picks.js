@@ -1662,8 +1662,13 @@ router.post('/admin/rerun/:pickId', requireAuth, async (req, res) => {
       return res.json({
         ok: false,
         matchup: `${pick.match.competitorA} vs ${pick.match.competitorB}`,
-        reason: 'No pick produced — see counters.',
-        counters: out,
+        // The analyser records WHY for a single-match run; the counters
+        // alone only said "skipped: 1", which answers nothing.
+        reason: (out.reasons && out.reasons.length)
+          ? out.reasons.join('; ')
+          : 'No pick produced and no reason recorded.',
+        counters: { analysed: out.analysed, unpriced: out.unpriced, skipped: out.skipped,
+                    finished: out.finished, tooEarly: out.tooEarly },
         before,
       });
     }
