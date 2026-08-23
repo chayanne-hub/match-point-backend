@@ -201,8 +201,12 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
      *
      * Only matches we actually hold a live price for: without one there
      * is nothing to analyse against, and that is a genuine miss. */
-    const isLive = match.status === 'live' || untilStart < 0;
-    const hasLiveOdds = isLive
+    /* `let`, not `const`: a forced re-run can discover mid-loop that the
+     * match is actually in play and promote it, and both of these are
+     * read further down (the live/pre-match branch at the analysis call).
+     * Computed once here, reassigned only by that promotion. */
+    let isLive = match.status === 'live' || untilStart < 0;
+    let hasLiveOdds = isLive
       && typeof match.liveOddsA === 'number' && typeof match.liveOddsB === 'number';
 
     /* A live match without a socket price is NOT a lost cause.
@@ -309,9 +313,33 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
         }).catch(() => {});
         console.log(`[tennisUpcoming] ${match.competitorA} vs ${match.competitorB}: already in play (${resolved.status}) — promoted to live, no pre-match pick.`);
       }
-      skipped++;
-      note(`already in play (${rStatus}) — promoted to live, pre-match pick withheld`);
-      continue;
+      /* A FORCED RE-RUN CONTINUES; the scheduled pass stops here.
+       *
+       * Skipping is right for the scheduled cycle: publishing a
+       * pre-match pick on a match already on court means quoting a price
+       * that no longer exists, which is what happened with Tiafoe.
+       *
+       * But a debug re-run is asking "what does the model make of this
+       * match", and refusing to answer because it has started is
+       * useless. So a forced run falls through instead — and because the
+       * row has just been promoted to live, it lands on the LIVE path
+       * below, which reprices from live odds and the current score
+       * rather than a dead pre-match number.
+       *
+       * The in-memory status is updated too: `isLive` was computed from
+       * it further up, so without this the forced run would take the
+       * pre-match branch anyway. */
+      if (!onlyMatchId) {
+        skipped++;
+        note(`already in play (${rStatus}) — promoted to live, pre-match pick withheld`);
+        continue;
+      }
+
+      match.status = 'live';
+      if (resolved.score) match.liveScore = resolved.score;
+      isLive = true;
+      hasLiveOdds = typeof match.liveOddsA === 'number' && typeof match.liveOddsB === 'number';
+      note(`in play (${rStatus}) — re-running through the live path`);
     }
 
     if (isDone) {
