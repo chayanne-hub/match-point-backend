@@ -116,15 +116,40 @@ async function fetchRecentForm(tour, name, playerId) {
   let wins = 0, losses = 0, asDogWins = 0;
   const recent = games.slice(0, 10).map((g) => {
     const isP1 = String(g.player1Id) === String(playerId);
-    // "6-4 6-3" is always written from player1's perspective; the first
-    // set count decides who took the match in this feed's format.
-    const sets = String(g.result || '').trim().split(/\s+/);
-    let setsP1 = 0, setsP2 = 0;
-    for (const s of sets) {
-      const [a, b2] = s.split('-').map((n) => parseInt(n, 10));
-      if (Number.isFinite(a) && Number.isFinite(b2)) { if (a > b2) setsP1++; else setsP2++; }
+
+    /* USE `isWin`, THE FIELD THE API PROVIDES.
+     *
+     * This re-derived the result by counting sets and orienting on
+     * `player1Id === playerId`. When that id comparison failed — a null
+     * id, a string/number mismatch — every match was read from the wrong
+     * side, and the player came back 0-10. Both sides of a match showing
+     * 0-10 is what the analyst spotted and correctly called placeholder
+     * data, then discounted our brief in favour of web search.
+     *
+     * `isWin` is supplied relative to the QUERIED player and needs no
+     * orientation at all. It was verified directly against a known
+     * result (Hurkacz beat Safiullin 6-4 6-3; the feed returns
+     * isWin:false on Safiullin's own list).
+     *
+     * Set counting stays only as a fallback for entries lacking the
+     * field, and is skipped entirely when we have no id to orient with —
+     * guessing an orientation is what produced the fake 0-10. */
+    let won;
+    if (typeof g.isWin === 'boolean') {
+      won = g.isWin;
+    } else if (playerId && (String(g.player1Id) === String(playerId) || String(g.player2Id) === String(playerId))) {
+      const sets = String(g.result || '').replace(/\([^)]*\)/g, '').trim().split(/[,\s]+/);
+      let setsP1 = 0, setsP2 = 0;
+      for (const sc of sets) {
+        const [a, b2] = sc.split('-').map((n) => parseInt(n, 10));
+        if (Number.isFinite(a) && Number.isFinite(b2)) { if (a > b2) setsP1++; else setsP2++; }
+      }
+      won = isP1 ? setsP1 > setsP2 : setsP2 > setsP1;
+    } else {
+      // Cannot tell which side we are. Skip rather than invent a loss.
+      return null;
     }
-    const won = isP1 ? setsP1 > setsP2 : setsP2 > setsP1;
+
     won ? wins++ : losses++;
 
     const ourPrice = isP1 ? Number(g.odd1) : Number(g.odd2);
@@ -134,7 +159,14 @@ async function fetchRecentForm(tour, name, playerId) {
     return { date: g.date, result: g.result, won, price: Number.isFinite(ourPrice) ? ourPrice : null };
   });
 
-  return { last10: `${wins}-${losses}`, upsetWins: asDogWins, matches: recent, careerMatches: b.count ?? null };
+  /* Drop unorientable entries — the map returns null for a match whose
+   * side we could not determine, and those must not reach the brief as
+   * blank rows. If nothing survived, report no form at all rather than
+   * an empty 0-0, which reads as a real record. */
+  const usable = recent.filter(Boolean);
+  if (!wins && !losses) return null;
+
+  return { last10: `${wins}-${losses}`, upsetWins: asDogWins, matches: usable, careerMatches: b.count ?? null };
 }
 
 /**
