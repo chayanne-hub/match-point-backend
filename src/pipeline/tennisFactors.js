@@ -487,6 +487,100 @@ async function fetchStyle(tour, name) {
   return out;
 }
 
+/* STYLE MATCHUP — the interaction, not two lists of attributes.
+ *
+ * "Styles make matches" is real in tennis for specific, mechanical
+ * reasons, and the brief already carried the ingredients (handedness,
+ * backhand, serve and return numbers) without ever computing how they
+ * meet. Stating both players' attributes and leaving the analyst to
+ * notice is why the Style card so often read "Neutral".
+ *
+ * Two interactions are computable from data already fetched:
+ *
+ * 1. HANDEDNESS EXPOSURE. A left-hander's patterns — slice serve wide on
+ *    the ad court, forehand into a right-hander's backhand — are worth
+ *    more against someone who has not faced one recently. At Challenger
+ *    and ITF level a player can go months without meeting a leftie.
+ *    Only computed when the match IS lefty/righty; a righty-righty match
+ *    costs no extra calls at all.
+ *
+ * 2. SERVE vs RETURN. A big server against a weak returner produces
+ *    matches decided almost entirely in tiebreaks. Both sides are
+ *    aggregated from the per-match stat rows already present in
+ *    h2h/recent — no additional requests.
+ *
+ * Numbers are stated, never interpreted: the brief says one player wins
+ * 74% behind the first serve while the other returns at 31%, and the
+ * analyst decides what that is worth.
+ */
+function serveReturnProfile(games, playerId) {
+  let fs = 0, fsOf = 0, w1 = 0, w1Of = 0, w2 = 0, w2Of = 0, rpw = 0, rpwOf = 0, aces = 0, dfs = 0, n = 0;
+
+  for (const g of games) {
+    const st = g.stat;
+    if (!st) continue;
+    // The suffix follows player1Id / player2Id, so orientation is known
+    // rather than guessed — the mistake that produced the fake 0-10.
+    const sfx = String(st.player1Id) === String(playerId) ? '1'
+              : String(st.player2Id) === String(playerId) ? '2' : null;
+    if (!sfx) continue;
+
+    const num = (k) => { const v = Number(st[`${k}${sfx}`]); return Number.isFinite(v) ? v : 0; };
+    fs += num('firstServe');       fsOf += num('firstServeOf');
+    w1 += num('winningOnFirstServe');  w1Of += num('winningOnFirstServeOf');
+    w2 += num('winningOnSecondServe'); w2Of += num('winningOnSecondServeOf');
+    rpw += num('rpw');             rpwOf += num('rpwOf');
+    aces += num('aces');           dfs += num('doubleFaults');
+    n++;
+  }
+
+  if (!n || !fsOf || !rpwOf) return null;
+  const pct = (a, b) => (b ? Math.round((a / b) * 100) : null);
+
+  return {
+    matches: n,
+    firstServeIn: pct(fs, fsOf),
+    wonOnFirst: pct(w1, w1Of),
+    wonOnSecond: pct(w2, w2Of),
+    returnPtsWon: pct(rpw, rpwOf),
+    acesPerMatch: Math.round((aces / n) * 10) / 10,
+    dfPerMatch: Math.round((dfs / n) * 10) / 10,
+  };
+}
+
+/* Is this player left-handed? `plays` reads like "Left-Handed" or
+ * "Right-Handed, Two-Handed Backhand" depending on the endpoint. */
+function isLefty(style) {
+  return /left/i.test(String(style?.plays || ''));
+}
+
+/**
+ * How many of a player's recent opponents were left-handed.
+ *
+ * Only called when the opponent in THIS match is a leftie, so the cost
+ * is paid on the small fraction of matches where the answer matters.
+ * Bounded to the last 8 opponents and served from the style cache, so
+ * repeat opponents (common at ITF level) cost nothing.
+ */
+async function leftyExposure(tour, games, playerId, limit = 8) {
+  const opponents = [];
+  for (const g of games.slice(0, limit)) {
+    const oppName = String(g.player1Id) === String(playerId) ? g.player2?.name : g.player1?.name;
+    if (oppName) opponents.push(oppName);
+  }
+  if (!opponents.length) return null;
+
+  let lefties = 0, known = 0;
+  for (const name of opponents) {
+    const st = await fetchStyle(tour, name);
+    if (!st || !st.plays) continue;
+    known++;
+    if (isLefty(st)) lefties++;
+  }
+  if (!known) return null;
+  return { lefties, of: known };
+}
+
 async function buildFactorBrief({ tour = 'atp', nameA, nameB, playerAId, playerBId, tournamentId }) {
   const [h2h, surfA, surfB, formA, formB, venueA, venueB, rankA, rankB, tierA, tierB, loadA, loadB, ctxA, ctxB, styleA, styleB] = await Promise.all([
     fetchH2H(tour, nameA, nameB),
@@ -508,10 +602,33 @@ async function buildFactorBrief({ tour = 'atp', nameA, nameB, playerAId, playerB
     fetchStyle(tour, nameB),
   ]);
 
+  /* Serve/return profiles reuse the CACHED recent-match payload — the
+   * stat rows are already in it, so this costs no additional requests. */
+  const [recentA, recentB] = await Promise.all([
+    playerAId ? fetchRecentCached(tour, playerAId) : null,
+    playerBId ? fetchRecentCached(tour, playerBId) : null,
+  ]);
+  const gamesA = Array.isArray(recentA?.games) ? recentA.games : [];
+  const gamesB = Array.isArray(recentB?.games) ? recentB.games : [];
+
+  const srA = playerAId ? serveReturnProfile(gamesA, playerAId) : null;
+  const srB = playerBId ? serveReturnProfile(gamesB, playerBId) : null;
+
+  /* Handedness exposure, only where there is an asymmetry to measure.
+   * A righty-righty match — the large majority — skips this entirely and
+   * pays nothing. */
+  const aLefty = isLefty(styleA), bLefty = isLefty(styleB);
+  const [expA, expB] = await Promise.all([
+    (bLefty && !aLefty && playerAId) ? leftyExposure(tour, gamesA, playerAId) : null,
+    (aLefty && !bLefty && playerBId) ? leftyExposure(tour, gamesB, playerBId) : null,
+  ]);
+
   return {
     h2h,
-    playerA: { name: nameA, surface: surfA, form: formA, venue: venueA, ranking: rankA, tiers: tierA, load: loadA, ctx: ctxA, style: styleA, country: styleA ? styleA.country : null },
-    playerB: { name: nameB, surface: surfB, form: formB, venue: venueB, ranking: rankB, tiers: tierB, load: loadB, ctx: ctxB, style: styleB, country: styleB ? styleB.country : null },
+    playerA: { name: nameA, surface: surfA, form: formA, venue: venueA, ranking: rankA, tiers: tierA, load: loadA, ctx: ctxA, style: styleA, country: styleA ? styleA.country : null,
+      serveReturn: srA, lefty: aLefty, leftyExposure: expA },
+    playerB: { name: nameB, surface: surfB, form: formB, venue: venueB, ranking: rankB, tiers: tierB, load: loadB, ctx: ctxB, style: styleB, country: styleB ? styleB.country : null,
+      serveReturn: srB, lefty: bLefty, leftyExposure: expB },
   };
 }
 
@@ -609,6 +726,17 @@ function renderFactorBrief(brief, { surface = null } = {}) {
       parts.push(`style: ${[P.style.plays, P.style.backhand ? P.style.backhand + ' backhand' : null]
         .filter(Boolean).join(', ')}`);
     }
+
+    /* Serve and return profile, aggregated from this player's recent
+     * matches. Stated as plain rates so the analyst can compare one
+     * player's serve against the OTHER's return — the comparison that
+     * makes "styles make matches" concrete rather than a slogan. */
+    if (P.serveReturn) {
+      const sr = P.serveReturn;
+      parts.push(`serve/return over ${sr.matches} matches: ${sr.firstServeIn}% first in, ` +
+        `${sr.wonOnFirst}% won behind first, ${sr.wonOnSecond}% behind second, ` +
+        `returns ${sr.returnPtsWon}% of points, ${sr.acesPerMatch} aces and ${sr.dfPerMatch} double faults per match`);
+    }
     if (P.tiers) {
       const t = [];
       if (P.tiers.vsTop10) t.push(`top10 ${P.tiers.vsTop10}`);
@@ -616,6 +744,46 @@ function renderFactorBrief(brief, { surface = null } = {}) {
       if (t.length) parts.push(`${P.tiers.year} vs ranked opposition: ${t.join(', ')}`);
     }
     if (parts.length) L.push(`${P.name.toUpperCase()}: ${parts.join(' | ')}`);
+  }
+
+  /* STYLE INTERACTION — stated once, about the pairing.
+   *
+   * Everything above describes players separately. This is the only line
+   * that describes how they MEET, which is the whole point of the
+   * factor. Written only when there is a real asymmetry: a handedness
+   * mismatch, or a serve/return gap wide enough to matter. Absent
+   * otherwise, because "both right-handed, similar numbers" genuinely is
+   * neutral and saying so adds nothing. */
+  const interaction = [];
+
+  if (A.lefty !== B.lefty) {
+    const lefty = A.lefty ? A : B;
+    const righty = A.lefty ? B : A;
+    let line = `${lefty.name} is left-handed and ${righty.name} is not`;
+    if (righty.leftyExposure) {
+      line += `; ${righty.name} has faced ${righty.leftyExposure.lefties} left-hander(s) in their last ${righty.leftyExposure.of} matches`;
+    }
+    interaction.push(line);
+  }
+
+  /* Serve vs return, both directions. A gap is only worth stating when
+   * it is large: 10 points separates a genuine mismatch from noise in
+   * samples this size. */
+  const srGap = (server, returner) => {
+    if (!server.serveReturn || !returner.serveReturn) return null;
+    const hold = server.serveReturn.wonOnFirst;
+    const ret = returner.serveReturn.returnPtsWon;
+    if (hold == null || ret == null) return null;
+    return (hold - (100 - ret) >= 10)
+      ? `${server.name} wins ${hold}% behind the first serve against ${returner.name} returning ${ret}%`
+      : null;
+  };
+  const ab = srGap(A, B), ba = srGap(B, A);
+  if (ab) interaction.push(ab);
+  if (ba) interaction.push(ba);
+
+  if (interaction.length) {
+    L.push(`STYLE: ${interaction.join('. ')}.`);
   }
 
   /* FLAG UNEVEN COVERAGE.

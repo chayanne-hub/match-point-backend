@@ -699,7 +699,7 @@ ${JSON_VALIDITY_REMINDER}
    * analyst falls back to search exactly as before.
    */
   const matchDescription = `${competitorA} vs ${competitorB} (${sport}), ${new Date(startTime).toISOString()}. ${oddsContext} ${spreadContext} ${totalContext}`
-    + (verifiedData ? `\n${verifiedData}\nThese figures come from the tennis data provider and are accurate — do not re-research them. Use search only for the two things the data above cannot cover: court speed at this venue, and motivation (what each player has to play for). Everything else \u2014 head to head, surface, form, ranking, venue record, workload, travel, home advantage, recent retirements and playing style \u2014 is in the data above when known. Where a line is absent, that fact is simply unavailable: do not search for it and do not assume a value.` : '');
+    + (verifiedData ? `\n${verifiedData}\nThese figures come from the tennis data provider and are accurate — do not re-research them. Use search only for the two things the data above cannot cover: court speed at this venue, and motivation (what each player has to play for). Everything else \u2014 head to head, surface, form, ranking, venue record, workload, travel, home advantage, recent retirements, playing style and the serve/return match-up \u2014 is in the data above when known. Where a line is absent, that fact is simply unavailable: do not search for it and do not assume a value.` : '');
 
   // Real research with web search can legitimately take a while, but a
   // single hung request must never be allowed to block the entire
