@@ -226,20 +226,27 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
       }).catch(() => null);
     }
 
-    /* `flipped` is declared HERE, not further down.
+    /* `flipped` IS ALWAYS FALSE HERE — so it is a constant.
      *
-     * It was declared after the pricing section but USED in the
-     * retirement close-out above it, so any match taking that path threw
-     * "Cannot access 'flipped' before initialization" — `let`/`const`
-     * are not hoisted. The per-match isolation caught it, so one match
-     * failed instead of the whole cycle, but the match itself never
-     * closed out.
+     * It compared match.competitorA against ev.competitorB to detect the
+     * provider listing players in the opposite order. But `ev` in this
+     * function is SYNTHESIZED from our own row further down
+     * (`competitorA: match.competitorA`), so the second clause is
+     * `!namesLikelyMatch(A, A)` — false by construction, whatever the
+     * names are. The orientation can never differ from itself.
      *
-     * Fourth instance of this pattern today: anything used earlier in a
-     * function than its declaration has to move up, not be worked
-     * around. */
-    const flipped = namesLikelyMatch(match.competitorA, ev?.competitorB) &&
-                    !namesLikelyMatch(match.competitorA, ev?.competitorA);
+     * It mattered when `ev` came from the provider feed. Since the loop
+     * moved to being driven by stored rows, it has been dead logic.
+     *
+     * Keeping it as a named constant rather than deleting the reads
+     * below, so the close-out code still documents WHY it is not
+     * swapping sides.
+     *
+     * (My previous attempt hoisted the original expression above `ev`'s
+     * own declaration, which put `ev` in the temporal dead zone instead
+     * and failed all 23 matches on the slate. Removing the dependency is
+     * the actual fix, not moving it.) */
+    const flipped = false;
 
     const resolved = await resolveExtendId(match.competitorA, match.competitorB, match.startTime)
       .catch(() => null);
