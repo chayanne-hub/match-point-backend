@@ -1595,8 +1595,17 @@ router.get('/admin/loss-review', requireAuth, async (req, res) => {
  */
 router.post('/admin/rerun/:pickId', requireAuth, async (req, res) => {
   try {
-    if (req.user?.plan !== 'admin_access') {
-      return res.status(403).json({ error: 'Admin only.' });
+    /* Same admin check the other admin routes use.
+     *
+     * This originally read `req.user?.plan` — but requireAuth sets
+     * `req.userId`, not `req.user`, and admin is decided by
+     * isAdminEmail(), not by a plan field. So the guard compared
+     * undefined to a string and rejected every request, including from a
+     * genuine admin whose button had rendered correctly. Two different
+     * definitions of "admin" on the two sides of the same feature. */
+    const adminUser = await db.user.findUnique({ where: { id: req.userId } });
+    if (!adminUser || !isAdminEmail(adminUser.email)) {
+      return res.status(403).json({ error: 'Admin access required.' });
     }
 
     const pick = await db.pick.findUnique({
