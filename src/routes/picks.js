@@ -1593,6 +1593,77 @@ router.get('/admin/loss-review', requireAuth, async (req, res) => {
  * A GRADED pick is never touched. Rewriting one would change history
  * after the fact and silently alter the published win rate.
  */
+/* Analyse a match that has NO pick — admin only.
+ *
+ * The pick-keyed route cannot reach these rows: there is no pick to key
+ * on, which is precisely why they are worth inspecting. Same guards,
+ * same reporting; the answer is usually the recorded skip reason rather
+ * than a new pick.
+ */
+router.post('/admin/rerun/match/:matchId', requireAuth, async (req, res) => {
+  try {
+    const adminUser = await db.user.findUnique({ where: { id: req.userId } });
+    if (!adminUser || !isAdminEmail(adminUser.email)) {
+      return res.status(403).json({ error: 'Admin access required.' });
+    }
+
+    const match = await db.match.findUnique({
+      where: { id: req.params.matchId },
+      include: { sport: true },
+    });
+    if (!match) return res.status(404).json({ error: 'Match not found.' });
+    if (match.sport.slug !== 'tennis') {
+      return res.status(400).json({ error: 'Single-match re-run currently supports tennis only.' });
+    }
+
+    const { analyzeTennisUpcoming } = require('../pipeline/analyzeTennisUpcoming.js');
+    const { analyzeMatchWithRetry, blendWithMarket } = require('../pipeline/cron.js');
+    const { reassessLiveMatch } = require('../pipeline/matchAnalyst.js');
+
+    const out = await analyzeTennisUpcoming({
+      analyze: analyzeMatchWithRetry,
+      blend: blendWithMarket,
+      reassessLiveMatch,
+      limit: 1,
+      onlyMatchId: match.id,
+    });
+
+    const after = await db.pick.findFirst({
+      where: { matchId: match.id, pickType: { in: ['model', 'winner'] }, market: 'moneyline' },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const counters = { analysed: out.analysed, unpriced: out.unpriced, skipped: out.skipped,
+                       finished: out.finished, tooEarly: out.tooEarly };
+
+    if (!after) {
+      return res.json({
+        ok: false,
+        matchup: `${match.competitorA} vs ${match.competitorB}`,
+        reason: (out.reasons && out.reasons.length)
+          ? out.reasons.join('; ')
+          : 'No pick produced and no reason recorded.',
+        counters,
+      });
+    }
+
+    res.json({
+      ok: true,
+      matchup: `${match.competitorA} vs ${match.competitorB}`,
+      after: {
+        selection: after.selection,
+        confidence: after.confidence,
+        odds: after.odds,
+        rationale: after.rationale,
+      },
+      counters,
+    });
+  } catch (err) {
+    console.error(`[admin/rerun-match] ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 router.post('/admin/rerun/:pickId', requireAuth, async (req, res) => {
   try {
     /* Same admin check the other admin routes use.
