@@ -29,7 +29,9 @@ const RANK = { 0: 'ITF', 1: 'Challenger', 2: 'ATP Tour', 3: 'ATP Masters/Slam' }
 /** Tour levels to ingest. Defaults to Challenger + main tour: ITF is
  *  opt-in because it is the tier with the least research material and the
  *  worst integrity record, not because the data is missing. */
-const TOUR_LEVELS = (process.env.TENNIS_TOUR_LEVELS || '1,2,3')
+/* Default includes 4 — the majors. Leaving it out was half the reason
+ * Grand Slams never reached the board. */
+const TOUR_LEVELS = (process.env.TENNIS_TOUR_LEVELS || '0,1,2,3,4')
   .split(',').map((s) => Number(s.trim())).filter((n) => Number.isFinite(n));
 
 function assertConfigured() {
@@ -105,12 +107,48 @@ function isDoubles(fx) {
  * The tournament NAME is unambiguous and comes from the same payload:
  * ITF events are always coded (W15, M25), Challengers always say so.
  * Name first, rankId only as a fallback when the name says nothing. */
+/* TIER FROM TOURNAMENT NAME.
+ *
+ * This was silently deleting the biggest events on the calendar.
+ *
+ * Two faults compounded. Grand Slams carry rankId 4, which was not in
+ * TENNIS_TOUR_LEVELS (0,1,2,3), so Wimbledon and Roland Garros were
+ * dropped as "off-level". And any tournament whose NAME matched no
+ * keyword fell through to rankId — null for most main-tour stops — so
+ * Metz, Chengdu, Tel Aviv and the ATP Finals disappeared too. Cincinnati
+ * survived only by coincidence, because "Open" appears in its name.
+ *
+ * Ordered most specific first: a slam is matched by name before any
+ * generic word in it can claim it.
+ */
 function tierFromName(name, rankId) {
   const n = String(name || '');
-  if (/challenger/i.test(n)) return 1;
+
+  // 4 — the majors and the season finals, by name rather than by a
+  // rankId that is not always present.
+  if (/wimbledon|roland\s*garros|french open|us open|australian open|grand\s*slam/i.test(n)) return 4;
+  if (/(atp|wta)\s*finals|tour finals|world tour finals/i.test(n)) return 4;
+
+  // 0 — ITF, matched before the generic keywords below so that
+  // "W15 Cairo Open" is not mistaken for a tour-level Open.
   if (/\b[WM]\d{2,3}\b/.test(n) || /\bitf\b/i.test(n)) return 0;
-  if (/open|masters|cup|championship|slam/i.test(n)) return 3;
-  return typeof rankId === 'number' ? rankId : null;
+
+  // 1 — Challenger.
+  if (/challenger/i.test(n)) return 1;
+
+  // 3 — Masters and the main-tour naming conventions.
+  if (/masters|open|cup|championship|classic|international/i.test(n)) return 3;
+
+  /* Unknown name: fall back to rankId, but NEVER to null.
+   *
+   * An unrecognised tournament used to become null and was then excluded
+   * by the level filter — so the failure mode of "we don't recognise
+   * this name" was "delete the event". For a main-tour stop with a plain
+   * city name (Metz, Chengdu) that is exactly wrong. Defaulting to 3
+   * means an unknown event is treated as tour level and shown; being
+   * wrong that way costs a stray fixture, not a missing Grand Slam. */
+  if (typeof rankId === 'number') return rankId;
+  return 3;
 }
 
 function shapeFixture(fx, tourType) {
@@ -157,7 +195,7 @@ function shapeFixture(fx, tourType) {
  */
 async function fetchFixturesForDate(dateStr, { tours = ['atp', 'wta'], pageSize = 100, maxPages = 20 } = {}) {
   const out = [];
-  const skipped = { doubles: 0, level: 0, noStart: 0 };
+  const skipped = { doubles: 0, level: 0, noStart: 0, levelNames: new Set() };
 
   for (const tourType of tours) {
     for (let page = 1; page <= maxPages; page++) {
@@ -173,7 +211,15 @@ async function fetchFixturesForDate(dateStr, { tours = ['atp', 'wta'], pageSize 
       const rows = Array.isArray(body?.data) ? body.data : [];
       for (const fx of rows) {
         if (isDoubles(fx)) { skipped.doubles++; continue; }
-        if (!TOUR_LEVELS.includes(tierFromName(fx?.tournament?.name, fx?.tournament?.rankId))) { skipped.level++; continue; }
+        const fxTier = tierFromName(fx?.tournament?.name, fx?.tournament?.rankId);
+        if (!TOUR_LEVELS.includes(fxTier)) {
+          skipped.level++;
+          // Record WHICH tournaments were excluded. "18 off-level" hid
+          // the loss of every Grand Slam behind a bare number.
+          const tn = fx?.tournament?.name;
+          if (tn) skipped.levelNames.add(`${tn} (tier ${fxTier})`);
+          continue;
+        }
         if (!fx.date) { skipped.noStart++; continue; }
         out.push(shapeFixture(fx, tourType));
       }
@@ -184,6 +230,9 @@ async function fetchFixturesForDate(dateStr, { tours = ['atp', 'wta'], pageSize 
 
   out.sort((a, b) => a.startTime - b.startTime);
   console.log(`[tennisApi] ${dateStr}: ${out.length} singles (skipped ${skipped.doubles} doubles, ${skipped.level} off-level, ${skipped.noStart} undated)`);
+  if (skipped.levelNames.size) {
+    console.log(`[tennisApi] ${dateStr}: excluded tournaments: ${[...skipped.levelNames].join(', ')}`);
+  }
   return out;
 }
 
