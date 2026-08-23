@@ -36,7 +36,43 @@ async function safe(fn) {
  */
 async function fetchH2H(tour, name1, name2) {
   const body = await safe(() => apiGet(`h2h/stats/${tour}/${encodeURIComponent(name1)}/${encodeURIComponent(name2)}`));
-  if (!body || typeof body.matchesCount !== 'number') return null;
+
+  /* FALL BACK TO THE PROFILE WHEN THERE ARE NO STATS.
+   *
+   * h2h/stats returns 404 "No stats" for pairs that HAVE met but whose
+   * meetings carry no aggregated stat record — common below Challenger
+   * level, where point-by-point data is not collected. That is a
+   * different answer from "No such player", and treating both as "no
+   * head to head" threw away a real meeting: a match card read "no prior
+   * meetings found" for two players who had in fact played.
+   *
+   * h2h/profile carries the record itself (surfaceData totals) without
+   * requiring the stat rows, so it answers "have they met, and who won"
+   * even when the serve splits are unavailable. */
+  if (!body || typeof body.matchesCount !== 'number') {
+    const prof = await safe(() => apiGet(`h2h/profile/${tour}/${encodeURIComponent(name1)}/${encodeURIComponent(name2)}/false`));
+    const sdp = prof?.surfaceData;
+    if (!sdp) return null;
+
+    const a = Number(sdp.total1), b = Number(sdp.total2);
+    if (!Number.isFinite(a) || !Number.isFinite(b) || (a + b) === 0) return null;
+
+    // Record only — no serve splits exist for these meetings, and an
+    // absent line is better than a fabricated one.
+    return {
+      meetings: a + b,
+      wonA: a,
+      wonB: b,
+      serveA: null,
+      serveB: null,
+      bySurface: {
+        hard:   [Number(sdp.hard1)  || 0, Number(sdp.hard2)  || 0],
+        clay:   [Number(sdp.clay1)  || 0, Number(sdp.clay2)  || 0],
+        grass:  [Number(sdp.grass1) || 0, Number(sdp.grass2) || 0],
+      },
+      statsAvailable: false,
+    };
+  }
 
   const p1 = body.player1 || {}, p2 = body.player2 || {}, sd = body.surfaceData || {};
   return {
@@ -502,7 +538,11 @@ function renderFactorBrief(brief, { surface = null } = {}) {
       .filter(([, v]) => v[0] + v[1] > 0)
       .map(([k, v]) => `${k} ${v[0]}-${v[1]}`);
     if (surfLines.length) L.push(`  by surface (${A.name}'s record): ${surfLines.join(', ')}`);
-    if (h.serveA.wonFirstPct != null) {
+    /* serveA is null when the record came from the profile fallback —
+     * those meetings exist but carry no stat rows. Dereferencing it
+     * threw and took the whole brief down with it, which would have
+     * turned "no serve splits" into "no data at all". */
+    if (h.serveA && h.serveB && h.serveA.wonFirstPct != null) {
       L.push(`  serve in those meetings — ${A.name}: ${h.serveA.firstServePct}% first in, ${h.serveA.wonFirstPct}% won on first, ${h.serveA.wonSecondPct}% on second`);
       L.push(`  serve in those meetings — ${B.name}: ${h.serveB.firstServePct}% first in, ${h.serveB.wonFirstPct}% won on first, ${h.serveB.wonSecondPct}% on second`);
     }
