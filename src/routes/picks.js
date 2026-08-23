@@ -1175,9 +1175,30 @@ router.get('/player-photo/:tour/:id', async (req, res) => {
     }
 
     const buf = Buffer.from(await upstream.arrayBuffer());
-    // Trust the extension over the upstream header — the wrong header is
-    // the whole reason the browser blocked these in the first place.
-    const type = 'image/jpeg';
+
+    /* VERIFY THE BYTES, don't trust the status.
+     *
+     * This gateway returns HTTP 200 for failures with the real answer in
+     * the body — the same behaviour that caught us on the fixtures
+     * endpoints. Here it returned 98 bytes with a 200, which the proxy
+     * then labelled image/jpeg and served. Chrome sniffs the content,
+     * sees it is not an image, and blocks it with ERR_BLOCKED_BY_ORB —
+     * so the proxy reproduced the exact bug it was written to fix.
+     *
+     * A JPEG starts FF D8 FF; PNG starts 89 50 4E 47. Anything else is
+     * not an image no matter what the status line said. */
+    const isJpeg = buf.length > 3 && buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF;
+    const isPng  = buf.length > 3 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47;
+
+    if (!isJpeg && !isPng) {
+      // Log the body once per player so the real upstream response is
+      // visible rather than guessed at.
+      console.warn(`[player-photo] ${key}: upstream returned ${buf.length}B, not an image: ${buf.toString('utf8').slice(0, 120)}`);
+      photoCache.set(key, { missing: true, at: Date.now() });
+      return res.status(404).end();
+    }
+
+    const type = isPng ? 'image/png' : 'image/jpeg';
 
     photoCache.set(key, { buf, type, at: Date.now() });
     res.set('Content-Type', type);
@@ -1557,6 +1578,105 @@ router.get('/admin/loss-review', requireAuth, async (req, res) => {
 // dryRun defaults to TRUE. Each match is a paid research call, so the
 // count is reported before anything is spent — an accidental full-slate
 // re-run is real money.
+/* RE-RUN ONE PICK — admin only.
+ *
+ * A full re-run costs a research call per match and rewrites the whole
+ * board, which is a blunt instrument for "why did THIS pick come out
+ * wrong". This redoes a single match so a change can be tested against
+ * the one case that prompted it.
+ *
+ * The existing model pick is deleted first: analyzeTennisUpcoming
+ * creates unconditionally, so without this a re-run would leave two
+ * picks on one match — the same duplication that already distorts the
+ * record elsewhere.
+ *
+ * A GRADED pick is never touched. Rewriting one would change history
+ * after the fact and silently alter the published win rate.
+ */
+router.post('/admin/rerun/:pickId', requireAuth, async (req, res) => {
+  try {
+    if (req.user?.plan !== 'admin_access') {
+      return res.status(403).json({ error: 'Admin only.' });
+    }
+
+    const pick = await db.pick.findUnique({
+      where: { id: req.params.pickId },
+      include: { match: { include: { sport: true } }, result: true },
+    });
+    if (!pick) return res.status(404).json({ error: 'Pick not found.' });
+
+    if (pick.result) {
+      return res.status(409).json({
+        error: 'This pick has already been graded. Re-running would rewrite a settled result.',
+      });
+    }
+
+    if (pick.match.sport.slug !== 'tennis') {
+      return res.status(400).json({ error: 'Single-pick re-run currently supports tennis only.' });
+    }
+
+    const matchId = pick.matchId;
+    const before = {
+      selection: pick.selection,
+      confidence: pick.confidence,
+      odds: pick.odds,
+      rationale: pick.rationale,
+    };
+
+    // Remove the old model pick(s) for this match so the re-run replaces
+    // rather than duplicates.
+    await db.pick.deleteMany({
+      where: { matchId, pickType: { in: ['model', 'winner'] }, market: 'moneyline' },
+    });
+
+    const { analyzeTennisUpcoming } = require('../pipeline/analyzeTennisUpcoming.js');
+    const { analyzeMatchWithRetry, blendWithMarket } = require('../pipeline/cron.js');
+    const { reassessLiveMatch } = require('../pipeline/matchAnalyst.js');
+
+    const out = await analyzeTennisUpcoming({
+      analyze: analyzeMatchWithRetry,
+      blend: blendWithMarket,
+      reassessLiveMatch,
+      limit: 1,
+      onlyMatchId: matchId,
+    });
+
+    const after = await db.pick.findFirst({
+      where: { matchId, pickType: { in: ['model', 'winner'] }, market: 'moneyline' },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    if (!after) {
+      // The re-run produced nothing — a guard rejected it. That is a
+      // real answer (no price, no evidence), so report it rather than
+      // leaving the match silently pickless.
+      return res.json({
+        ok: false,
+        matchup: `${pick.match.competitorA} vs ${pick.match.competitorB}`,
+        reason: 'No pick produced — see counters.',
+        counters: out,
+        before,
+      });
+    }
+
+    res.json({
+      ok: true,
+      matchup: `${pick.match.competitorA} vs ${pick.match.competitorB}`,
+      before,
+      after: {
+        selection: after.selection,
+        confidence: after.confidence,
+        odds: after.odds,
+        rationale: after.rationale,
+      },
+      counters: out,
+    });
+  } catch (err) {
+    console.error(`[admin/rerun] ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 router.post('/admin/reanalyze', requireAuth, async (req, res) => {
   try {
     const user = await db.user.findUnique({ where: { id: req.userId } });

@@ -2099,6 +2099,11 @@ function startEspnScheduled() {
 }
 
 module.exports = {
+  /* Exported for the single-pick re-run route: it needs the same
+   * analyse-and-blend pair the scheduled pass uses, or a re-run would be
+   * testing a different code path than the one that produced the pick. */
+  analyzeMatchWithRetry,
+  blendWithMarket,
   ingestTennisFixtures,
   startTennisUpcomingScheduled,
   updateTennisLiveState, runAll, reanalyzeUpcoming, startWatchdog, startReactiveOdds, startScheduled, startLiveScheduled, startEspnScheduled, triggerManualRun, triggerManualRunTomorrow };

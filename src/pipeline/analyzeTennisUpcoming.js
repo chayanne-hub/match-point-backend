@@ -33,7 +33,19 @@ const ENABLED = process.env.TENNIS_UPCOMING_ANALYSIS !== 'false';
  */
 // reassessLiveMatch is injected alongside analyze/blend for the same
 // reason they are: requiring matchAnalyst here would create a cycle.
-async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit = 15 } = {}) {
+/* `onlyMatchId` re-runs ONE match, for debugging.
+ *
+ * A full re-run costs a research call per match and changes the whole
+ * board, which makes it a poor instrument for "why did this one pick
+ * come out wrong". Passing a single id bypasses the normal candidate
+ * query — including the has-no-pick filter, since the whole point is to
+ * redo a match that already has one — and ignores the timing window so
+ * a match can be inspected whenever the question comes up.
+ *
+ * It deliberately does NOT bypass the evidence or price guards: those
+ * are the behaviour under test.
+ */
+async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit = 15, onlyMatchId = null } = {}) {
   if (!ENABLED || typeof analyze !== 'function') return { analysed: 0, skipped: 0 };
 
   const sport = await db.sport.findFirst({ where: { slug: 'tennis' } });
@@ -57,15 +69,17 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
   // Only matches we already hold, that have no moneyline pick yet.
   const since = new Date(Date.now() - 2 * 60 * 60 * 1000);
   const until = new Date(Date.now() + 48 * 60 * 60 * 1000);
-  const candidates = await db.match.findMany({
-    where: {
-      sportId: sport.id,
-      startTime: { gte: since, lte: until },
-      status: { notIn: ['final', 'postponed'] },
-      skipAnalysis: false,
-      picks: { none: { pickType: 'model', market: 'moneyline' } },
-    },
-  });
+  const candidates = onlyMatchId
+    ? await db.match.findMany({ where: { id: onlyMatchId } })
+    : await db.match.findMany({
+        where: {
+          sportId: sport.id,
+          startTime: { gte: since, lte: until },
+          status: { notIn: ['final', 'postponed'] },
+          skipAnalysis: false,
+          picks: { none: { pickType: 'model', market: 'moneyline' } },
+        },
+      });
   if (!candidates.length) return { analysed: 0, skipped: 0 };
 
   let failed = 0;
@@ -139,8 +153,10 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
      * The outer bound only stops us reaching into a draw weeks away that
      * happens to carry a speculative number. */
     const hasStoredPrice = match.bestOddsA !== null && match.bestOddsB !== null;
-    if (!hasStoredPrice && untilStart > WINDOW_MS) { tooEarly++; continue; }
-    if (untilStart > OUTER_BOUND_MS) { tooEarly++; continue; }
+    if (!onlyMatchId) {
+      if (!hasStoredPrice && untilStart > WINDOW_MS) { tooEarly++; continue; }
+      if (untilStart > OUTER_BOUND_MS) { tooEarly++; continue; }
+    }
 
     /* A match already in play cannot be priced from this path.
      *
