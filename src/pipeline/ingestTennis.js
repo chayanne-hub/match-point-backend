@@ -190,7 +190,16 @@ async function ingestTennisFixtures() {
       const priceLookaheadH = Number(process.env.TENNIS_PRICE_LOOKAHEAD_H || 6);
       const worthPricing = hoursOut > -2 && hoursOut < priceLookaheadH;
 
-      if (worthPricing && (existing.oddsA === null || existing.oddsB === null)) {
+      /* bestOddsA/bestOddsB — there is NO `oddsA` column on Match.
+       *
+       * This read `existing.oddsA === null`, which for a column that
+       * does not exist is `undefined === null` — FALSE. So the guard
+       * never passed, pricing never ran, and the cycle reported
+       * "0 priced, 0 not yet on the market" every time while 76 rows sat
+       * unpriced. A misspelled column fails silently on read and only
+       * throws on write, which is why this looked like "no odds
+       * available" rather than a bug. */
+      if (worthPricing && (existing.bestOddsA === null || existing.bestOddsB === null)) {
         const odds = await fetchMatchOdds({
           tour: f.tour || 'atp',
           player1Id: f.playerAId ?? existing.playerAId,
@@ -202,11 +211,14 @@ async function ingestTennisFixtures() {
         if (odds && odds.oddsA !== null && odds.oddsB !== null) {
           await db.match.update({
             where: { id: existing.id },
+            // fetchMatchOdds returns oddsA/oddsB (the API's field names);
+            // they are stored in bestOddsA/bestOddsB, which is what the
+            // analyser reads.
             data: {
-              oddsA: odds.oddsA,
-              oddsB: odds.oddsB,
-              ...(odds.bestOddsA != null ? { bestOddsA: odds.bestOddsA } : {}),
-              ...(odds.bestOddsB != null ? { bestOddsB: odds.bestOddsB } : {}),
+              bestOddsA: odds.bestOddsA ?? odds.oddsA,
+              bestOddsB: odds.bestOddsB ?? odds.oddsB,
+              ...(odds.bestBookA ? { bestBookA: odds.bestBookA } : {}),
+              ...(odds.bestBookB ? { bestBookB: odds.bestBookB } : {}),
             },
           });
           priced++;
@@ -292,7 +304,7 @@ async function ingestTennisFixtures() {
      * priced match would risk moving the number a pick was made against.
      */
     const row = await db.match.findUnique({ where: { externalId: f.sourceId } });
-    if (row && (row.oddsA === null || row.oddsB === null)) {
+    if (row && (row.bestOddsA === null || row.bestOddsB === null)) {
       const odds = await fetchMatchOdds({
         tour: f.tour || 'atp',
         player1Id: f.playerAId,
@@ -303,7 +315,12 @@ async function ingestTennisFixtures() {
       if (odds) {
         await db.match.update({
           where: { id: row.id },
-          data: { oddsA: odds.oddsA, oddsB: odds.oddsB },
+          data: {
+            bestOddsA: odds.bestOddsA ?? odds.oddsA,
+            bestOddsB: odds.bestOddsB ?? odds.oddsB,
+            ...(odds.bestBookA ? { bestBookA: odds.bestBookA } : {}),
+            ...(odds.bestBookB ? { bestBookB: odds.bestBookB } : {}),
+          },
         });
         priced++;
       } else {
