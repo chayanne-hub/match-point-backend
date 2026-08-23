@@ -210,6 +210,21 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
       }).catch(() => null);
     }
 
+    /* `flipped` is declared HERE, not further down.
+     *
+     * It was declared after the pricing section but USED in the
+     * retirement close-out above it, so any match taking that path threw
+     * "Cannot access 'flipped' before initialization" — `let`/`const`
+     * are not hoisted. The per-match isolation caught it, so one match
+     * failed instead of the whole cycle, but the match itself never
+     * closed out.
+     *
+     * Fourth instance of this pattern today: anything used earlier in a
+     * function than its declaration has to move up, not be worked
+     * around. */
+    const flipped = namesLikelyMatch(match.competitorA, ev?.competitorB) &&
+                    !namesLikelyMatch(match.competitorA, ev?.competitorA);
+
     const resolved = await resolveExtendId(match.competitorA, match.competitorB, match.startTime)
       .catch(() => null);
 
@@ -368,8 +383,6 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
     // The feed may list the players the other way round from our row.
     // Prices are per-position, so they have to be swapped with them or the
     // pick gets graded against the opponent's number.
-    const flipped = namesLikelyMatch(match.competitorA, ev.competitorB) &&
-                    !namesLikelyMatch(match.competitorA, ev.competitorA);
 
     let oddsA = null, oddsB = null;
     let priceSource = null;
