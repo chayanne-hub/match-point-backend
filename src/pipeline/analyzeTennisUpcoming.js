@@ -69,6 +69,7 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
   if (!candidates.length) return { analysed: 0, skipped: 0 };
 
   let failed = 0;
+  let noEvidence = 0;
   let analysed = 0, skipped = 0, unpriced = 0, finished = 0;
 
   // Nearest first: a match starting soon is the one worth a price now.
@@ -440,16 +441,74 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
      * the provider is down the analysis still runs on search, one notch
      * worse rather than not at all.
      */
-    const brief = await buildFactorBrief({
-      tour: ev.tour || 'atp',
+    /* IDs COME FROM THE ROW, NOT FROM A PARSED STRING.
+     *
+     * This dug the player and tournament ids out of `ev.matchId` by
+     * splitting on '-'. When that string is not in the expected shape —
+     * which is most of the time, and always when the loop is driven from
+     * stored rows rather than the provider feed — every id came back
+     * null. Every id-keyed lookup in the brief (h2h, surface, form,
+     * ranking, venue, workload) then returned nothing, so the brief was
+     * empty and the analyst was left with the two names and a price.
+     *
+     * That is why picks had no data behind them: not because the data
+     * does not exist, but because we never asked for it with a usable
+     * id. Cincinnati players have years of history.
+     *
+     * ingestTennis stores playerAId / playerBId / tournamentId on every
+     * fixture. Use those, and fall back to the parsed form only for
+     * older rows written before those columns existed. */
+    const parts = ev?.matchId ? String(ev.matchId).split('-') : [];
+    const briefArgs = {
+      tour: ev?.tour || (match.league && /wta|women/i.test(match.league) ? 'wta' : 'atp'),
       nameA: match.competitorA,
       nameB: match.competitorB,
-      playerAId: ev.matchId ? String(ev.matchId).split('-')[0] : null,
-      playerBId: ev.matchId ? String(ev.matchId).split('-')[1] : null,
-      tournamentId: ev.matchId ? String(ev.matchId).split('-')[2] : null,
-    }).catch(() => null);
+      playerAId: match.playerAId ?? parts[0] ?? null,
+      playerBId: match.playerBId ?? parts[1] ?? null,
+      tournamentId: match.tournamentId ?? parts[2] ?? null,
+    };
+
+    const brief = await buildFactorBrief(briefArgs).catch((e) => {
+      // Was silent. A brief that fails to build is indistinguishable
+      // from a match we know nothing about, which is how this went
+      // unnoticed — say which it is.
+      console.error(`[tennisUpcoming] factor brief failed for ${match.competitorA} vs ${match.competitorB}: ${e.message}`);
+      return null;
+    });
+
+    if (!brief && (briefArgs.playerAId === null || briefArgs.playerBId === null)) {
+      console.warn(`[tennisUpcoming] ${match.competitorA} vs ${match.competitorB}: no player ids stored — cannot build a factor brief.`);
+    }
 
     const verifiedData = renderFactorBrief(brief, { surface: match.surface });
+
+    /* NO EVIDENCE, NO PICK.
+     *
+     * The same rule already applied to price now applies to data. A pick
+     * assembled from an empty brief is not a low-confidence read — it is
+     * a fabricated one. We have seen exactly what that looks like: four
+     * factors, all Neutral, resting on "a marginal edge based on limited
+     * general circuit familiarity" for a player nobody has data on.
+     *
+     * Those picks still get graded and still count toward the published
+     * win rate, so they make the record look like a model result when it
+     * is really the favourite winning at the rate favourites win.
+     *
+     * The bar is deliberately low — ANY genuine signal clears it: a head
+     * to head, a surface record, recent form, a ranking, a venue record,
+     * workload. What it excludes is the case where we know nothing at
+     * all, which is common at ITF level and is exactly where a
+     * confident-sounding rationale does the most damage.
+     *
+     * Set TENNIS_REQUIRE_EVIDENCE=false to publish regardless. */
+    const requireEvidence = process.env.TENNIS_REQUIRE_EVIDENCE !== 'false';
+    const hasEvidence = Boolean(verifiedData && verifiedData.trim().length > 0);
+
+    if (requireEvidence && !hasEvidence) {
+      noEvidence++;
+      console.log(`[tennisUpcoming] ${match.competitorA} vs ${match.competitorB}: no verified data available — not publishing a pick.`);
+      continue;
+    }
 
     /* A live match goes to the LIVE analyst, not the pre-match one.
      *
@@ -552,6 +611,7 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
   // `failed` is appended only when non-zero: a clean cycle should not
   // carry a permanent "0 failed" that trains the eye to ignore it.
   console.log(`[tennisUpcoming] ${analysed} analysed, ${unpriced} not yet priced, ${skipped} skipped, ${finished} closed as finished, ${tooEarly} too early to price`
+    + (noEvidence ? `, ${noEvidence} no data` : '')
     + (failed ? `, ${failed} FAILED` : ''));
   return { analysed, unpriced, skipped, finished, tooEarly };
 }
