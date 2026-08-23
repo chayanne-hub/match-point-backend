@@ -92,7 +92,23 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
   // another tournament prices earlier, without spending 67 futile
   // lookups per match the way a 3-hour window would. Tunable if a tour
   // turns out to price further ahead.
-  const WINDOW_MS = Number(process.env.TENNIS_PRICE_WINDOW_MS || 90 * 60 * 1000);
+  /* Analyse from SIX HOURS out, not 90 minutes.
+   *
+   * The 90-minute default existed because pre-match prices appear late
+   * at Challenger and ITF level. But it also meant a member looking at
+   * tomorrow's main-tour semi-finals saw an empty board for most of the
+   * day, and it left no margin when a start time drifts — a match whose
+   * estimate slips can go on court before the window ever opens.
+   *
+   * Six hours matches TENNIS_PRICE_LOOKAHEAD_H, so ingest fetches a
+   * price over the same horizon the analyser is willing to act on;
+   * leaving those two out of step is what makes matches sit unpriced. */
+  const WINDOW_MS = Number(process.env.TENNIS_PRICE_WINDOW_MS || 6 * 60 * 60 * 1000);
+
+  /* How far ahead we will analyse a match that ALREADY has a price.
+   * Three days covers a full tournament week's published markets without
+   * reaching into next month's draw. */
+  const OUTER_BOUND_MS = Number(process.env.TENNIS_OUTER_BOUND_MS || 72 * 60 * 60 * 1000);
   let tooEarly = 0;
 
   for (const match of candidates) {
@@ -107,7 +123,23 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
     if (analysed >= limit) break;
 
     const untilStart = new Date(match.startTime).getTime() - Date.now();
-    if (untilStart > WINDOW_MS) { tooEarly++; continue; }
+    /* THE GATE IS A PRICE, NOT A CLOCK.
+     *
+     * A time window was the wrong test. Markets for main-tour matches
+     * open far earlier than six hours out, so a clock-based cutoff held
+     * back matches that were perfectly analysable — and it also left no
+     * margin when a start estimate drifts, which is how a semi-final
+     * went on court before its window ever opened.
+     *
+     * If the match has a price, it can be analysed and settled: nothing
+     * about being far away makes that untrue. If it has no price there
+     * is nothing to bet into, and no window width fixes that.
+     *
+     * The outer bound only stops us reaching into a draw weeks away that
+     * happens to carry a speculative number. */
+    const hasStoredPrice = match.bestOddsA !== null && match.bestOddsB !== null;
+    if (!hasStoredPrice && untilStart > WINDOW_MS) { tooEarly++; continue; }
+    if (untilStart > OUTER_BOUND_MS) { tooEarly++; continue; }
 
     /* A match already in play cannot be priced from this path.
      *

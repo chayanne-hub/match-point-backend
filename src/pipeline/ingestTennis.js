@@ -187,7 +187,14 @@ async function ingestTennisFixtures() {
        * comfortably wider than the window in which tennis prices
        * actually appear, and env-tunable if that proves wrong. */
       const hoursOut = (new Date(existing.startTime).getTime() - Date.now()) / 3600000;
-      const priceLookaheadH = Number(process.env.TENNIS_PRICE_LOOKAHEAD_H || 6);
+      /* Look 48 hours ahead, not 6.
+       *
+       * The analyser now acts on any match that HAS a price, so pricing
+       * is the thing that decides when a match becomes analysable. A
+       * 6-hour lookahead therefore reimposed the very cutoff we just
+       * removed: no price would exist earlier, so nothing could be
+       * analysed earlier either. Main-tour markets open days out. */
+      const priceLookaheadH = Number(process.env.TENNIS_PRICE_LOOKAHEAD_H || 48);
       const worthPricing = hoursOut > -2 && hoursOut < priceLookaheadH;
 
       /* bestOddsA/bestOddsB — there is NO `oddsA` column on Match.
