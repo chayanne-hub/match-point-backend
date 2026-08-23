@@ -325,6 +325,15 @@ async function ingestTennisFixtures() {
     if (promoted.count) console.log(`[tennisIngest] promoted ${promoted.count} match(es) to live from the fixture feed`);
   }
 
+  /* Ask the provider about anything the socket feed did not cover. */
+  const started = await promoteStartedMatches().catch((e) => {
+    console.error(`[tennisIngest] promote sweep: ${e.message}`);
+    return { promoted: 0, checked: 0 };
+  });
+  if (started.checked) {
+    console.log(`[tennisIngest] start check: ${started.promoted} moved to live of ${started.checked} checked`);
+  }
+
   console.log(`[tennisIngest] fixtures: ${created} new, ${updated} updated, ${skipped} already covered | odds: ${priced} priced, ${unpriced} not yet on the market`);
 
   /* Maintenance runs on the ingest cycle, not only from an admin route.
@@ -681,6 +690,71 @@ async function closeStaleScheduledTennis() {
   return { closed: stale.length, scored, unscored };
 }
 
+/* PROMOTE MATCHES THAT HAVE ACTUALLY STARTED.
+ *
+ * ESPN used to do this job: it reported when a match went in-play, the
+ * row moved scheduled -> live, and the pick moved from "Analyzed" to
+ * "Live Now". With ESPN off for tennis, the only remaining promoter is
+ * the socket snapshot — and that feed carries a partial set. It had the
+ * ITF matches and never Cincinnati, so a main-tour pick sat in
+ * "Analyzed" through the entire match and jumped straight to a result.
+ *
+ * startTime cannot be trusted for this either: in tennis it is an
+ * estimate, since a match starts when the previous one on that court
+ * ends. A semi-final was in its second set while its row still read
+ * "starts in 1h32m".
+ *
+ * So this asks the provider. Deliberately narrow: only matches that
+ * carry a pick (the ones a member is watching), only those already
+ * plausibly underway, and capped per cycle so it cannot become a large
+ * recurring API cost.
+ */
+async function promoteStartedMatches({ limit = 12 } = {}) {
+  const sport = await db.sport.findFirst({ where: { slug: 'tennis' } });
+  if (!sport) return { promoted: 0, checked: 0 };
+
+  const now = Date.now();
+  const candidates = await db.match.findMany({
+    where: {
+      sportId: sport.id,
+      status: 'scheduled',
+      // Plausibly underway: from 30 min before the estimated start (they
+      // often begin early when the prior match is short) to 6h after.
+      startTime: { gte: new Date(now - 6 * 60 * 60 * 1000), lte: new Date(now + 30 * 60 * 1000) },
+      picks: { some: {} },
+    },
+    select: { id: true, competitorA: true, competitorB: true, startTime: true },
+    orderBy: { startTime: 'asc' },
+    take: limit,
+  }).catch(() => []);
+
+  if (!candidates.length) return { promoted: 0, checked: 0 };
+
+  let promoted = 0;
+  for (const m of candidates) {
+    const resolved = await resolveExtendId(m.competitorA, m.competitorB, m.startTime)
+      .catch(() => null);
+    if (!resolved || !resolved.status) continue;
+
+    const st = String(resolved.status);
+    const notStarted = /not.?started|scheduled|upcoming|postponed|cancell?ed/i.test(st);
+    const isDone = /ended|finished|retired|walkover/i.test(st);
+    // Finished matches are left alone: the stale sweep closes those with
+    // a score, and promoting a finished match to live would put it back
+    // on the board as though it were still being played.
+    if (notStarted || isDone) continue;
+
+    await db.match.update({
+      where: { id: m.id },
+      data: { status: 'live', ...(resolved.score ? { liveScore: resolved.score } : {}) },
+    }).catch(() => {});
+    promoted++;
+    console.log(`[tennisIngest] ${m.competitorA} vs ${m.competitorB} is under way (${st}) — moved to live`);
+  }
+
+  return { promoted, checked: candidates.length };
+}
+
 async function cleanupDuplicateTennis({ dryRun = true } = {}) {
   const sport = await db.sport.findFirst({ where: { slug: 'tennis' } });
   if (!sport) return { groups: 0, removed: 0 };
@@ -815,4 +889,5 @@ async function clearTennisSkipFlags({ dryRun = true } = {}) {
   return { marked: targets.length, scanned: rows.length };
 }
 
-module.exports = { ingestTennisFixtures, closeStaleScheduledTennis, applyTennisLiveState, cleanupDuplicateTennis, clearTennisSkipFlags };
+module.exports = {
+  promoteStartedMatches, ingestTennisFixtures, closeStaleScheduledTennis, applyTennisLiveState, cleanupDuplicateTennis, clearTennisSkipFlags };
