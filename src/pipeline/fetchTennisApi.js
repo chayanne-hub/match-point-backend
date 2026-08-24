@@ -167,7 +167,86 @@ function tierFromName(name, rankId) {
  * 3 Grass, 4 Indoor hard, 5 Carpet. Anything unrecognised returns null
  * rather than a guess — a wrong surface is worse than none.
  */
-const COURT_BY_ID = { 1: 'Hard', 2: 'Clay', 3: 'Grass', 4: 'Indoor Hard', 5: 'Carpet' };
+/* SURFACE NAMES FROM THE PROVIDER, not from ids we inferred.
+ *
+ * COURT_BY_ID was built by reading ids out of observed payloads: 1 Hard,
+ * 2 Clay, and so on. That is a guess that happens to have matched — but a
+ * wrong surface does not fail loudly, it silently misleads the surface
+ * factor and the year-by-year record, which is worse than having none.
+ *
+ * This endpoint returns the mapping definitively. Cached for a day; the
+ * inferred table stays as the fallback if the call fails.
+ */
+let _courtMapCache = null;
+let _courtMapAt = 0;
+const COURT_MAP_TTL_MS = 24 * 60 * 60 * 1000;
+
+/* IS THE PLAYER ACTIVE?
+ *
+ * Injury / Physical is the weakest factor in the brief — almost always
+ * "No data", because the only signal available was inferring retirements
+ * from incomplete scorelines.
+ *
+ * This returns a plain status ("Active" for a fit player). Anything other
+ * than Active is worth stating: a player listed as inactive or injured
+ * going into a match is exactly the kind of fact that should move a
+ * price, and it is one call.
+ */
+async function fetchPlayerStatus(name) {
+  if (!name) return null;
+  const body = await safe(() => apiGet(`profile/${encodeURIComponent(name)}/player-status`));
+  const status = body?.status ?? body?.data?.status ?? null;
+  if (!status) return null;
+  return {
+    status: String(status),
+    // Only the exceptions are worth a line in the brief — "Active" on
+    // both sides says nothing and would crowd out real signal.
+    notable: !/^active$/i.test(String(status)),
+  };
+}
+
+async function fetchCourtMap() {
+  if (_courtMapCache && Date.now() - _courtMapAt < COURT_MAP_TTL_MS) return _courtMapCache;
+
+  const body = await safe(() => apiGet('court'));
+  const rows = Array.isArray(body?.data) ? body.data : (Array.isArray(body) ? body : []);
+  if (!rows.length) return null;
+
+  const map = {};
+  for (const r of rows) {
+    const id = Number(r.id ?? r.courtId);
+    const nm = r.name ?? r.court ?? r.courtName;
+    if (Number.isFinite(id) && nm) map[id] = String(nm);
+  }
+  if (!Object.keys(map).length) return null;
+
+  _courtMapCache = map;
+  _courtMapAt = Date.now();
+  return map;
+}
+
+/* VERIFIED against /v1/tennis/court — not inferred.
+ *
+ * The previous table was read out of observed payloads and had three of
+ * seven wrong: 3 was assumed Grass (it is Indoor Hard), 4 assumed Indoor
+ * Hard (it is Carpet), 5 assumed Carpet (it is Grass).
+ *
+ * Nothing was mislabelled in practice only because the current board is
+ * entirely ids 1 and 2. It would have broken the moment the grass season
+ * arrived — Wimbledon filed as Carpet, every indoor event as Grass — and
+ * a wrong surface does not fail loudly. It silently misdirects the
+ * surface factor and the year-by-year record, which is worse than a null.
+ *
+ * fetchCourtMap() refreshes this from the provider; this is the fallback. */
+const COURT_BY_ID = {
+  1: 'Hard',
+  2: 'Clay',
+  3: 'Indoor Hard',   // provider calls it "I.hard"
+  4: 'Carpet',
+  5: 'Grass',
+  6: 'Acrylic',
+  10: null,           // "N/A" — absence, not a surface
+};
 
 function surfaceFromFixture(fx) {
   const t = fx?.tournament || {};
@@ -240,6 +319,38 @@ function shapeFixture(fx, tourType) {
  * Singles fixtures for one calendar day, across the tour levels enabled.
  * Pages until exhausted; `hasNextPage` drives the loop.
  */
+/* FIXTURES OVER A DATE RANGE.
+ *
+ * The pipeline calls {tour}/fixtures/{date} twice a cycle — today and
+ * tomorrow. This endpoint takes a range, so one call covers both, and
+ * widening the horizon costs nothing extra.
+ *
+ * That matters more since analysis is gated on price availability rather
+ * than the clock: a wider window means more chances to catch a market as
+ * it opens, and prices for main-tour events appear days ahead.
+ *
+ * Same response shape as the single-date endpoint — {data:[...]} with
+ * tournament included — so shapeFixture handles it unchanged.
+ */
+async function fetchFixturesForRange(startDate, endDate, { tours = ['atp', 'wta'], pageSize = 100, maxPages = 20 } = {}) {
+  const out = [];
+  for (const tourType of tours) {
+    for (let page = 1; page <= maxPages; page++) {
+      const body = await safe(() => apiGet(
+        `${tourType}/fixtures/${startDate}/${endDate}?include=tournament&pageSize=${pageSize}&pageNo=${page}`));
+      const rows = Array.isArray(body?.data) ? body.data : (Array.isArray(body) ? body : []);
+      if (!rows.length) break;
+
+      for (const fx of rows) {
+        const shaped = shapeFixture(fx, tourType);
+        if (shaped) out.push(shaped);
+      }
+      if (rows.length < pageSize) break;
+    }
+  }
+  return out;
+}
+
 async function fetchFixturesForDate(dateStr, { tours = ['atp', 'wta'], pageSize = 100, maxPages = 20 } = {}) {
   const out = [];
   const skipped = { doubles: 0, level: 0, noStart: 0, levelNames: new Set() };
@@ -541,6 +652,49 @@ async function fetchRankingsForDate(tour, date) {
 const rankingCache = new Map();   // tour -> { at, date, rows }
 const RANKING_TTL_MS = 6 * 60 * 60 * 1000;
 
+/* NAME TO ID FOR EVERY RANKED PLAYER, in one cached call.
+ *
+ * Several problems today came from a missing or wrong player id: briefs
+ * built with nulls, head to heads querying the wrong index, rows carrying
+ * another match's ids. Each time the recovery was manual.
+ *
+ * This returns the top 500 names with their ids per tour, so a player can
+ * be resolved from a name when the id is absent — and, more usefully, a
+ * stored id can be CHECKED against the name it should belong to.
+ *
+ * Cached for six hours: rankings move weekly, so this is close to static.
+ */
+let _nameIndex = new Map();      // tour -> { at, byName: Map }
+const NAME_INDEX_TTL_MS = 6 * 60 * 60 * 1000;
+
+async function fetchNameIndex(tour) {
+  const cached = _nameIndex.get(tour);
+  if (cached && Date.now() - cached.at < NAME_INDEX_TTL_MS) return cached.byName;
+
+  const body = await safe(() => apiGet(`ranking/${tour}/top500-names`));
+  const rows = Array.isArray(body?.data) ? body.data : (Array.isArray(body) ? body : []);
+  if (!rows.length) return null;
+
+  const byName = new Map();
+  for (const r of rows) {
+    const id = r.id ?? r.playerId ?? r.player?.id;
+    const nm = r.name ?? r.playerName ?? r.player?.name;
+    if (id && nm) byName.set(String(nm).toLowerCase().trim(), Number(id));
+  }
+  if (!byName.size) return null;
+
+  _nameIndex.set(tour, { at: Date.now(), byName });
+  return byName;
+}
+
+/** Resolve a player id from a name, or null when unknown. */
+async function playerIdFromName(tour, name) {
+  if (!name) return null;
+  const idx = await fetchNameIndex(tour);
+  if (!idx) return null;
+  return idx.get(String(name).toLowerCase().trim()) ?? null;
+}
+
 async function fetchLatestRankings(tour, { maxWeeksBack = 6 } = {}) {
   const cached = rankingCache.get(tour);
   if (cached && Date.now() - cached.at < RANKING_TTL_MS) return cached;
@@ -608,6 +762,83 @@ function playerImageUrl(path) {
  * headline record; the discrepancy is most likely a walkover counted in
  * one place and not the other.
  */
+/* PRICE THE SAME MATCH ACROSS BOOKMAKERS.
+ *
+ * The single highest-value endpoint in the catalogue, and it has nothing
+ * to do with the model. The record sits near +2.6% ROI; the spread
+ * between the best and worst book on a tennis market is routinely 2-4%.
+ * Taking the best available number is worth as much as the entire edge,
+ * without the pick being any better.
+ *
+ * It also fixes a real problem: every pick is currently quoted at
+ * BetMGM, so a member without that account sees a price they cannot take.
+ *
+ * Returns the best price per side with the book that offers it, plus the
+ * full set so a member can find their own book. Shape is defensive —
+ * bookmaker payloads vary in field naming and this has not been probed.
+ */
+async function fetchOddsComparison(eventId) {
+  if (!eventId) return null;
+  const body = await safe(() => apiGet(`extend/api/odds/compare/${encodeURIComponent(eventId)}`));
+  const rows = Array.isArray(body?.data) ? body.data : (Array.isArray(body) ? body : []);
+  if (!rows.length) return null;
+
+  const books = [];
+  for (const r of rows) {
+    const book = r.bookmaker ?? r.bookmakerName ?? r.book ?? r.name ?? null;
+    const a = Number(r.odd1 ?? r.oddsA ?? r.home ?? r.player1);
+    const b = Number(r.odd2 ?? r.oddsB ?? r.away ?? r.player2);
+    if (!book || !Number.isFinite(a) || !Number.isFinite(b)) continue;
+    books.push({ book: String(book), a, b });
+  }
+  if (!books.length) return null;
+
+  // Decimal odds: higher is better for the backer, on each side
+  // independently — the best price for A and for B can be at different
+  // books, which is the whole point of comparing.
+  const bestA = books.reduce((m, x) => (x.a > m.a ? x : m), books[0]);
+  const bestB = books.reduce((m, x) => (x.b > m.b ? x : m), books[0]);
+
+  const spread = (side) => {
+    const vals = books.map((x) => x[side]).filter(Number.isFinite);
+    if (vals.length < 2) return null;
+    const hi = Math.max(...vals), lo = Math.min(...vals);
+    return Math.round(((hi - lo) / lo) * 1000) / 10;   // % better than the worst
+  };
+
+  return {
+    books,
+    count: books.length,
+    bestA: { book: bestA.book, odds: bestA.a },
+    bestB: { book: bestB.book, odds: bestB.b },
+    // How much is being left on the table by not shopping.
+    spreadPctA: spread('a'),
+    spreadPctB: spread('b'),
+  };
+}
+
+/* LINE MOVEMENT — where the money has gone.
+ *
+ * A price that has moved sharply is one of the few market signals with
+ * real predictive content, and it is one call. Distinct from the
+ * last-10-movements endpoint already in use, which is a summary; this is
+ * the biggest moves specifically.
+ */
+async function fetchBiggestMovements(eventId) {
+  if (!eventId) return null;
+  const body = await safe(() => apiGet(`extend/api/odds/biggest-movements/${encodeURIComponent(eventId)}`));
+  const rows = Array.isArray(body?.data) ? body.data : (Array.isArray(body) ? body : []);
+  if (!rows.length) return null;
+
+  return rows.slice(0, 5).map((r) => ({
+    book: r.bookmaker ?? r.book ?? null,
+    from: Number(r.oddFrom ?? r.from ?? r.opening) || null,
+    to: Number(r.oddTo ?? r.to ?? r.current) || null,
+    side: r.side ?? r.selection ?? null,
+    movedAt: r.date ?? r.movedAt ?? null,
+  })).filter((m) => m.from && m.to);
+}
+
 async function fetchH2HFull(tour, id1, id2) {
   const [profile, stats, recentA, recentB] = await Promise.all([
     apiGet(`h2h/profile/${tour}/${id1}/${id2}/false`).catch(() => null),
@@ -1127,6 +1358,13 @@ async function discoverOddsPath(sampleEventId) {
 }
 
 module.exports = {
+  fetchPlayerStatus,
+  fetchOddsComparison,
+  fetchBiggestMovements,
+  fetchNameIndex,
+  playerIdFromName,
+  fetchCourtMap,
+  fetchFixturesForRange,
   fetchH2HFull,
   playerImageUrl,
   fetchPlayerProfile,

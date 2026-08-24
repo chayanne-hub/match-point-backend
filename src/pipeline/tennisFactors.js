@@ -12,7 +12,7 @@
  * rather than by a silent null.
  */
 
-const { apiGet } = require('./fetchTennisApi.js');
+const { apiGet, fetchPlayerStatus } = require('./fetchTennisApi.js');
 
 /** Court ids seen in surface-summary. 1 = Hard is the common case. */
 const COURTS = { 1: 'Hard', 2: 'Clay', 3: 'Indoor Hard', 5: 'Grass' };
@@ -865,7 +865,8 @@ async function buildFactorBrief({ tour = 'atp', nameA, nameB, playerAId, playerB
   /* Year-by-year surface, scoped to THIS match's surface. One call per
    * player, id-keyed, and far more informative than the career split the
    * brief used before. */
-  const [byYearA, byYearB, careerSrA, careerSrB, bpA, bpB, titlesA, titlesB] = await Promise.all([
+  const [byYearA, byYearB, careerSrA, careerSrB, bpA, bpB, titlesA, titlesB,
+         statusA, statusB] = await Promise.all([
     fetchSurfaceByYear(tour, playerAId, surfaceName),
     fetchSurfaceByYear(tour, playerBId, surfaceName),
     fetchCareerServeReturn(tour, playerAId),
@@ -874,6 +875,11 @@ async function buildFactorBrief({ tour = 'atp', nameA, nameB, playerAId, playerB
     fetchBreakPoints(tour, playerBId),
     fetchTitlesByTier(tour, playerAId),
     fetchTitlesByTier(tour, playerBId),
+    /* Player status — the only direct source for the Injury/Physical
+     * factor, which has otherwise been inferred from retirement patterns
+     * in scorelines. Name-keyed, so it uses the display names. */
+    fetchPlayerStatus(nameA),
+    fetchPlayerStatus(nameB),
   ]);
 
   /* Serve/return profiles reuse the CACHED recent-match payload — the
@@ -904,9 +910,9 @@ async function buildFactorBrief({ tour = 'atp', nameA, nameB, playerAId, playerB
   return {
     h2h,
     playerA: { name: nameA, surface: surfA, form: formA, venue: venueA, ranking: rankA, tiers: tierA, load: loadA, ctx: ctxA, style: styleA, country: styleA ? styleA.country : null,
-      serveReturn: srA, lefty: aLefty, leftyExposure: expA, byYear: byYearA, careerSr: careerSrA, breakPts: bpA, titles: titlesA },
+      serveReturn: srA, lefty: aLefty, leftyExposure: expA, byYear: byYearA, careerSr: careerSrA, breakPts: bpA, titles: titlesA, status: statusA },
     playerB: { name: nameB, surface: surfB, form: formB, venue: venueB, ranking: rankB, tiers: tierB, load: loadB, ctx: ctxB, style: styleB, country: styleB ? styleB.country : null,
-      serveReturn: srB, lefty: bLefty, leftyExposure: expB, byYear: byYearB, careerSr: careerSrB, breakPts: bpB, titles: titlesB },
+      serveReturn: srB, lefty: bLefty, leftyExposure: expB, byYear: byYearB, careerSr: careerSrB, breakPts: bpB, titles: titlesB, status: statusB },
   };
 }
 
@@ -1071,6 +1077,15 @@ function renderFactorBrief(brief, { surface = null } = {}) {
      * "2 Futures" states the level each player has won at, which a
      * ranking alone does not. */
     if (P.titles) parts.push(`titles: ${P.titles}`);
+
+    /* Status is stated only when it is NOT "Active".
+     *
+     * Both players being active is the normal case and says nothing —
+     * printing it on every brief would spend space on the least
+     * informative line available. An exception is worth a lot. */
+    if (P.status && P.status.notable) {
+      parts.push(`PLAYER STATUS: ${P.status.status}`);
+    }
 
     if (P.careerSr) {
       const c = P.careerSr;
