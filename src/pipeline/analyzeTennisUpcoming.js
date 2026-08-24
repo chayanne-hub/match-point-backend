@@ -567,6 +567,9 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
       playerAId: match.playerAId ?? parts[0] ?? null,
       playerBId: match.playerBId ?? parts[1] ?? null,
       tournamentId: match.tournamentId ?? parts[2] ?? null,
+      // Scopes the year-by-year surface record to the surface actually
+      // being played on — a clay collapse is irrelevant on a hard court.
+      surfaceName: match.surface || null,
     };
 
     const brief = await buildFactorBrief(briefArgs).catch((e) => {
@@ -591,6 +594,21 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
      * can be compared on the same slate without a deploy, and switched
      * back the moment the comparison says to. */
     const briefEnabled = process.env.TENNIS_FACTOR_BRIEF !== 'off';
+    /* Store the rankings the brief just fetched.
+     *
+     * They are already in hand, so this costs nothing, and the board can
+     * then show "#248 vs #464" instead of two unfamiliar names — which
+     * across seven simultaneous tournaments is most of what tells a
+     * member whether a pick is a favourite or a live underdog. */
+    const rkA = brief?.playerA?.ranking?.position ?? null;
+    const rkB = brief?.playerB?.ranking?.position ?? null;
+    if (rkA || rkB) {
+      await db.match.update({
+        where: { id: match.id },
+        data: { ...(rkA ? { rankA: rkA } : {}), ...(rkB ? { rankB: rkB } : {}) },
+      }).catch(() => {});
+    }
+
     const verifiedData = briefEnabled
       ? renderFactorBrief(brief, { surface: match.surface })
       : '';
@@ -636,15 +654,40 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
      * reassessLiveMatch exists precisely for this and takes the score. */
     const label = `${match.competitorA} vs ${match.competitorB} (${ev.league || 'tennis'})${isLive ? ` [live/${priceSource}]` : ''}`;
 
+    /* A LIVE PICK NEEDS MORE THAN A PRICE.
+     *
+     * The live path had no evidence guard and never received the factor
+     * brief, so a match with no score produced four factors that all
+     * restated the market: "the live moneyline of -370 implies a strong
+     * in-match advantage", "no prior scouting report is available",
+     * "sizable pricing gap suggests momentum". Confidence 70% derived
+     * from the price is circular — that is the market with a percentage
+     * attached, not a read of the match.
+     *
+     * So: skip when there is neither a score nor any verified data. With
+     * one or both, reassess — and pass the brief through, which the live
+     * path never did despite it being built for exactly this. */
+    const liveScoreNow = match.liveScore || match.setScore || null;
+    if (isLive && !liveScoreNow && !hasEvidence) {
+      noEvidence++;
+      note('live, but no score and no verified data — only the price, which is not a read');
+      console.log(`[tennisUpcoming] ${match.competitorA} vs ${match.competitorB}: live with no score and no data — not publishing a price-only pick.`);
+      continue;
+    }
+
     const analysis = isLive
       ? await reassessLiveMatch({
           sport: 'tennis',
           competitorA: match.competitorA,
           competitorB: match.competitorB,
-          liveScore: match.liveScore || match.setScore || null,
+          liveScore: liveScoreNow,
           oddsA,
           oddsB,
           priorAnalysis: null,
+          // The brief was never passed here — the live analyst had the
+          // price and nothing else, even when we had full data on both
+          // players.
+          verifiedData,
         }).catch(() => null)
       : await analyze({
           sport: 'tennis',

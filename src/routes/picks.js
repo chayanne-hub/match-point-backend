@@ -1431,6 +1431,10 @@ router.get('/admin/diagnose', requireAuth, async (req, res) => {
 
       rows.push({
         matchup: `${m.competitorA} vs ${m.competitorB}`,
+        // Rankings for the board, so two unfamiliar names carry some
+        // sense of who is favoured and by how far.
+        rankA: m.rankA ?? null,
+        rankB: m.rankB ?? null,
         oddsA: m.oddsA, oddsB: m.oddsB,
         oddsBook: m.oddsBook ?? null,
         bookCount: m.bookCount ?? null,
@@ -1993,6 +1997,10 @@ router.get('/admin/winners', requireAuth, async (req, res) => {
         sport: m.sport.slug,
         league: m.league,
         matchup: `${m.competitorA} vs ${m.competitorB}`,
+        // Rankings for the board, so two unfamiliar names carry some
+        // sense of who is favoured and by how far.
+        rankA: m.rankA ?? null,
+        rankB: m.rankB ?? null,
         startTime: m.startTime,
         status: m.status,
         predictedWinner: pick?.selection ?? null,

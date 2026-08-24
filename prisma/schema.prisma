@@ -182,6 +182,13 @@ model Match {
   // Prisma only supports // comments - a /* */ block here failed the
   // build with nine "not a valid field definition" errors.
   tour         String?
+
+  // Current world ranking of each player at the time of analysis.
+  // Shown beside the names on the board: with 130 matches across seven
+  // tournaments, names alone give no sense of who is favoured or how far
+  // apart the two are.
+  rankA        Int?
+  rankB        Int?
   bestOddsA    Int?
   bestOddsB    Int?
   bestBookA    String?
