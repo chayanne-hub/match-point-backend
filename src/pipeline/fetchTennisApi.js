@@ -658,8 +658,19 @@ async function fetchH2HFull(tour, id1, id2) {
        * nothing is shown when they are not. The form strip below still
        * comes from the ten games, which is exactly what a form strip is
        * meant to be. */
-      ytd: (pl.ytdWon != null || pl.ytdLost != null)
-        ? { wins: pl.ytdWon ?? 0, losses: pl.ytdLost ?? 0,
+      /* A ZERO SEASON RECORD MEANS "NOT TRACKED", NOT "NO WINS".
+       *
+       * The provider returns ytdWon/ytdLost as 0 for players it does not
+       * track at that level, rather than omitting them. Andaloro came
+       * back 0-0 for 2026 while his own surface summary shows 14-13 this
+       * season — so a present-but-zero field is absence, not a record.
+       *
+       * Treating 0-0 as real would print "0-0 0%" beside a player who
+       * has played twenty-seven matches this year, which is worse than
+       * printing nothing. Both sides at zero is therefore read as
+       * missing. */
+      ytd: (Number(pl.ytdWon) || Number(pl.ytdLost))
+        ? { wins: Number(pl.ytdWon) || 0, losses: Number(pl.ytdLost) || 0,
             pct: pl.ytdWLPercentage ?? null, titles: pl.ytdTitles ?? null }
         : { wins: null, losses: null, pct: null, titles: pl.ytdTitles ?? null },
       /* CAREER MUST NOT BE THE LAST TEN.
