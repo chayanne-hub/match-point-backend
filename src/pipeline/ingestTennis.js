@@ -18,7 +18,7 @@
  * dropped middle names) that broke the ESPN join before.
  */
 
-const { fetchUpcomingFixtures, fetchLiveEvents, fetchMatchOdds, resolveExtendId, fetchPlayerRecentResult } = require('./fetchTennisApi.js');
+const { fetchUpcomingFixtures, fetchLiveEvents, fetchMatchOdds, resolveExtendId, fetchPlayerRecentResult, fetchLatestRankings } = require('./fetchTennisApi.js');
 // Safe as a top-level require: the runner never requires this file, so the
 // dependency runs one way only (verified against the require graph).
 const { getLiveSnapshot } = require('./tennisLiveRunner.js');
@@ -52,6 +52,9 @@ async function ingestTennisFixtures() {
     console.error('[tennisIngest] no tennis sport row — cannot ingest');
     return { created: 0, updated: 0, skipped: 0 };
   }
+
+  // One lookup for the whole cycle; cached upstream for hours.
+  const rankMap = await buildRankMap().catch(() => new Map());
 
   let idCollisions = 0;
   let created = 0, updated = 0, skipped = 0, priced = 0, unpriced = 0;
@@ -147,6 +150,13 @@ async function ingestTennisFixtures() {
        * the surface-fit factor and left the analyst to guess the venue
        * from search. */
       if (!existing.surface && f.surface) enrich.surface = f.surface;
+      // Backfill rankings onto rows written before they were stored.
+      if (!existing.rankA && f.playerAId && rankMap.has(String(f.playerAId))) {
+        enrich.rankA = rankMap.get(String(f.playerAId));
+      }
+      if (!existing.rankB && f.playerBId && rankMap.has(String(f.playerBId))) {
+        enrich.rankB = rankMap.get(String(f.playerBId));
+      }
       if ((existing.roundId === null || existing.roundId === undefined) && f.roundId !== null && f.roundId !== undefined) {
         enrich.roundId = Number(f.roundId);
       }
@@ -323,6 +333,8 @@ async function ingestTennisFixtures() {
         tournamentId: f.tournamentId ? String(f.tournamentId) : undefined,
         tour: f.tour ? String(f.tour).toLowerCase() : undefined,
         surface: f.surface || undefined,
+        rankA: f.playerAId ? (rankMap.get(String(f.playerAId)) ?? undefined) : undefined,
+        rankB: f.playerBId ? (rankMap.get(String(f.playerBId)) ?? undefined) : undefined,
         roundId: (f.roundId === null || f.roundId === undefined) ? undefined : Number(f.roundId),
       },
       create: {
@@ -332,6 +344,8 @@ async function ingestTennisFixtures() {
         tournamentId: f.tournamentId ? String(f.tournamentId) : null,
         tour: f.tour ? String(f.tour).toLowerCase() : null,
         surface: f.surface || null,
+        rankA: f.playerAId ? (rankMap.get(String(f.playerAId)) ?? null) : null,
+        rankB: f.playerBId ? (rankMap.get(String(f.playerBId)) ?? null) : null,
         roundId: (f.roundId === null || f.roundId === undefined) ? null : Number(f.roundId),
         sportId: sport.id,
         league: f.league || (f.tour || 'ATP').toUpperCase(),
@@ -781,6 +795,31 @@ async function closeStaleScheduledTennis() {
  * plausibly underway, and capped per cycle so it cannot become a large
  * recurring API cost.
  */
+/* RANK LOOKUP FOR THE WHOLE TOUR, IN TWO CALLS.
+ *
+ * Rankings were only written during analysis, so an unanalysed row had
+ * none — and that is exactly the row a member most needs them on, since
+ * there is no pick to judge it by yet.
+ *
+ * The fixture payload carries no rank, and asking per player would be
+ * ~350 calls a cycle. The rankings endpoint returns the ENTIRE list for
+ * a tour in one call, so both tours cost two calls and cover everyone.
+ * fetchLatestRankings already caches for hours, so most cycles pay
+ * nothing at all.
+ */
+async function buildRankMap() {
+  const map = new Map();
+  for (const tour of ['atp', 'wta']) {
+    const res = await fetchLatestRankings(tour).catch(() => null);
+    for (const row of (res?.rows || [])) {
+      const id = row.playerId ?? row.player?.id ?? row.id;
+      const pos = Number(row.position ?? row.rank);
+      if (id && Number.isFinite(pos)) map.set(String(id), pos);
+    }
+  }
+  return map;
+}
+
 async function promoteStartedMatches({ limit = 12 } = {}) {
   const sport = await db.sport.findFirst({ where: { slug: 'tennis' } });
   if (!sport) return { promoted: 0, checked: 0 };
