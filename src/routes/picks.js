@@ -545,6 +545,15 @@ async function shapePick(p, userId) {
      * every pick as equivalent. */
     sportKey: p.match.sportKey ?? null,
     matchup: `${p.match.competitorA} vs ${p.match.competitorB}`,
+    /* Tour and rankings for the board.
+     *
+     * These were added to /admin/diagnose and /admin/winners by mistake —
+     * the patch matched `matchup:` and took the first two hits, neither of
+     * which was this route. So the board never received them: every row
+     * fell back to ATP and no rank badge could render. */
+    tour: p.match.tour ?? null,
+    rankA: p.match.rankA ?? null,
+    rankB: p.match.rankB ?? null,
     startTime: p.match.startTime,
     pickType: p.pickType,
     market: p.market, // 'moneyline' | 'spread' | 'total' — callers that opted into ?markets=all need this to tell picks apart
@@ -677,6 +686,9 @@ function shapeUnanalyzedMatch(m) {
     sport: m.sport.slug,
     league: m.league,
     matchup: `${m.competitorA} vs ${m.competitorB}`,
+    tour: m.tour ?? null,
+    rankA: m.rankA ?? null,
+    rankB: m.rankB ?? null,
     startTime: m.startTime,
     pickType: 'pending',
     market: 'moneyline',
