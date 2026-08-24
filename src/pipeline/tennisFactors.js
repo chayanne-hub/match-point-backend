@@ -1271,6 +1271,15 @@ function clvPercent(entryOdds, closingOdds) {
 }
 
 module.exports = {
+  // Exported for the player-stat warm job, which caches these on a
+  // schedule so the brief reads from the database instead of paying
+  // provider latency per match.
+  fetchCareerServeReturn,
+  fetchBreakPoints,
+  fetchTitlesByTier,
+  fetchSurfaceByYear,
+  fetchStyle,
+  fetchPlayerStatus,
   fetchClosingLine,
   clvPercent,
   buildFactorBrief,

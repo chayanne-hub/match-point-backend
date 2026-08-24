@@ -65,6 +65,23 @@ initLiveSocket(server);
 startWatchdog();
 startReactiveOdds();
 if (!PAUSED) startScheduled();
+
+/* PLAYER STAT WARMING.
+ *
+ * Fills the PlayerStat cache for players who have a match on the board,
+ * so the factor brief reads from the database instead of making ~13
+ * provider calls per match for data that changes weekly.
+ *
+ * Costs API calls on a schedule rather than on the critical path, and
+ * means a provider outage leaves the brief with stale-but-real data
+ * rather than nothing — which is the failure mode that produced empty
+ * briefs repeatedly.
+ *
+ * PLAYER_STATS_OFF=true disables it. */
+if (!PAUSED && process.env.PLAYER_STATS_OFF !== 'true') {
+  const { startPlayerStatWarming } = require('./pipeline/playerStats');
+  startPlayerStatWarming();
+}
 // Re-enabled: live reassessment now runs, meaning confidence for a live
 // match will genuinely recalculate (and re-color) as the match unfolds
 // — real Claude API calls, every LIVE_PIPELINE_INTERVAL_MS (currently

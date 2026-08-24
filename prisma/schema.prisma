@@ -365,3 +365,60 @@ model InsiderAccount {
 
   @@unique([sport, handle])
 }
+
+// Cached per-player statistics.
+//
+// The factor brief makes ~19 provider calls per analysed match, and most
+// of them are about a PLAYER rather than the matchup: surface record by
+// year, career serve and return, break points, titles, ranking trend,
+// handedness, status. Those change weekly at most, yet were refetched
+// for every match a player appeared in.
+//
+// Caching them here means the brief reads from the database and the API
+// is called on a schedule instead of on the critical path. Two
+// consequences that matter: analysis gets faster, and a provider outage
+// degrades the brief to stale-but-real data rather than to nothing.
+//
+// `raw` keeps the untouched payloads so a parser can be improved later
+// without refetching everything.
+model PlayerStat {
+  id            String   @id @default(uuid())
+  playerId      String
+  tour          String   // 'atp' | 'wta'
+  name          String?
+  country       String?
+
+  rank          Int?
+  bestRank      Int?
+  points        Int?
+  rankTrend     String?  // 'up 12' | 'down 40' | 'flat'
+
+  plays         String?  // handedness
+  backhand      String?
+  status        String?  // 'Active', or an exception worth stating
+
+  careerWins    Int?
+  careerLosses  Int?
+  careerMatches Int?
+
+  // Aggregates that would otherwise cost a call each, per match.
+  firstServeIn  Int?
+  wonOnFirst    Int?
+  wonOnSecond   Int?
+  returnPtsWon  Int?
+  bpSaved       Int?
+  bpConverted   Int?
+  acesPerMatch  Float?
+  dfPerMatch    Float?
+
+  titles        String?  // "5 Slam, 10 Masters, 14 tour"
+  surfaceByYear Json?    // year -> { overall, bySurface }
+  raw           Json?    // untouched payloads, for reparsing later
+
+  fetchedAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([playerId, tour])
+  @@index([tour, rank])
+  @@index([fetchedAt])
+}
