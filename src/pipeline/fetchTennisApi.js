@@ -192,6 +192,354 @@ const COURT_MAP_TTL_MS = 24 * 60 * 60 * 1000;
  * going into a match is exactly the kind of fact that should move a
  * price, and it is one call.
  */
+/* ============================================================
+ * THE REMAINDER OF THE CATALOGUE
+ *
+ * Thin, uniform wrappers: call, return the payload, return null on
+ * anything unrecognised. They do NOT reshape their responses, because
+ * their shapes are unprobed and inventing a parse is how a wrong value
+ * reaches the model.
+ *
+ * Each returns the raw body so a caller can inspect it, and callers stay
+ * responsible for reading fields once a shape is confirmed. Nothing here
+ * is wired into the brief; they exist so the catalogue is covered and
+ * any one can be adopted without another round trip.
+ * ============================================================ */
+
+/** Returns the payload, or null for an error/empty response. */
+function _payload(body) {
+  if (!body) return null;
+  if (body.statusCode && Number(body.statusCode) >= 400) return null;
+  if (body.error === true) return null;
+  const rows = Array.isArray(body?.data) ? body.data : (Array.isArray(body) ? body : null);
+  if (rows) return rows.length ? rows : null;
+  if (typeof body === 'object' && Object.keys(body).length) return body;
+  return null;
+}
+
+/** default fixture window */
+async function fetchAllFixtures(tour) {
+  if (!tour) return null;
+  return _payload(await safe(() => apiGet(`${tour}/fixtures`)));
+}
+
+/** a scheduled future meeting */
+async function fetchFixturesH2H(tour, p1, p2) {
+  if (!tour) return null;
+  return _payload(await safe(() => apiGet(`${tour}/fixtures/h2h/${p1}/${p2}`)));
+}
+
+/** h2h summary, tour-first */
+async function fetchH2HInfo(tour, p1, p2) {
+  if (!tour) return null;
+  return _payload(await safe(() => apiGet(`${tour}/h2h/info/${p1}/${p2}`)));
+}
+
+/** filter options for a pairing */
+async function fetchH2HFilter(tour, p1, p2) {
+  if (!tour) return null;
+  return _payload(await safe(() => apiGet(`${tour}/h2h/filter/${p1}/${p2}`)));
+}
+
+/** every meeting between two players */
+async function fetchH2HMatches(tour, p1, p2) {
+  if (!tour) return null;
+  return _payload(await safe(() => apiGet(`${tour}/h2h/matches/${p1}/${p2}`)));
+}
+
+/** country reference list */
+async function fetchCountries() {
+  return _payload(await safe(() => apiGet('countries')));
+}
+
+/** ranking root */
+async function fetchRankingRoot() {
+  return _payload(await safe(() => apiGet('ranking')));
+}
+
+/** full player roster */
+async function fetchPlayerList(tour) {
+  if (!tour) return null;
+  return _payload(await safe(() => apiGet(`${tour}/player`)));
+}
+
+/** filter options for a player */
+async function fetchPlayerFilter(tour, id) {
+  if (!tour) return null;
+  return _payload(await safe(() => apiGet(`${tour}/player/filter/${id}`)));
+}
+
+/** past matches, id-keyed */
+async function fetchPastMatches(tour, id) {
+  if (!tour) return null;
+  return _payload(await safe(() => apiGet(`${tour}/player/past-matches/${id}`)));
+}
+
+/** finals reached, id-keyed */
+async function fetchPlayerFinals(tour, id) {
+  if (!tour) return null;
+  return _payload(await safe(() => apiGet(`${tour}/player/finals/${id}`)));
+}
+
+/** notable rivalries, id-keyed */
+async function fetchInterestingH2H(tour, id) {
+  if (!tour) return null;
+  return _payload(await safe(() => apiGet(`${tour}/player/intersting-h2h/${id}`)));
+}
+
+/** current singles ranking */
+async function fetchRankingSingles(tour) {
+  if (!tour) return null;
+  return _payload(await safe(() => apiGet(`${tour}/ranking/singles`)));
+}
+
+/** current doubles ranking */
+async function fetchRankingDoubles(tour) {
+  if (!tour) return null;
+  return _payload(await safe(() => apiGet(`${tour}/ranking/doubles`)));
+}
+
+/** top of the ranking */
+async function fetchRankingTop(tour) {
+  if (!tour) return null;
+  return _payload(await safe(() => apiGet(`ranking/${tour}/top`)));
+}
+
+/** ranking filter options */
+async function fetchRankingFilters(tour) {
+  if (!tour) return null;
+  return _payload(await safe(() => apiGet(`ranking/${tour}/filters`)));
+}
+
+/** tournament metadata */
+async function fetchTournamentInfo(tour, seasonId) {
+  if (!tour) return null;
+  return _payload(await safe(() => apiGet(`${tour}/tournament/info/${seasonId}`)));
+}
+
+/** seasons for a tournament */
+async function fetchTournamentSeasons(tour, seasonId) {
+  if (!tour) return null;
+  return _payload(await safe(() => apiGet(`${tour}/tournament/seasons/${seasonId}`)));
+}
+
+/** past champions (provider spelling) */
+async function fetchPastChampionsBySeason(tour, seasonId) {
+  if (!tour) return null;
+  return _payload(await safe(() => apiGet(`${tour}/tournament/past-champtions/${seasonId}`)));
+}
+
+/** results for a season */
+async function fetchTournamentResults(tour, seasonId) {
+  if (!tour) return null;
+  return _payload(await safe(() => apiGet(`${tour}/tournament/results/${seasonId}`)));
+}
+
+/** tournament by name */
+async function fetchTournamentByName(tour, name) {
+  if (!tour) return null;
+  return _payload(await safe(() => apiGet(`tournament/${tour}/${name}`)));
+}
+
+/** tournament in a given year */
+async function fetchTournamentByYear(tour, name, year) {
+  if (!tour) return null;
+  return _payload(await safe(() => apiGet(`tournament/${tour}/${name}/${year}`)));
+}
+
+/** most titles at an event */
+async function fetchMostVictories(tour, name) {
+  if (!tour) return null;
+  return _payload(await safe(() => apiGet(`tournament/${tour}/${name}/most-victories`)));
+}
+
+/** ranking points on offer */
+async function fetchTournamentPoints(tour, name, year) {
+  if (!tour) return null;
+  return _payload(await safe(() => apiGet(`tournament/${tour}/${name}/${year}/points`)));
+}
+
+/** past champions by year */
+async function fetchPastChampionsByYear(tour, name, year) {
+  if (!tour) return null;
+  return _payload(await safe(() => apiGet(`tournament/${tour}/${name}/${year}/past-champions`)));
+}
+
+/** season calendar */
+async function fetchCalendar(tour, year) {
+  if (!tour) return null;
+  return _payload(await safe(() => apiGet(`calendar/${tour}/${year}`)));
+}
+
+/** calendar filter options */
+async function fetchCalendarFilters(tour) {
+  if (!tour) return null;
+  return _payload(await safe(() => apiGet(`calendar/${tour}/filters`)));
+}
+
+/** slam winners */
+async function fetchGrandSlamChampions(tour) {
+  if (!tour) return null;
+  return _payload(await safe(() => apiGet(`calendar/${tour}/grand-slam-champions`)));
+}
+
+/** projected matchups */
+async function fetchPotentialFixtures(tour) {
+  if (!tour) return null;
+  return _payload(await safe(() => apiGet(`potential-fixtures/${tour}`)));
+}
+
+/** players in live draws */
+async function fetchPotentialActivePlayers(tour) {
+  if (!tour) return null;
+  return _payload(await safe(() => apiGet(`potential-fixtures/${tour}/active-players`)));
+}
+
+/** a player's projected path */
+async function fetchPotentialForPlayer(tour, id) {
+  if (!tour) return null;
+  return _payload(await safe(() => apiGet(`potential-fixtures/${tour}/player/${id}`)));
+}
+
+/** projected matchups in a draw */
+async function fetchPotentialForTournament(tour, tid) {
+  if (!tour) return null;
+  return _payload(await safe(() => apiGet(`potential-fixtures/${tour}/tournament/${tid}`)));
+}
+
+/** upcoming across tours */
+async function fetchUpcomingMatchesAll() {
+  return _payload(await safe(() => apiGet('upcoming/matches')));
+}
+
+/** upcoming for one tour */
+async function fetchUpcomingMatches(tour) {
+  if (!tour) return null;
+  return _payload(await safe(() => apiGet(`upcoming/matches/${tour}`)));
+}
+
+/** upcoming filter options */
+async function fetchUpcomingFilters() {
+  return _payload(await safe(() => apiGet('upcoming/filters')));
+}
+
+/** upcoming filters, per tour */
+async function fetchUpcomingFiltersByTour(tour) {
+  if (!tour) return null;
+  return _payload(await safe(() => apiGet(`upcoming/filters/${tour}`)));
+}
+
+/** headline matches today */
+async function fetchTopMatchesToday(tnType) {
+  if (!tnType) return null;
+  return _payload(await safe(() => apiGet(`upcoming/top-tennis-matches-today/${tnType}`)));
+}
+
+/** current meeting state */
+async function fetchH2HCurrent(tour, p1, p2) {
+  if (!tour) return null;
+  return _payload(await safe(() => apiGet(`h2h/current/${tour}/${p1}/${p2}`)));
+}
+
+/** a scheduled meeting */
+async function fetchH2HUpcoming(tour, p1, p2) {
+  if (!tour) return null;
+  return _payload(await safe(() => apiGet(`h2h/upcoming/${tour}/${p1}/${p2}`)));
+}
+
+/** filter options, vs mode */
+async function fetchH2HFiltersVs(p1, p2, tour) {
+  if (!p1) return null;
+  return _payload(await safe(() => apiGet(`h2h/filters/${p1}/${p2}/${tour}/vs`)));
+}
+
+/** filter options */
+async function fetchH2HFilters(p1, p2, tour) {
+  if (!p1) return null;
+  return _payload(await safe(() => apiGet(`h2h/filters/${p1}/${p2}/${tour}`)));
+}
+
+/** their most recent event */
+async function fetchRecentEventVs(tour, p1, p2) {
+  if (!tour) return null;
+  return _payload(await safe(() => apiGet(`h2h/player-vs-player/recent-event/${tour}/${p1}/${p2}`)));
+}
+
+/** rivalries, id-keyed */
+async function fetchRivalries(tour, id) {
+  if (!tour) return null;
+  return _payload(await safe(() => apiGet(`h2h/rivalries/${tour}/${id}`)));
+}
+
+/** most recent match */
+async function fetchLastMatchPlayed(tour, id) {
+  if (!tour) return null;
+  return _payload(await safe(() => apiGet(`h2h/last-match-played/${tour}/${id}`)));
+}
+
+/** player classification */
+async function fetchPlayerType(id) {
+  if (!id) return null;
+  return _payload(await safe(() => apiGet(`h2h/playerType/${id}`)));
+}
+
+/** performance breakdown by name */
+async function fetchProfileBreakdown(name) {
+  if (!name) return null;
+  return _payload(await safe(() => apiGet(`profile/${name}/breakdown`)));
+}
+
+/** profile filter options */
+async function fetchProfileFilters(name) {
+  if (!name) return null;
+  return _payload(await safe(() => apiGet(`profile/${name}/filters`)));
+}
+
+/** match stats for a year */
+async function fetchProfileMatchStat(name, year) {
+  if (!name) return null;
+  return _payload(await safe(() => apiGet(`profile/${name}/match-stat/${year}`)));
+}
+
+/** resolve a display name */
+async function fetchProfileSearch(name, tour) {
+  if (!name) return null;
+  return _payload(await safe(() => apiGet(`profile/search/${name}/${tour}`)));
+}
+
+/** team logo */
+async function fetchTeamLogo(teamId) {
+  if (!teamId) return null;
+  return _payload(await safe(() => apiGet(`profile/team-logo/${teamId}`)));
+}
+
+/** market list */
+async function fetchMarkets() {
+  return _payload(await safe(() => apiGet('extend/api/markets/all')));
+}
+
+/** how many matches are in play */
+async function fetchLiveCount() {
+  return _payload(await safe(() => apiGet('extend/api/events/live/count')));
+}
+
+/** live events, extend space */
+async function fetchLiveEventsExtend() {
+  return _payload(await safe(() => apiGet('extend/api/events/live')));
+}
+
+/** point by point, by players */
+async function fetchPbpByPlayers(p1, p2, tourId, roundId) {
+  if (!p1) return null;
+  return _payload(await safe(() => apiGet(`extend/api/event/pbp/${p1}/${p2}/${tourId}/${roundId}`)));
+}
+
+/** point by point, one game */
+async function fetchPbpByEvent(eventId, set, game) {
+  if (!eventId) return null;
+  return _payload(await safe(() => apiGet(`extend/api/event/pbp/${eventId}/${set}/${game}`)));
+}
+
 async function fetchPlayerStatus(name) {
   if (!name) return null;
   const body = await safe(() => apiGet(`profile/${encodeURIComponent(name)}/player-status`));
@@ -1358,6 +1706,61 @@ async function discoverOddsPath(sampleEventId) {
 }
 
 module.exports = {
+  fetchAllFixtures,
+  fetchFixturesH2H,
+  fetchH2HInfo,
+  fetchH2HFilter,
+  fetchH2HMatches,
+  fetchCountries,
+  fetchRankingRoot,
+  fetchPlayerList,
+  fetchPlayerFilter,
+  fetchPastMatches,
+  fetchPlayerFinals,
+  fetchInterestingH2H,
+  fetchRankingSingles,
+  fetchRankingDoubles,
+  fetchRankingTop,
+  fetchRankingFilters,
+  fetchTournamentInfo,
+  fetchTournamentSeasons,
+  fetchPastChampionsBySeason,
+  fetchTournamentResults,
+  fetchTournamentByName,
+  fetchTournamentByYear,
+  fetchMostVictories,
+  fetchTournamentPoints,
+  fetchPastChampionsByYear,
+  fetchCalendar,
+  fetchCalendarFilters,
+  fetchGrandSlamChampions,
+  fetchPotentialFixtures,
+  fetchPotentialActivePlayers,
+  fetchPotentialForPlayer,
+  fetchPotentialForTournament,
+  fetchUpcomingMatchesAll,
+  fetchUpcomingMatches,
+  fetchUpcomingFilters,
+  fetchUpcomingFiltersByTour,
+  fetchTopMatchesToday,
+  fetchH2HCurrent,
+  fetchH2HUpcoming,
+  fetchH2HFiltersVs,
+  fetchH2HFilters,
+  fetchRecentEventVs,
+  fetchRivalries,
+  fetchLastMatchPlayed,
+  fetchPlayerType,
+  fetchProfileBreakdown,
+  fetchProfileFilters,
+  fetchProfileMatchStat,
+  fetchProfileSearch,
+  fetchTeamLogo,
+  fetchMarkets,
+  fetchLiveCount,
+  fetchLiveEventsExtend,
+  fetchPbpByPlayers,
+  fetchPbpByEvent,
   fetchPlayerStatus,
   fetchOddsComparison,
   fetchBiggestMovements,
