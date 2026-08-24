@@ -298,6 +298,12 @@ router.get('/today', async (req, res) => {
       // normal (non-final) mode.
       ...(includeFinal ? {} : { skipAnalysis: false }),
       ...(sport ? { sport: { slug: sport } } : { sport: { slug: { notIn: disabledSports() } } }),
+      /* The OTHER today-query. Line 247 above is the picks lookup;
+       * THIS is the main board fetch, and it was left unfiltered
+       * because the two lines are identical apart from indentation —
+       * a single-match assertion passed on the wrong one and every ITF
+       * row kept coming through the API. */
+      ...tierFilter(),
     },
     include: {
       sport: true,
