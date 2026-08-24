@@ -2278,6 +2278,13 @@ router.get('/:id', async (req, res) => {
     playerAId: pick.match.playerAId || null,
     playerBId: pick.match.playerBId || null,
     tourLevel: pick.match.tourLevel ?? null,
+    /* The stored tour, so the drawer stops inferring it from the league
+     * name. That heuristic tested for "wta" or "women" in the title —
+     * which "Abierto GNP Seguros - Monterrey" contains neither of, so a
+     * WTA match queried the ATP index and returned count:0. The provider
+     * has 257 matches for that player under wta; we were simply asking
+     * the wrong index. */
+    tour: pick.match.tour || null,
     competitorB: pick.match.competitorB,
     startTime: pick.match.startTime,
     surface: pick.match.surface,
