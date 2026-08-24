@@ -699,7 +699,11 @@ ${JSON_VALIDITY_REMINDER}
    * analyst falls back to search exactly as before.
    */
   const matchDescription = `${competitorA} vs ${competitorB} (${sport}), ${new Date(startTime).toISOString()}. ${oddsContext} ${spreadContext} ${totalContext}`
-    + (verifiedData ? `\n${verifiedData}\nThese figures come from the tennis data provider and are accurate — do not re-research them. Use search only for the two things the data above cannot cover: court speed at this venue, and motivation (what each player has to play for). Everything else \u2014 head to head, surface, form, ranking, venue record, workload, travel, home advantage, recent retirements, playing style and the serve/return match-up \u2014 is in the data above when known. Where a line is absent, that fact is simply unavailable: do not search for it and do not assume a value.` : '');
+    + (verifiedData ? `\n${verifiedData}\nThese figures come from the tennis data provider and are accurate — do not re-research them.
+The TOURNAMENT, SURFACE and DATE given above are authoritative. If a search
+result describes these players at a different event, that is a different match
+— do not substitute it. Reason about the event named here, and if the surface
+or venue is not given, say so rather than inferring one from search. Use search only for the two things the data above cannot cover: court speed at this venue, and motivation (what each player has to play for). Everything else \u2014 head to head, surface, form, ranking, venue record, workload, travel, home advantage, recent retirements, playing style and the serve/return match-up \u2014 is in the data above when known. Where a line is absent, that fact is simply unavailable: do not search for it and do not assume a value.` : '');
 
   // Real research with web search can legitimately take a while, but a
   // single hung request must never be allowed to block the entire
@@ -909,7 +913,18 @@ ${JSON_VALIDITY_REMINDER}
  * Returns the same shape as analyzeMatch(): { selection, confidence,
  * analysis, factors }. Returns null (never throws) on failure.
  */
-async function reassessLiveMatch({ sport, competitorA, competitorB, liveScore, oddsA, oddsB, priorAnalysis }) {
+/* `verifiedData` — the factor brief — was never a parameter here.
+ *
+ * The live analyst received the two names, a score and a price, and
+ * nothing else. So a live match with no score yet produced a read built
+ * entirely from the market: "the moneyline of -370 implies a strong
+ * in-match advantage", "no prior scouting report is available". That is
+ * the price restated with a confidence number attached.
+ *
+ * The brief exists and is already built for these matches — head to
+ * head, surface, form, workload, ranking. Passing it through means the
+ * live read is anchored in the same evidence the pre-match read uses. */
+async function reassessLiveMatch({ sport, competitorA, competitorB, liveScore, oddsA, oddsB, priorAnalysis, verifiedData }) {
   if (!process.env.ANTHROPIC_API_KEY) {
     console.error('[match-analyst] ANTHROPIC_API_KEY not set — cannot reassess live match.');
     return null;
@@ -952,6 +967,11 @@ ${oddsContext}
 
 Your original pre-match analysis:
 ${priorAnalysis || '(not available)'}
+${verifiedData ? `\n${verifiedData}\nThese figures come from the tennis data provider and are accurate — do not re-research them.
+The TOURNAMENT, SURFACE and DATE given above are authoritative. If a search
+result describes these players at a different event, that is a different match
+— do not substitute it. Reason about the event named here, and if the surface
+or venue is not given, say so rather than inferring one from search.\n` : ''}
 
 Give an updated read on who wins from here. Weigh the live score and each
 player's known skill/tendencies/history (from your original scouting)

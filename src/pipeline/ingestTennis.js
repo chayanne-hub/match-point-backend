@@ -143,6 +143,10 @@ async function ingestTennisFixtures() {
        * so losing this meant every WTA lookup queried the men's index and
        * came back empty. */
       if (!existing.tour && f.tour) enrich.tour = String(f.tour).toLowerCase();
+      /* Surface backfill. Every row had a null surface, which disabled
+       * the surface-fit factor and left the analyst to guess the venue
+       * from search. */
+      if (!existing.surface && f.surface) enrich.surface = f.surface;
       if ((existing.roundId === null || existing.roundId === undefined) && f.roundId !== null && f.roundId !== undefined) {
         enrich.roundId = Number(f.roundId);
       }
@@ -318,6 +322,7 @@ async function ingestTennisFixtures() {
         playerBId: f.playerBId ? String(f.playerBId) : undefined,
         tournamentId: f.tournamentId ? String(f.tournamentId) : undefined,
         tour: f.tour ? String(f.tour).toLowerCase() : undefined,
+        surface: f.surface || undefined,
         roundId: (f.roundId === null || f.roundId === undefined) ? undefined : Number(f.roundId),
       },
       create: {
@@ -326,6 +331,7 @@ async function ingestTennisFixtures() {
         playerBId: f.playerBId ? String(f.playerBId) : null,
         tournamentId: f.tournamentId ? String(f.tournamentId) : null,
         tour: f.tour ? String(f.tour).toLowerCase() : null,
+        surface: f.surface || null,
         roundId: (f.roundId === null || f.roundId === undefined) ? null : Number(f.roundId),
         sportId: sport.id,
         league: f.league || (f.tour || 'ATP').toUpperCase(),

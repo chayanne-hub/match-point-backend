@@ -151,6 +151,33 @@ function tierFromName(name, rankId) {
   return 3;
 }
 
+/* Court id to surface name.
+ *
+ * The fixture payload carries tournament.courtId and shapeFixture threw
+ * it away, so every Match row had a null surface — all 134 of them. That
+ * silently disabled two things: the surface-fit factor, and the
+ * year-by-year surface record, which scopes itself by match.surface and
+ * matches nothing when there is nothing to match.
+ *
+ * It also let the analyst fill the gap by searching, which is how a
+ * Roehampton Challenger match acquired a venue and court-speed read
+ * about the US Open.
+ *
+ * Ids observed in the calendar and fixture payloads: 1 Hard, 2 Clay,
+ * 3 Grass, 4 Indoor hard, 5 Carpet. Anything unrecognised returns null
+ * rather than a guess — a wrong surface is worse than none.
+ */
+const COURT_BY_ID = { 1: 'Hard', 2: 'Clay', 3: 'Grass', 4: 'Indoor Hard', 5: 'Carpet' };
+
+function surfaceFromFixture(fx) {
+  const t = fx?.tournament || {};
+  // A name, when present, beats the id: the provider spells it directly.
+  const named = t.court?.name || t.courtName || null;
+  if (named) return String(named).replace(/^i\.?\s*hard$/i, 'Indoor Hard');
+  const id = Number(t.courtId);
+  return Number.isFinite(id) ? (COURT_BY_ID[id] || null) : null;
+}
+
 function shapeFixture(fx, tourType) {
   const rankId = fx?.tournament?.rankId;
   return {
@@ -174,6 +201,7 @@ function shapeFixture(fx, tourType) {
      * overwrite rather than duplicate, so the table showed 666 rows and
      * 666 distinct ids while a large share of them were corrupt. */
     sourceId: `sa365:${tourType}:${fx.id}`,
+    surface: surfaceFromFixture(fx),
     externalId: fx.id,
     tour: tourType,
     startTime: fx.date ? new Date(fx.date) : null,
