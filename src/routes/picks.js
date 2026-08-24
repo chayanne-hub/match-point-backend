@@ -1435,6 +1435,10 @@ router.get('/admin/diagnose', requireAuth, async (req, res) => {
         // sense of who is favoured and by how far.
         rankA: m.rankA ?? null,
         rankB: m.rankB ?? null,
+        // Tour, so the board can split ATP from WTA without inferring it
+        // from the league name — that heuristic already failed once on
+        // "Abierto GNP Seguros - Monterrey", which names neither.
+        tour: m.tour ?? null,
         oddsA: m.oddsA, oddsB: m.oddsB,
         oddsBook: m.oddsBook ?? null,
         bookCount: m.bookCount ?? null,
@@ -2001,6 +2005,10 @@ router.get('/admin/winners', requireAuth, async (req, res) => {
         // sense of who is favoured and by how far.
         rankA: m.rankA ?? null,
         rankB: m.rankB ?? null,
+        // Tour, so the board can split ATP from WTA without inferring it
+        // from the league name — that heuristic already failed once on
+        // "Abierto GNP Seguros - Monterrey", which names neither.
+        tour: m.tour ?? null,
         startTime: m.startTime,
         status: m.status,
         predictedWinner: pick?.selection ?? null,
