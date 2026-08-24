@@ -560,7 +560,19 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
       console.warn(`[tennisUpcoming] ${match.competitorA} vs ${match.competitorB}: no player ids stored — cannot build a factor brief.`);
     }
 
-    const verifiedData = renderFactorBrief(brief, { surface: match.surface });
+    /* TENNIS_FACTOR_BRIEF=off reverts to search-only grading.
+     *
+     * The brief is ADDITIVE — the analyst still searches for whatever it
+     * does not cover — so turning it off hands every factor back to
+     * search, which is how this worked before the brief existed.
+     *
+     * Provided as a runtime switch rather than a code revert so the two
+     * can be compared on the same slate without a deploy, and switched
+     * back the moment the comparison says to. */
+    const briefEnabled = process.env.TENNIS_FACTOR_BRIEF !== 'off';
+    const verifiedData = briefEnabled
+      ? renderFactorBrief(brief, { surface: match.surface })
+      : '';
 
     /* NO EVIDENCE, NO PICK.
      *
@@ -581,7 +593,10 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
      * confident-sounding rationale does the most damage.
      *
      * Set TENNIS_REQUIRE_EVIDENCE=false to publish regardless. */
-    const requireEvidence = process.env.TENNIS_REQUIRE_EVIDENCE !== 'false';
+    // With the brief off there is deliberately no verified data, so the
+    // evidence gate would block every pick. It only applies when the
+    // brief is meant to be supplying something.
+    const requireEvidence = briefEnabled && process.env.TENNIS_REQUIRE_EVIDENCE !== 'false';
     const hasEvidence = Boolean(verifiedData && verifiedData.trim().length > 0);
 
     if (requireEvidence && !hasEvidence) {
