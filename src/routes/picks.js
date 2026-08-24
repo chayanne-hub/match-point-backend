@@ -173,6 +173,43 @@ function resolveOptionalUser(req) {
  * one needing its own list. Same variable the pipeline uses, so the two
  * can never drift apart.
  */
+/* TIERS EXCLUDED FROM THE PUBLISHED RECORD.
+ *
+ * Dropping ITF from the pipeline stops NEW picks being made there, but
+ * the hundreds already graded stay in the database and keep counting
+ * toward the headline win rate. That leaves the number on screen
+ * describing a model that is no longer running.
+ *
+ * Same reasoning as disabledSports(): a sport or tier that has been
+ * switched off should not be evidence for the product as it stands.
+ * Nothing is deleted — clearing this variable brings the history back.
+ *
+ * TENNIS_EXCLUDED_TIERS=0 excludes ITF (tourLevel 0).
+ */
+function excludedTiers() {
+  /* Empty entries are dropped BEFORE the Number() conversion.
+   *
+   * Without that, TENNIS_EXCLUDED_TIERS="" — the natural way to say
+   * "exclude nothing" — parsed as [''] and then Number('') === 0, which
+   * excludes ITF: the exact opposite of what was asked for. */
+  return String(process.env.TENNIS_EXCLUDED_TIERS ?? '0')
+    .split(',')
+    .map((t) => t.trim())
+    .filter((t) => t !== '')
+    .map(Number)
+    .filter((t) => Number.isFinite(t));
+}
+
+/* Prisma filter fragment for the Match relation. Excludes the tiers
+ * above while KEEPING rows whose tourLevel is null — an unknown tier is
+ * not evidence of being ITF, and silently dropping those would repeat
+ * the mistake the fixture filter made with Grand Slams. */
+function tierFilter() {
+  const tiers = excludedTiers();
+  if (!tiers.length) return {};
+  return { OR: [{ tourLevel: null }, { tourLevel: { notIn: tiers } }] };
+}
+
 function disabledSports() {
   return (process.env.DISABLED_SPORTS === undefined ? 'baseball,soccer' : process.env.DISABLED_SPORTS)
     .split(',').map((x) => x.trim().toLowerCase()).filter(Boolean);
@@ -799,7 +836,7 @@ router.get('/stats', async (req, res) => {
         // the same day's results were counted differently in two places on
         // one screen. Widened to a genuine corruption bound.
         odds: { gte: -100000, lte: 100000 },
-        ...(sport ? { match: { sport: { slug: sport } } } : {}),
+        ...(sport ? { match: { sport: { slug: sport }, ...tierFilter() } } : { match: tierFilter() }),
       },
     },
     include: { pick: { include: { match: true } } },
@@ -868,7 +905,7 @@ router.get('/stats', async (req, res) => {
   // since the FIRST pick was created — a genuine all-time daily pace,
   // not diluted by a fixed window.
   const allPicks = await db.pick.findMany({
-    where: sport ? { match: { sport: { slug: sport } } } : {},
+    where: sport ? { match: { sport: { slug: sport }, ...tierFilter() } } : { match: tierFilter() },
     distinct: ['matchId'],
     select: { matchId: true, createdAt: true },
     orderBy: { createdAt: 'asc' },
@@ -1475,7 +1512,7 @@ router.get('/admin/loss-review', requireAuth, async (req, res) => {
           market: 'moneyline',
           pickType: { in: ['model', 'winner'] },
           confidence: { gte: minConfidence },
-          ...(sport ? { match: { sport: { slug: sport } } } : {}),
+          ...(sport ? { match: { sport: { slug: sport }, ...tierFilter() } } : { match: tierFilter() }),
         },
       },
       include: { pick: { include: { match: { include: { sport: true } } } } },
@@ -2300,8 +2337,8 @@ router.get('/archive/results', async (req, res) => {
          * Same DISABLED_SPORTS variable the pipeline uses, so re-enabling
          * a sport brings its history back with it. Nothing is deleted. */
         ...(sport
-          ? { match: { sport: { slug: sport } } }
-          : { match: { sport: { slug: { notIn: disabledSports() } } } }),
+          ? { match: { sport: { slug: sport }, ...tierFilter() } }
+          : { match: { sport: { slug: { notIn: disabledSports() } }, ...tierFilter() } }),
       },
     },
     include: { pick: { include: { match: { include: { sport: true } } } } },
