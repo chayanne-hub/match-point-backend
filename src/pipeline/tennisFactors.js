@@ -581,7 +581,119 @@ async function leftyExposure(tour, games, playerId, limit = 8) {
   return { lefties, of: known };
 }
 
-async function buildFactorBrief({ tour = 'atp', nameA, nameB, playerAId, playerBId, tournamentId }) {
+/* SURFACE RECORD BY YEAR, not just career.
+ *
+ * The brief used h2h/surfaceBreakdown, which returns career totals only.
+ * player/surface-summary/{id} returns the same split BROKEN DOWN BY
+ * YEAR, and the difference is the whole signal.
+ *
+ * Andaloro's career reads 110-58 on hard and 47-50 on clay — useful. But
+ * year by year it reads 60-24 in 2025 and 14-13 in 2026, with this
+ * season's damage concentrated on clay (5-8) while hard holds up (9-5).
+ * A career average cannot show a player falling off, or falling off on
+ * ONE surface. That is what separates "48% on clay" from "collapsing on
+ * clay this season, still fine on hard".
+ *
+ * Returns the current season, the previous one, and career totals, so
+ * the analyst can see both the level and the direction.
+ */
+async function fetchSurfaceByYear(tour, playerId, surfaceName) {
+  if (!playerId) return null;
+  const body = await safe(() => apiGet(`${tour}/player/surface-summary/${encodeURIComponent(playerId)}`));
+  const rows = body?.data;
+  if (!Array.isArray(rows) || !rows.length) return null;
+
+  // Court names in this payload: Hard, Clay, Grass, I.hard, Carpet.
+  const matchesSurface = (court) => {
+    if (!surfaceName) return false;
+    const c = String(court || '').toLowerCase();
+    const want = String(surfaceName).toLowerCase();
+    if (/indoor/.test(want)) return c === 'i.hard';
+    if (/hard/.test(want)) return c === 'hard' || c === 'i.hard';
+    if (/clay/.test(want)) return c === 'clay';
+    if (/grass/.test(want)) return c === 'grass';
+    return false;
+  };
+
+  const sumYear = (row) => {
+    let w = 0, l = 0, sw = 0, sl = 0;
+    for (const c of row.surfaces || []) {
+      w += Number(c.courtWins) || 0;
+      l += Number(c.courtLosses) || 0;
+      if (matchesSurface(c.court)) {
+        sw += Number(c.courtWins) || 0;
+        sl += Number(c.courtLosses) || 0;
+      }
+    }
+    return { year: row.year, wins: w, losses: l, surfaceWins: sw, surfaceLosses: sl };
+  };
+
+  const byYear = rows.map(sumYear).sort((a, b) => b.year - a.year);
+  const current = byYear[0] || null;
+  const previous = byYear[1] || null;
+
+  let cw = 0, cl = 0, csw = 0, csl = 0;
+  for (const y of byYear) {
+    cw += y.wins; cl += y.losses; csw += y.surfaceWins; csl += y.surfaceLosses;
+  }
+
+  const pct = (w, l) => (w + l > 0 ? Math.round((w / (w + l)) * 100) : null);
+
+  return {
+    current, previous,
+    career: { wins: cw, losses: cl, pct: pct(cw, cl) },
+    careerOnSurface: { wins: csw, losses: csl, pct: pct(csw, csl) },
+    currentOnSurface: current
+      ? { wins: current.surfaceWins, losses: current.surfaceLosses,
+          pct: pct(current.surfaceWins, current.surfaceLosses) }
+      : null,
+  };
+}
+
+/* CAREER SERVE AND RETURN — the whole record, not the last ten matches.
+ *
+ * serveReturnProfile() aggregates from h2h/recent, which caps at ten
+ * matches. That is a small and noisy sample: one blowout swings a serve
+ * percentage several points.
+ *
+ * This endpoint returns the same measures over a player's ENTIRE career
+ * — 159 matches for a Challenger qualifier, hundreds for a tour regular.
+ * Both are worth having: career is the stable baseline, recent is the
+ * current state, and the gap between them is itself signal. A player
+ * serving well below his career norm over ten matches is in a slump; the
+ * career figure alone cannot show that.
+ *
+ * Note the path: {type}/h2h/vs-all-stats/{id}, tour FIRST. The other
+ * ordering 404s.
+ */
+async function fetchCareerServeReturn(tour, playerId) {
+  if (!playerId) return null;
+  const body = await safe(() => apiGet(`${tour}/h2h/vs-all-stats/${encodeURIComponent(playerId)}`));
+  const st = body?.data?.playerStats;
+  if (!st || !st.statMatchesPlayed) return null;
+
+  const pct = (a, b) => {
+    const x = Number(a), y = Number(b);
+    return (Number.isFinite(x) && Number.isFinite(y) && y > 0) ? Math.round((x / y) * 100) : null;
+  };
+  const n = Number(st.statMatchesPlayed) || 0;
+  const per = (v) => (n > 0 && Number.isFinite(Number(v))) ? Math.round((Number(v) / n) * 10) / 10 : null;
+
+  return {
+    matches: n,
+    won: Number(st.matchesWon) || 0,
+    winPct: pct(st.matchesWon, n),
+    firstServeIn: pct(st.firstServe, st.firstServeOf),
+    wonOnFirst: pct(st.winningOnFirstServe, st.winningOnFirstServeOf),
+    wonOnSecond: pct(st.winningOnSecondServe, st.winningOnSecondServeOf),
+    returnPtsWon: pct(st.returnPtsWin ?? st.rpw, st.returnPtsWinOf ?? st.rpwOf),
+    breakPtsWon: pct(st.breakPointsConverted, st.breakPointsConvertedOf),
+    acesPerMatch: per(st.aces),
+    dfPerMatch: per(st.doubleFaults),
+  };
+}
+
+async function buildFactorBrief({ tour = 'atp', nameA, nameB, playerAId, playerBId, tournamentId, surfaceName = null }) {
   const [h2h, surfA, surfB, formA, formB, venueA, venueB, rankA, rankB, tierA, tierB, loadA, loadB, ctxA, ctxB, styleA, styleB] = await Promise.all([
     fetchH2H(tour, nameA, nameB),
     fetchSurfaceRecord(tour, nameA),
@@ -600,6 +712,16 @@ async function buildFactorBrief({ tour = 'atp', nameA, nameB, playerAId, playerB
     fetchContext(tour, playerBId, tournamentId),
     fetchStyle(tour, nameA),
     fetchStyle(tour, nameB),
+  ]);
+
+  /* Year-by-year surface, scoped to THIS match's surface. One call per
+   * player, id-keyed, and far more informative than the career split the
+   * brief used before. */
+  const [byYearA, byYearB, careerSrA, careerSrB] = await Promise.all([
+    fetchSurfaceByYear(tour, playerAId, surfaceName),
+    fetchSurfaceByYear(tour, playerBId, surfaceName),
+    fetchCareerServeReturn(tour, playerAId),
+    fetchCareerServeReturn(tour, playerBId),
   ]);
 
   /* Serve/return profiles reuse the CACHED recent-match payload — the
@@ -626,9 +748,9 @@ async function buildFactorBrief({ tour = 'atp', nameA, nameB, playerAId, playerB
   return {
     h2h,
     playerA: { name: nameA, surface: surfA, form: formA, venue: venueA, ranking: rankA, tiers: tierA, load: loadA, ctx: ctxA, style: styleA, country: styleA ? styleA.country : null,
-      serveReturn: srA, lefty: aLefty, leftyExposure: expA },
+      serveReturn: srA, lefty: aLefty, leftyExposure: expA, byYear: byYearA, careerSr: careerSrA },
     playerB: { name: nameB, surface: surfB, form: formB, venue: venueB, ranking: rankB, tiers: tierB, load: loadB, ctx: ctxB, style: styleB, country: styleB ? styleB.country : null,
-      serveReturn: srB, lefty: bLefty, leftyExposure: expB },
+      serveReturn: srB, lefty: bLefty, leftyExposure: expB, byYear: byYearB, careerSr: careerSrB },
   };
 }
 
@@ -731,11 +853,56 @@ function renderFactorBrief(brief, { surface = null } = {}) {
      * matches. Stated as plain rates so the analyst can compare one
      * player's serve against the OTHER's return — the comparison that
      * makes "styles make matches" concrete rather than a slogan. */
+    /* SURFACE BY YEAR — level AND direction.
+     *
+     * Stated as this season, last season, and career on this surface, so
+     * a player who has fallen off is visible as such rather than hidden
+     * inside a career average. A season line alone would be noisy at
+     * small sample sizes; the career line alone cannot show decline.
+     * Both together let the analyst weigh them. */
+    if (P.byYear) {
+      const y = P.byYear;
+      const rec = (o) => (o && (o.wins + o.losses) > 0) ? `${o.wins}-${o.losses}` : null;
+      const bits = [];
+
+      if (y.current) {
+        const onSurf = rec(y.currentOnSurface);
+        bits.push(`${y.current.year}: ${y.current.wins}-${y.current.losses} overall` +
+          (onSurf ? `, ${onSurf} on this surface` : ''));
+      }
+      if (y.previous) {
+        bits.push(`${y.previous.year}: ${y.previous.wins}-${y.previous.losses}`);
+      }
+      if (y.careerOnSurface && (y.careerOnSurface.wins + y.careerOnSurface.losses) > 0) {
+        bits.push(`career on this surface ${y.careerOnSurface.wins}-${y.careerOnSurface.losses} (${y.careerOnSurface.pct}%)`);
+      }
+      if (bits.length) parts.push(`by year — ${bits.join('; ')}`);
+    }
+
     if (P.serveReturn) {
       const sr = P.serveReturn;
-      parts.push(`serve/return over ${sr.matches} matches: ${sr.firstServeIn}% first in, ` +
+      parts.push(`serve/return last ${sr.matches}: ${sr.firstServeIn}% first in, ` +
         `${sr.wonOnFirst}% won behind first, ${sr.wonOnSecond}% behind second, ` +
-        `returns ${sr.returnPtsWon}% of points, ${sr.acesPerMatch} aces and ${sr.dfPerMatch} double faults per match`);
+        `returns ${sr.returnPtsWon}%, ${sr.acesPerMatch} aces and ${sr.dfPerMatch} DF per match`);
+    }
+
+    /* CAREER serve/return, from the full record.
+     *
+     * The line above covers ten matches — enough to show current state,
+     * too few to be stable. This is the same measures over a career (159
+     * matches for a Challenger qualifier, hundreds for a tour regular).
+     *
+     * Both are stated because the GAP is the signal: a player serving
+     * well below his own career norm across ten matches is in a slump,
+     * and neither figure alone shows that. Only the headline rates are
+     * repeated here — restating aces and double faults twice would spend
+     * brief space on the least informative numbers. */
+    if (P.careerSr) {
+      const c = P.careerSr;
+      parts.push(`career (${c.matches} matches, ${c.winPct}% won): ` +
+        `${c.firstServeIn}% first in, ${c.wonOnFirst}% behind first, ` +
+        `${c.wonOnSecond}% behind second` +
+        (c.returnPtsWon != null ? `, returns ${c.returnPtsWon}%` : ''));
     }
     if (P.tiers) {
       const t = [];
