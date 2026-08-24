@@ -829,6 +829,45 @@ async function promoteStartedMatches({ limit = 12 } = {}) {
     console.log(`[tennisIngest] ${m.competitorA} vs ${m.competitorB} is under way (${st}) — moved to live`);
   }
 
+  /* TIME-BASED FALLBACK.
+   *
+   * Everything above depends on the provider resolving the match, and
+   * for lower tiers it often cannot — resolveExtendId covers a fraction
+   * of the calendar, and the live feed no longer carries the tiers we
+   * ingest. So matches sat at `scheduled` more than two hours past their
+   * start, reading "Match Analyzed" on the board while they were being
+   * played.
+   *
+   * A match well past its start time is under way. That is not a
+   * certainty — a rain delay or a postponement would make it wrong — but
+   * the cost of each error is asymmetric: showing "in play" for a
+   * delayed match is a small inaccuracy, while showing "Analyzed" for a
+   * match in its third set makes the board look broken and hides picks a
+   * member is holding.
+   *
+   * The stale sweep still closes these out with a final score, so a
+   * wrongly-promoted match corrects itself within the hour. */
+  const graceMin = Number(process.env.TENNIS_ASSUME_LIVE_AFTER_MIN || 25);
+  const stale = await db.match.findMany({
+    where: {
+      sportId: sport.id,
+      status: 'scheduled',
+      startTime: { lt: new Date(now - graceMin * 60 * 1000), gt: new Date(now - 8 * 60 * 60 * 1000) },
+      picks: { some: {} },
+    },
+    select: { id: true, competitorA: true, competitorB: true, startTime: true },
+    take: 40,
+  }).catch(() => []);
+
+  let assumed = 0;
+  for (const m of stale) {
+    const mins = Math.round((now - new Date(m.startTime).getTime()) / 60000);
+    await db.match.update({ where: { id: m.id }, data: { status: 'live' } }).catch(() => {});
+    assumed++;
+    console.log(`[tennisIngest] ${m.competitorA} vs ${m.competitorB} started ${mins}m ago and never resolved — assuming live`);
+  }
+  if (assumed) promoted += assumed;
+
   return { promoted, checked: candidates.length };
 }
 
