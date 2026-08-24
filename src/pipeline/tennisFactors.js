@@ -693,6 +693,89 @@ async function fetchCareerServeReturn(tour, playerId) {
   };
 }
 
+/* BREAK POINTS — the measure tennis actually turns on.
+ *
+ * Neither the recent nor the career serve/return line carried break
+ * points, and a tennis match is decided by a handful of them: hold
+ * percentage is mostly a function of saving the ones you face, and
+ * winning is mostly a function of converting the ones you get.
+ *
+ * This endpoint splits serve and return properly, so return points won
+ * is derivable here too — the vs-all-stats payload did not carry it.
+ */
+async function fetchBreakPoints(tour, playerId) {
+  if (!playerId) return null;
+  const body = await safe(() => apiGet(`${tour}/player/match-stats/${encodeURIComponent(playerId)}`));
+  const d = body?.data;
+  if (!d) return null;
+
+  const pct = (a, b) => {
+    const x = Number(a), y = Number(b);
+    return (Number.isFinite(x) && Number.isFinite(y) && y > 0) ? Math.round((x / y) * 100) : null;
+  };
+
+  const bpS = d.breakPointsServeStats || {};
+  const bpR = d.breakPointsRtnStats || {};
+  const rtn = d.rtnStats || {};
+
+  const saved = pct(bpS.breakPointSavedGm, bpS.breakPointFacedGm);
+  const won = pct(bpR.breakPointWonGm, bpR.breakPointChanceGm);
+
+  /* RETURN POINTS WON — inverted from the opponent's figures.
+   *
+   * rtnStats describes the OPPONENT serving against this player, not
+   * this player returning. Summing its "winning" fields gives points the
+   * opponent won, so reading them directly produced 59% return points
+   * won for Sinner — a number no player approaches; the real elite range
+   * is around 40%.
+   *
+   * The arithmetic identifies the fields: 27596 + 16793 = 44389, so
+   * firstServeOfGm is TOTAL return points, and the winning fields are
+   * the opponent's. What this player won is the remainder. */
+  const rptOf = Number(rtn.firstServeOfGm) || 0;
+  const oppWon = (Number(rtn.winningOnFirstServeGm) || 0) + (Number(rtn.winningOnSecondServeGm) || 0);
+  const rptWon = rptOf > 0 ? (rptOf - oppWon) : 0;
+
+  if (saved === null && won === null && !rptOf) return null;
+
+  return {
+    bpSaved: saved,
+    bpSavedOf: Number(bpS.breakPointFacedGm) || 0,
+    bpConverted: won,
+    bpConvertedOf: Number(bpR.breakPointChanceGm) || 0,
+    returnPtsWon: pct(rptWon, rptOf),
+  };
+}
+
+/* TITLES BY TIER — the level a player has actually won at.
+ *
+ * A bare title count flattens a Grand Slam and an ITF Futures into one
+ * number. This returns them separately, so "5 Slams, 10 Masters" can sit
+ * against "2 Futures titles" and the gap in level is explicit rather
+ * than implied by ranking alone.
+ *
+ * Only the meaningful tiers are kept: Futures counts are noise for a
+ * tour player and clutter for everyone else.
+ */
+async function fetchTitlesByTier(tour, playerId) {
+  if (!playerId) return null;
+  const body = await safe(() => apiGet(`${tour}/player/titles/${encodeURIComponent(playerId)}`));
+  const rows = body?.data;
+  if (!Array.isArray(rows) || !rows.length) return null;
+
+  const LABEL = {
+    4: 'Slam', 3: 'Masters', 7: 'Tour Finals', 2: 'tour', 1: 'Challenger', 0: 'Futures',
+  };
+  const out = [];
+  // Highest tier first, so the strongest achievement leads.
+  for (const id of [4, 3, 7, 2, 1, 0]) {
+    const row = rows.find((r) => Number(r.tourRankId) === id);
+    const won = Number(row?.titlesWon) || 0;
+    if (won > 0) out.push(`${won} ${LABEL[id]}`);
+  }
+  return out.length ? out.join(', ') : null;
+}
+
 async function buildFactorBrief({ tour = 'atp', nameA, nameB, playerAId, playerBId, tournamentId, surfaceName = null }) {
   const [h2h, surfA, surfB, formA, formB, venueA, venueB, rankA, rankB, tierA, tierB, loadA, loadB, ctxA, ctxB, styleA, styleB] = await Promise.all([
     fetchH2H(tour, nameA, nameB),
@@ -717,11 +800,15 @@ async function buildFactorBrief({ tour = 'atp', nameA, nameB, playerAId, playerB
   /* Year-by-year surface, scoped to THIS match's surface. One call per
    * player, id-keyed, and far more informative than the career split the
    * brief used before. */
-  const [byYearA, byYearB, careerSrA, careerSrB] = await Promise.all([
+  const [byYearA, byYearB, careerSrA, careerSrB, bpA, bpB, titlesA, titlesB] = await Promise.all([
     fetchSurfaceByYear(tour, playerAId, surfaceName),
     fetchSurfaceByYear(tour, playerBId, surfaceName),
     fetchCareerServeReturn(tour, playerAId),
     fetchCareerServeReturn(tour, playerBId),
+    fetchBreakPoints(tour, playerAId),
+    fetchBreakPoints(tour, playerBId),
+    fetchTitlesByTier(tour, playerAId),
+    fetchTitlesByTier(tour, playerBId),
   ]);
 
   /* Serve/return profiles reuse the CACHED recent-match payload — the
@@ -748,9 +835,9 @@ async function buildFactorBrief({ tour = 'atp', nameA, nameB, playerAId, playerB
   return {
     h2h,
     playerA: { name: nameA, surface: surfA, form: formA, venue: venueA, ranking: rankA, tiers: tierA, load: loadA, ctx: ctxA, style: styleA, country: styleA ? styleA.country : null,
-      serveReturn: srA, lefty: aLefty, leftyExposure: expA, byYear: byYearA, careerSr: careerSrA },
+      serveReturn: srA, lefty: aLefty, leftyExposure: expA, byYear: byYearA, careerSr: careerSrA, breakPts: bpA, titles: titlesA },
     playerB: { name: nameB, surface: surfB, form: formB, venue: venueB, ranking: rankB, tiers: tierB, load: loadB, ctx: ctxB, style: styleB, country: styleB ? styleB.country : null,
-      serveReturn: srB, lefty: bLefty, leftyExposure: expB, byYear: byYearB, careerSr: careerSrB },
+      serveReturn: srB, lefty: bLefty, leftyExposure: expB, byYear: byYearB, careerSr: careerSrB, breakPts: bpB, titles: titlesB },
   };
 }
 
@@ -897,6 +984,25 @@ function renderFactorBrief(brief, { surface = null } = {}) {
      * and neither figure alone shows that. Only the headline rates are
      * repeated here — restating aces and double faults twice would spend
      * brief space on the least informative numbers. */
+    /* BREAK POINTS — what tennis actually turns on.
+     *
+     * Hold percentage is mostly saving the ones you face; winning is
+     * mostly converting the ones you get. Neither serve/return line
+     * carried them, and a match can hinge on three or four points. */
+    if (P.breakPts) {
+      const b = P.breakPts;
+      const bits = [];
+      if (b.bpSaved != null) bits.push(`saves ${b.bpSaved}% of break points faced (${b.bpSavedOf})`);
+      if (b.bpConverted != null) bits.push(`converts ${b.bpConverted}% of chances (${b.bpConvertedOf})`);
+      if (b.returnPtsWon != null) bits.push(`wins ${b.returnPtsWon}% of return points`);
+      if (bits.length) parts.push(`break points — ${bits.join(', ')}`);
+    }
+
+    /* Titles by TIER, not a flat count: "5 Slam, 10 Masters" against
+     * "2 Futures" states the level each player has won at, which a
+     * ranking alone does not. */
+    if (P.titles) parts.push(`titles: ${P.titles}`);
+
     if (P.careerSr) {
       const c = P.careerSr;
       parts.push(`career (${c.matches} matches, ${c.winPct}% won): ` +
