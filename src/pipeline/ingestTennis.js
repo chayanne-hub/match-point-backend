@@ -53,6 +53,7 @@ async function ingestTennisFixtures() {
     return { created: 0, updated: 0, skipped: 0 };
   }
 
+  let idCollisions = 0;
   let created = 0, updated = 0, skipped = 0, priced = 0, unpriced = 0;
 
   for (const f of fixtures) {
@@ -267,7 +268,41 @@ async function ingestTennisFixtures() {
     const skipUnpriced = process.env.TENNIS_SKIP_UNPRICED_TIERS === 'true';
     const hasPregameSource = !skipUnpriced || (f.tourLevel !== null && f.tourLevel >= 2);
 
+    /* IDENTITY CHECK BEFORE OVERWRITING A ROW.
+     *
+     * Rows have been found holding two different matches: men's names
+     * under a women's league (Ayeni vs Brady in W50 Kursumlijska Banja),
+     * and player ids belonging to a different pair entirely (Royer vs
+     * Giron carrying Mpetshi Perricard's and Brooksby's ids). Every
+     * id-keyed factor on such a match describes the wrong players while
+     * the pick looks perfectly normal.
+     *
+     * The mechanism is not yet established — same-day ATP/WTA id
+     * collision was ruled out, so something else is reusing a key. But
+     * the CHECK does not depend on knowing why: if a row already exists
+     * under this externalId and its competitors are not the same people
+     * as the incoming fixture, that key refers to two different matches
+     * and the update must not proceed.
+     *
+     * Refusing the write and logging loudly means corruption stops here
+     * and leaves evidence, instead of silently producing a plausible
+     * pick about the wrong players. */
     const before = await db.match.findUnique({ where: { externalId: f.sourceId } });
+
+    if (before && f.competitorA && f.competitorB) {
+      const samePair =
+        (namesLikelyMatch(before.competitorA, f.competitorA) && namesLikelyMatch(before.competitorB, f.competitorB)) ||
+        (namesLikelyMatch(before.competitorA, f.competitorB) && namesLikelyMatch(before.competitorB, f.competitorA));
+
+      if (!samePair) {
+        idCollisions++;
+        console.error(
+          `[tennisIngest] KEY COLLISION on ${f.sourceId}: row holds "${before.competitorA} vs ${before.competitorB}" ` +
+          `(${before.league}), incoming fixture is "${f.competitorA} vs ${f.competitorB}" (${f.league}). ` +
+          `Refusing to overwrite — this row and the incoming match are different fixtures sharing one key.`);
+        continue;
+      }
+    }
     await db.match.upsert({
       where: { externalId: f.sourceId },
       update: {
@@ -364,7 +399,8 @@ async function ingestTennisFixtures() {
     console.log(`[tennisIngest] start check: ${started.promoted} moved to live of ${started.checked} checked`);
   }
 
-  console.log(`[tennisIngest] fixtures: ${created} new, ${updated} updated, ${skipped} already covered | odds: ${priced} priced, ${unpriced} not yet on the market`);
+  console.log(`[tennisIngest] fixtures: ${created} new, ${updated} updated, ${skipped} already covered | odds: ${priced} priced, ${unpriced} not yet on the market`
+    + (idCollisions ? ` | ${idCollisions} KEY COLLISION(S) REFUSED` : ''));
 
   /* Maintenance runs on the ingest cycle, not only from an admin route.
    *
