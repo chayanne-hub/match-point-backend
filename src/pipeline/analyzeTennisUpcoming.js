@@ -205,6 +205,17 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
      * match is actually in play and promote it, and both of these are
      * read further down (the live/pre-match branch at the analysis call).
      * Computed once here, reassigned only by that promotion. */
+    /* Which tour, for every provider lookup in this iteration.
+     *
+     * Prefers the stored column. Older rows predate it, so fall back to
+     * the league name: women's ITF events are prefixed W (W15, W50) and
+     * men's M, and WTA-branded events name the tour outright. Defaults
+     * to atp only when nothing else is knowable. */
+    const matchTour = (match.tour && String(match.tour).toLowerCase())
+      || (/\bwta\b|\bwomen\b/i.test(match.league || '') ? 'wta' : null)
+      || (/(^|[^A-Za-z])W\d{2,3}([^0-9]|$)/.test(match.league || '') ? 'wta' : null)
+      || 'atp';
+
     let isLive = match.status === 'live' || untilStart < 0;
     let hasLiveOdds = isLive
       && typeof match.liveOddsA === 'number' && typeof match.liveOddsB === 'number';
@@ -237,7 +248,7 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
     if (match.playerAId && match.playerBId && match.tournamentId &&
         match.roundId !== null && match.roundId !== undefined) {
       coreOdds = await fetchMatchOdds({
-        tour: 'atp',
+        tour: matchTour,
         player1Id: match.playerAId,
         player2Id: match.playerBId,
         tournamentId: match.tournamentId,
@@ -441,7 +452,14 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
       id: extendId,
       eventId: extendId,
       matchId: null,
-      tour: (match.tourLevel === 0 || match.tourLevel === 1) ? 'atp' : 'atp',
+      /* The tour comes from the ROW now.
+       *
+       * This line read `? 'atp' : 'atp'` — a branch that had collapsed
+       * to a constant, so every WTA match was queried against the ATP
+       * player index and returned nothing for head to head, surface and
+       * form. `match.tour` is stored at ingest; the name heuristic below
+       * only covers rows written before that column existed. */
+      tour: matchTour,
       competitorA: match.competitorA,
       competitorB: match.competitorB,
       league: match.league || null,   // read further down for the log line
@@ -540,7 +558,10 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
      * older rows written before those columns existed. */
     const parts = ev?.matchId ? String(ev.matchId).split('-') : [];
     const briefArgs = {
-      tour: ev?.tour || (match.league && /wta|women/i.test(match.league) ? 'wta' : 'atp'),
+      // One derivation for the whole iteration — this used a weaker
+      // heuristic than matchTour and could disagree with the tour used
+      // for every other lookup on the same match.
+      tour: matchTour,
       nameA: match.competitorA,
       nameB: match.competitorB,
       playerAId: match.playerAId ?? parts[0] ?? null,

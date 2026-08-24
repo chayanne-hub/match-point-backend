@@ -138,6 +138,10 @@ async function ingestTennisFixtures() {
       if (!existing.playerAId && f.playerAId) enrich.playerAId = String(f.playerAId);
       if (!existing.playerBId && f.playerBId) enrich.playerBId = String(f.playerBId);
       if (!existing.tournamentId && f.tournamentId) enrich.tournamentId = String(f.tournamentId);
+      /* Tour ('atp'/'wta'). Every player and h2h endpoint is tour-scoped,
+       * so losing this meant every WTA lookup queried the men's index and
+       * came back empty. */
+      if (!existing.tour && f.tour) enrich.tour = String(f.tour).toLowerCase();
       if ((existing.roundId === null || existing.roundId === undefined) && f.roundId !== null && f.roundId !== undefined) {
         enrich.roundId = Number(f.roundId);
       }
@@ -278,6 +282,7 @@ async function ingestTennisFixtures() {
         playerAId: f.playerAId ? String(f.playerAId) : undefined,
         playerBId: f.playerBId ? String(f.playerBId) : undefined,
         tournamentId: f.tournamentId ? String(f.tournamentId) : undefined,
+        tour: f.tour ? String(f.tour).toLowerCase() : undefined,
         roundId: (f.roundId === null || f.roundId === undefined) ? undefined : Number(f.roundId),
       },
       create: {
@@ -285,6 +290,7 @@ async function ingestTennisFixtures() {
         playerAId: f.playerAId ? String(f.playerAId) : null,
         playerBId: f.playerBId ? String(f.playerBId) : null,
         tournamentId: f.tournamentId ? String(f.tournamentId) : null,
+        tour: f.tour ? String(f.tour).toLowerCase() : null,
         roundId: (f.roundId === null || f.roundId === undefined) ? null : Number(f.roundId),
         sportId: sport.id,
         league: f.league || (f.tour || 'ATP').toUpperCase(),
@@ -742,9 +748,20 @@ async function promoteStartedMatches({ limit = 12 } = {}) {
     where: {
       sportId: sport.id,
       status: 'scheduled',
-      // Plausibly underway: from 30 min before the estimated start (they
-      // often begin early when the prior match is short) to 6h after.
-      startTime: { gte: new Date(now - 6 * 60 * 60 * 1000), lte: new Date(now + 30 * 60 * 1000) },
+      /* DO NOT TRUST startTime TO DECIDE WHO TO CHECK.
+       *
+       * This window was `-6h to +30min`, which is circular: the sweep
+       * exists because start times drift, but it was filtered BY the
+       * drifted value. A match listed as starting in two hours that is
+       * actually in its third set fell outside the window, so the one
+       * mechanism able to notice never looked at it.
+       *
+       * Tennis start times are estimates — a match begins when the
+       * previous one on that court ends — so the estimate can sit hours
+       * either side of reality. The upper bound is therefore generous.
+       * The real cost control is elsewhere: only matches that carry a
+       * pick, and a hard cap per cycle. */
+      startTime: { gte: new Date(now - 8 * 60 * 60 * 1000), lte: new Date(now + 6 * 60 * 60 * 1000) },
       picks: { some: {} },
     },
     select: { id: true, competitorA: true, competitorB: true, startTime: true },

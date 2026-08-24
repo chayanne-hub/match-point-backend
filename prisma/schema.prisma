@@ -168,6 +168,17 @@ model Match {
   /// permanently "about to start". Counting the pushes separates the two.
   startTimePushes Int   @default(0)
   sportKey     String?
+
+  /* Which tour this match belongs to: 'atp' or 'wta'.
+   *
+   * Every player and h2h endpoint on the provider is tour-scoped, so
+   * querying a WTA player against the ATP index returns nothing. Without
+   * this column the tour was known at ingest and then lost, and the
+   * analyser fell back to a hardcoded 'atp' — one line even read
+   * `? 'atp' : 'atp'`, a branch that had collapsed to a constant. Every
+   * women's match was therefore looked up on the men's index and came
+   * back with no head to head, no surface record and no form. */
+  tour         String?
   bestOddsA    Int?
   bestOddsB    Int?
   bestBookA    String?
