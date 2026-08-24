@@ -776,6 +776,71 @@ async function fetchTitlesByTier(tour, playerId) {
   return out.length ? out.join(', ') : null;
 }
 
+/* HOW THEIR LAST MEETING ACTUALLY WENT.
+ *
+ * The head-to-head factor said who won and on what surface. It could not
+ * say HOW — whether it was a tight three-setter decided on two break
+ * points, or a straight-sets rout where one player never faced a break.
+ * Those are different pieces of evidence about the same 1-0 record.
+ *
+ * This endpoint carries the detail: aces, first and second serve won,
+ * break points faced and saved, winners, unforced errors, net play —
+ * fuller than the stat block embedded in h2h/recent, which leaves
+ * winners and net approaches null.
+ *
+ * The tournament id comes from the cached recent-match list rather than
+ * a lookup, so this costs ONE call when the two have met and NOTHING
+ * when they have not — which for a first meeting is the common case.
+ *
+ * Small sample by nature: one match. Its value is specificity, not
+ * statistical weight, and the brief says so by naming the event.
+ */
+async function fetchLastMeetingStats(tour, playerAId, playerBId, games) {
+  if (!playerAId || !playerBId || !Array.isArray(games) || !games.length) return null;
+
+  const meeting = games.find((g) =>
+    (String(g.player1Id) === String(playerAId) && String(g.player2Id) === String(playerBId)) ||
+    (String(g.player1Id) === String(playerBId) && String(g.player2Id) === String(playerAId)));
+
+  if (!meeting || !meeting.tournamentId) return null;
+
+  const body = await safe(() => apiGet(
+    `${tour}/h2h/match-stats/${meeting.tournamentId}/${encodeURIComponent(playerAId)}/${encodeURIComponent(playerBId)}`));
+  const d = body?.data;
+  if (!d) return null;
+
+  const pct = (a, b) => {
+    const x = Number(a), y = Number(b);
+    return (Number.isFinite(x) && Number.isFinite(y) && y > 0) ? Math.round((x / y) * 100) : null;
+  };
+
+  const side = (st) => {
+    if (!st) return null;
+    return {
+      aces: Number(st.aces) || 0,
+      doubleFaults: Number(st.doubleFaults) || 0,
+      wonOnFirst: pct(st.winningOnFirstServe, st.winningOnFirstServeOf),
+      wonOnSecond: pct(st.winningOnSecondServe, st.winningOnSecondServeOf),
+      bpFaced: Number(st.breakPointFacedGm) || 0,
+      bpSaved: Number(st.breakPointSavedGm) || 0,
+      bpChances: Number(st.breakPointChanceGm) || 0,
+      bpWon: Number(st.breakPointWonGm) || 0,
+      winners: st.winners == null ? null : Number(st.winners),
+      unforced: st.unforcedErrors == null ? null : Number(st.unforcedErrors),
+    };
+  };
+
+  const a = side(d.player1Stats), b = side(d.player2Stats);
+  if (!a && !b) return null;
+
+  return {
+    event: meeting.tournament?.name || null,
+    date: meeting.date || null,
+    result: meeting.result || null,
+    a, b,
+  };
+}
+
 async function buildFactorBrief({ tour = 'atp', nameA, nameB, playerAId, playerBId, tournamentId, surfaceName = null }) {
   const [h2h, surfA, surfB, formA, formB, venueA, venueB, rankA, rankB, tierA, tierB, loadA, loadB, ctxA, ctxB, styleA, styleB] = await Promise.all([
     fetchH2H(tour, nameA, nameB),
@@ -819,6 +884,10 @@ async function buildFactorBrief({ tour = 'atp', nameA, nameB, playerAId, playerB
   ]);
   const gamesA = Array.isArray(recentA?.games) ? recentA.games : [];
   const gamesB = Array.isArray(recentB?.games) ? recentB.games : [];
+
+  /* Uses gamesA, already fetched and cached — the tournament id of any
+   * prior meeting is in there, so no lookup call is needed to find it. */
+  const lastMeeting = await fetchLastMeetingStats(tour, playerAId, playerBId, gamesA);
 
   const srA = playerAId ? serveReturnProfile(gamesA, playerAId) : null;
   const srB = playerBId ? serveReturnProfile(gamesB, playerBId) : null;
@@ -1017,6 +1086,34 @@ function renderFactorBrief(brief, { surface = null } = {}) {
       if (t.length) parts.push(`${P.tiers.year} vs ranked opposition: ${t.join(', ')}`);
     }
     if (parts.length) L.push(`${P.name.toUpperCase()}: ${parts.join(' | ')}`);
+  }
+
+  /* HOW THE LAST MEETING WENT — attached to the head to head.
+   *
+   * A 1-0 record reads very differently once you can see it was decided
+   * on two break points rather than a rout. Stated as one line per
+   * player, with the event named so the analyst can judge its age. */
+  if (lastMeeting && (lastMeeting.a || lastMeeting.b)) {
+    const where = [lastMeeting.event, lastMeeting.result].filter(Boolean).join(' ');
+    L.push(`LAST MEETING${where ? ` (${where})` : ''}:`);
+
+    const sideLine = (name, x) => {
+      if (!x) return null;
+      const bits = [];
+      if (x.wonOnFirst != null) bits.push(`${x.wonOnFirst}% behind first serve`);
+      if (x.wonOnSecond != null) bits.push(`${x.wonOnSecond}% behind second`);
+      if (x.bpFaced) bits.push(`saved ${x.bpSaved} of ${x.bpFaced} break points`);
+      if (x.bpChances) bits.push(`converted ${x.bpWon} of ${x.bpChances}`);
+      if (x.aces) bits.push(`${x.aces} aces`);
+      if (x.doubleFaults) bits.push(`${x.doubleFaults} double faults`);
+      if (x.winners != null && x.unforced != null) bits.push(`${x.winners} winners to ${x.unforced} unforced`);
+      return bits.length ? `  ${name}: ${bits.join(', ')}` : null;
+    };
+
+    const la = sideLine(A.name, lastMeeting.a);
+    const lb = sideLine(B.name, lastMeeting.b);
+    if (la) L.push(la);
+    if (lb) L.push(lb);
   }
 
   /* STYLE INTERACTION — stated once, about the pairing.
