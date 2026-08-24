@@ -154,7 +154,26 @@ function tierFromName(name, rankId) {
 function shapeFixture(fx, tourType) {
   const rankId = fx?.tournament?.rankId;
   return {
-    sourceId: `sa365:${fx.id}`,
+    /* NAMESPACED BY TOUR — the fixture id is NOT globally unique.
+     *
+     * This was `sa365:${fx.id}`, and ingest upserts on it. But the
+     * provider numbers fixtures PER TOUR: the ATP feed for 24 Aug
+     * returned ids 1224-1309, and the WTA feed uses the same range. So
+     * ATP fixture 1238 and WTA fixture 1238 landed on the SAME row, each
+     * overwriting the other.
+     *
+     * The result was rows assembled from two different matches: men's
+     * names under a women's league (Ayeni vs Brady in W50 Kursumlijska
+     * Banja), player ids belonging to an entirely different pair (Royer
+     * vs Giron carrying Mpetshi Perricard's and Brooksby's ids), and a
+     * null tour. Every id-keyed factor on such a match — head to head,
+     * surface, form, workload — described the wrong players, while the
+     * pick itself looked completely normal.
+     *
+     * A duplicate-id check could never have caught this: collisions
+     * overwrite rather than duplicate, so the table showed 666 rows and
+     * 666 distinct ids while a large share of them were corrupt. */
+    sourceId: `sa365:${tourType}:${fx.id}`,
     externalId: fx.id,
     tour: tourType,
     startTime: fx.date ? new Date(fx.date) : null,
