@@ -204,6 +204,40 @@ function excludedTiers() {
  * above while KEEPING rows whose tourLevel is null — an unknown tier is
  * not evidence of being ITF, and silently dropping those would repeat
  * the mistake the fixture filter made with Grand Slams. */
+/* Cached statistics for one player, shaped for the drawer.
+ *
+ * Reads PlayerStat, which the warm job fills on a schedule. Returns null
+ * when a player has not been cached yet — the drawer then shows the
+ * sections it can and omits the rest, rather than rendering empty rows. */
+async function playerStatFor(tour, playerId) {
+  if (!tour || !playerId) return null;
+  const row = await db.playerStat.findUnique({
+    where: { playerId_tour: { playerId: String(playerId), tour: String(tour).toLowerCase() } },
+  }).catch(() => null);
+  if (!row) return null;
+
+  return {
+    name: row.name,
+    rank: row.rank,
+    rankTrend: row.rankTrend,
+    plays: row.plays,
+    backhand: row.backhand,
+    status: row.status,
+    career: (row.careerWins != null && row.careerLosses != null)
+      ? { wins: row.careerWins, losses: row.careerLosses, matches: row.careerMatches }
+      : null,
+    serve: (row.firstServeIn != null || row.wonOnFirst != null)
+      ? { firstIn: row.firstServeIn, wonOnFirst: row.wonOnFirst, wonOnSecond: row.wonOnSecond,
+          aces: row.acesPerMatch, doubleFaults: row.dfPerMatch }
+      : null,
+    ret: (row.returnPtsWon != null || row.bpSaved != null)
+      ? { pointsWon: row.returnPtsWon, bpSaved: row.bpSaved, bpConverted: row.bpConverted }
+      : null,
+    titles: row.titles,
+    surfaceByYear: row.surfaceByYear || null,
+  };
+}
+
 function tierFilter() {
   const tiers = excludedTiers();
   if (!tiers.length) return {};
@@ -2319,6 +2353,16 @@ router.get('/:id', async (req, res) => {
     factsUsed = []; // malformed/legacy row — degrade gracefully rather than error the whole request
   }
 
+  /* Resolved BEFORE the response object is built.
+   *
+   * res.json() is synchronous — a promise placed in it serialises as an
+   * empty object, so the drawer would receive `statsA: {}` and render
+   * nothing while appearing to have data. */
+  const [statsA, statsB] = await Promise.all([
+    playerStatFor(pick.match.tour, pick.match.playerAId),
+    playerStatFor(pick.match.tour, pick.match.playerBId),
+  ]);
+
   res.json({
     id: pick.id,
     matchId: pick.matchId,
@@ -2338,6 +2382,17 @@ router.get('/:id', async (req, res) => {
      * has 257 matches for that player under wta; we were simply asking
      * the wrong index. */
     tour: pick.match.tour || null,
+    surface: pick.match.surface || null,
+    rankA: pick.match.rankA ?? null,
+    rankB: pick.match.rankB ?? null,
+    /* The player statistics the model reasoned from.
+     *
+     * The drawer showed a rationale and a set of factor cards, but not
+     * the underlying numbers — so a member could read the conclusion
+     * without being able to check it. These come from the PlayerStat
+     * cache, so they cost nothing per request. */
+    statsA,
+    statsB,
     competitorB: pick.match.competitorB,
     startTime: pick.match.startTime,
     surface: pick.match.surface,
