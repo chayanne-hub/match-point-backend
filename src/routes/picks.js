@@ -1754,8 +1754,24 @@ router.post('/admin/rerun/:pickId', requireAuth, async (req, res) => {
       rationale: pick.rationale,
     };
 
-    // Remove the old model pick(s) for this match so the re-run replaces
-    // rather than duplicates.
+    /* KEEP A COPY BEFORE DELETING.
+     *
+     * The old pick has to go so the re-run replaces rather than
+     * duplicates it. But if the re-run then produces nothing — a guard
+     * rejects it for having no price, no evidence, or being live without
+     * a score — the original was already destroyed and the match is left
+     * with no pick at all.
+     *
+     * That is exactly what happened: a re-run on a live match hit the
+     * new live-evidence guard and the pick vanished from the board. A
+     * debugging tool must not be able to delete a member's pick.
+     *
+     * So the full rows are captured first and restored if the re-run
+     * comes back empty. */
+    const doomed = await db.pick.findMany({
+      where: { matchId, pickType: { in: ['model', 'winner'] }, market: 'moneyline' },
+    });
+
     await db.pick.deleteMany({
       where: { matchId, pickType: { in: ['model', 'winner'] }, market: 'moneyline' },
     });
@@ -1778,11 +1794,20 @@ router.post('/admin/rerun/:pickId', requireAuth, async (req, res) => {
     });
 
     if (!after) {
-      // The re-run produced nothing — a guard rejected it. That is a
-      // real answer (no price, no evidence), so report it rather than
-      // leaving the match silently pickless.
+      /* Nothing was produced, so put the original back.
+       *
+       * The rejection reason is still the useful answer for debugging —
+       * it is returned below — but the board must look exactly as it did
+       * before the button was pressed. */
+      let restored = 0;
+      for (const d of doomed) {
+        await db.pick.create({ data: { ...d } }).catch(() => {});
+        restored++;
+      }
+
       return res.json({
         ok: false,
+        restored,
         matchup: `${pick.match.competitorA} vs ${pick.match.competitorB}`,
         // The analyser records WHY for a single-match run; the counters
         // alone only said "skipped: 1", which answers nothing.
