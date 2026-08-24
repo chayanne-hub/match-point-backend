@@ -646,16 +646,36 @@ async function fetchH2HFull(tour, id1, id2) {
       birthday: pl.birthday || null,
       /* Counted records take precedence; the profile's own fields are the
        * fallback for players where the count is unavailable. */
-      ytd: counted?.season
-        ? { wins: counted.season.wins, losses: counted.season.losses,
-            pct: counted.season.pct, titles: pl.ytdTitles ?? null }
-        : { wins: pl.ytdWon ?? null, losses: pl.ytdLost ?? null,
-            pct: pl.ytdWLPercentage ?? null, titles: pl.ytdTitles ?? null },
+      /* SEASON RECORD — from the profile, or not at all.
+       *
+       * Counting the season out of h2h/recent has the same flaw as
+       * counting a career from it: the endpoint returns ONE PAGE of ten
+       * games. Filtering those to the current year gives "7-3" for a
+       * player who may have played thirty matches this season — an
+       * understatement presented as a record.
+       *
+       * So the profile's own ytd fields are used when populated, and
+       * nothing is shown when they are not. The form strip below still
+       * comes from the ten games, which is exactly what a form strip is
+       * meant to be. */
+      ytd: (pl.ytdWon != null || pl.ytdLost != null)
+        ? { wins: pl.ytdWon ?? 0, losses: pl.ytdLost ?? 0,
+            pct: pl.ytdWLPercentage ?? null, titles: pl.ytdTitles ?? null }
+        : { wins: null, losses: null, pct: null, titles: pl.ytdTitles ?? null },
+      /* CAREER MUST NOT BE THE LAST TEN.
+       *
+       * counted.total sums the ONE PAGE h2h/recent returns — ten games —
+       * so a player with 257 career matches was reported as "7-3 career".
+       * The number was real but the label was a lie, and 7-3 reads as a
+       * far stronger player than 150-107.
+       *
+       * `count` is the provider's own total, so it is used for the match
+       * tally, and the career W/L is left null rather than filled with a
+       * ten-match sample wearing a career label. A missing figure is
+       * honest; a wrong one is not. */
       career: counted?.total
-        ? { wins: counted.total.wins, losses: counted.total.losses,
-            pct: counted.total.pct, titles: pl.totalTitles ?? null,
-            // The feed's own count of matches held, which exceeds what
-            // one page returns.
+        ? { wins: null, losses: null, pct: null,
+            titles: pl.totalTitles ?? null,
             matches: counted.total.count }
         : { wins: pl.careerWin ?? null, losses: pl.careerLose ?? null,
             pct: pl.careerWLPercentage ?? null, titles: pl.totalTitles ?? null },
