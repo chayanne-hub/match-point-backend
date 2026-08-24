@@ -581,13 +581,58 @@ function playerImageUrl(path) {
  * one place and not the other.
  */
 async function fetchH2HFull(tour, id1, id2) {
-  const [profile, stats] = await Promise.all([
+  const [profile, stats, recentA, recentB] = await Promise.all([
     apiGet(`h2h/profile/${tour}/${id1}/${id2}/false`).catch(() => null),
     apiGet(`h2h/stats/${tour}/${id1}/${id2}`).catch(() => null),
+    /* RECORDS FROM THE MATCH LIST, NOT THE PROFILE.
+     *
+     * h2h/profile's ytd/career fields are sparse outside the top of the
+     * game: Max Basing (ranked 248) came back "0-1 career" and Christian
+     * Langmo entirely empty, so the drawer showed 0-0 records and no
+     * form for two established professionals.
+     *
+     * h2h/recent holds the actual matches — 279 of them for a player
+     * ranked 461 — so the same records can be COUNTED rather than read
+     * from a field the provider does not populate at this level. These
+     * are live on every drawer open, so they update without re-running
+     * the analysis. */
+    apiGet(`h2h/recent/${tour}/${id1}`).catch(() => null),
+    apiGet(`h2h/recent/${tour}/${id2}`).catch(() => null),
   ]);
   if (!profile && !stats) return null;
 
-  const shapePlayer = (pl) => {
+  /* Count wins/losses from the match list, using the isWin flag the API
+   * supplies relative to the queried player — the same field the factor
+   * brief uses, and the one that avoids the orientation error that
+   * produced fake 0-10 records. */
+  const countFrom = (payload) => {
+    const games = Array.isArray(payload?.games) ? payload.games : [];
+    if (!games.length) return null;
+    const thisYear = new Date().getFullYear();
+    let w = 0, l = 0, yw = 0, yl = 0;
+    const form = [];
+    for (const g of games) {
+      if (typeof g.isWin !== 'boolean') continue;
+      g.isWin ? w++ : l++;
+      if (form.length < 10) form.push(g.isWin ? 'w' : 'l');
+      const y = new Date(g.date).getFullYear();
+      if (y === thisYear) { g.isWin ? yw++ : yl++; }
+    }
+    if (!w && !l) return null;
+    const pct = (a, b) => (a + b > 0 ? Math.round((a / (a + b)) * 100) : null);
+    return {
+      total: { wins: w, losses: l, pct: pct(w, l), count: payload.count ?? (w + l) },
+      season: { wins: yw, losses: yl, pct: pct(yw, yl) },
+      // Newest first from the feed; reversed so the display reads
+      // oldest-to-newest like the rest of the form strip.
+      form: form.reverse(),
+    };
+  };
+
+  const countedA = countFrom(recentA);
+  const countedB = countFrom(recentB);
+
+  const shapePlayer = (pl, counted) => {
     if (!pl) return null;
     return {
       id: pl.id,
@@ -599,13 +644,24 @@ async function fetchH2HFull(tour, id1, id2) {
       bestRank: pl.bestRank ?? null,
       plays: pl.plays || null,
       birthday: pl.birthday || null,
-      ytd: { wins: pl.ytdWon ?? null, losses: pl.ytdLost ?? null,
-             pct: pl.ytdWLPercentage ?? null, titles: pl.ytdTitles ?? null },
-      career: { wins: pl.careerWin ?? null, losses: pl.careerLose ?? null,
-                pct: pl.careerWLPercentage ?? null, titles: pl.totalTitles ?? null },
+      /* Counted records take precedence; the profile's own fields are the
+       * fallback for players where the count is unavailable. */
+      ytd: counted?.season
+        ? { wins: counted.season.wins, losses: counted.season.losses,
+            pct: counted.season.pct, titles: pl.ytdTitles ?? null }
+        : { wins: pl.ytdWon ?? null, losses: pl.ytdLost ?? null,
+            pct: pl.ytdWLPercentage ?? null, titles: pl.ytdTitles ?? null },
+      career: counted?.total
+        ? { wins: counted.total.wins, losses: counted.total.losses,
+            pct: counted.total.pct, titles: pl.totalTitles ?? null,
+            // The feed's own count of matches held, which exceeds what
+            // one page returns.
+            matches: counted.total.count }
+        : { wins: pl.careerWin ?? null, losses: pl.careerLose ?? null,
+            pct: pl.careerWLPercentage ?? null, titles: pl.totalTitles ?? null },
       // Oldest-first in the payload; reversed so the most recent match
       // reads left-to-right like every other form guide.
-      form: Array.isArray(pl.recentGames) ? [...pl.recentGames].reverse() : [],
+      form: counted?.form?.length ? counted.form : (Array.isArray(pl.recentGames) ? [...pl.recentGames].reverse() : []),
     };
   };
 
@@ -627,8 +683,8 @@ async function fetchH2HFull(tour, id1, id2) {
   ]);
 
   return {
-    player1: shapePlayer(profile?.player1),
-    player2: shapePlayer(profile?.player2),
+    player1: shapePlayer(profile?.player1, countedA),
+    player2: shapePlayer(profile?.player2, countedB),
     meetings: stats?.matchesCount ?? null,
     record: { p1: sd.total1 ?? null, p2: sd.total2 ?? null },
     surfaces: [
