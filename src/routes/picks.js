@@ -239,7 +239,13 @@ router.get('/today', async (req, res) => {
           // Without the notIn, an "all" request (no sport filter) still
           // returned baseball and soccer picks made before those sports
           // were switched off.
+          /* ITF is excluded from the board itself, not only from the
+           * record. A tier we no longer analyse should not occupy rows a
+           * member scrolls past — that reads as coverage we do not have.
+           * Same tierFilter the win-rate surfaces use, so the board and
+           * the published number can never describe different products. */
           ...(sport ? { sport: { slug: sport } } : { sport: { slug: { notIn: disabledSports() } } }),
+          ...tierFilter(),
         },
       },
       include: { match: { include: { sport: true } } },
@@ -734,6 +740,7 @@ router.get('/live', async (req, res) => {
   const where = {
     status: 'live',
     ...(sport && sport !== 'all' ? { sport: { slug: sport } } : {}),
+    ...tierFilter(),
   };
 
   const matches = await db.match.findMany({
@@ -1029,6 +1036,7 @@ router.get('/matches-today', async (req, res) => {
     where: {
       startTime: { gte: startOfDay, lte: endOfDay },
       ...(sport ? { sport: { slug: sport } } : {}),
+      ...tierFilter(),
     },
     include: { sport: true, picks: true },
     orderBy: { startTime: 'asc' },
