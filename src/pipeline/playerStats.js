@@ -156,24 +156,57 @@ async function warmPlayerStats({ limit = 40 } = {}) {
 
   const existing = await db.playerStat.findMany({
     where: { OR: players.map((p) => ({ playerId: p.id, tour: p.tour })) },
-    select: { playerId: true, tour: true, fetchedAt: true },
+    select: { playerId: true, tour: true, fetchedAt: true,
+              firstServeIn: true, careerMatches: true, bpSaved: true },
   });
-  const freshness = new Map(existing.map((e) => [`${e.tour}:${e.playerId}`, e.fetchedAt]));
+  const known = new Map(existing.map((e) => [`${e.tour}:${e.playerId}`, e]));
 
   const now = Date.now();
+
+  /* A PARTIAL ROW IS DUE, whatever its age.
+   *
+   * Freshness alone was the test, so a row written during a throttled
+   * cycle — missing serve and career figures — counted as cached and
+   * would not be retried for a full day. That is how 377 players ended
+   * up with 205 having serve data: the gaps were locked in by the very
+   * check meant to keep the cache current.
+   *
+   * Missing serve, career or break-point figures now makes a row due
+   * immediately, so a throttled cycle is repaired by the next one. */
+  const incomplete = (e) =>
+    e.firstServeIn == null || e.careerMatches == null || e.bpSaved == null;
+
   const due = players.filter((p) => {
-    const at = freshness.get(`${p.tour}:${p.id}`);
-    return !at || (now - new Date(at).getTime()) > STALE_AFTER_MS;
+    const e = known.get(`${p.tour}:${p.id}`);
+    if (!e) return true;
+    if (incomplete(e)) return true;
+    return (now - new Date(e.fetchedAt).getTime()) > STALE_AFTER_MS;
   });
 
-  // Stale-but-known first, then players never cached.
-  due.sort((a, b) => {
-    const aAt = freshness.get(`${a.tour}:${a.id}`);
-    const bAt = freshness.get(`${b.tour}:${b.id}`);
-    if (aAt && !bAt) return -1;
-    if (!aAt && bAt) return 1;
-    return 0;
-  });
+  /* Incomplete rows first — they represent a player the brief will
+   * silently under-report right now. Then never-cached, then merely
+   * stale. */
+  const rank = (p) => {
+    const e = known.get(`${p.tour}:${p.id}`);
+    if (e && incomplete(e)) return 0;
+    if (!e) return 1;
+    return 2;
+  };
+  due.sort((a, b) => rank(a) - rank(b));
+
+  /* PACED, because the provider returns HTML 429 pages under load.
+   *
+   * Sequential calls within a player were not enough: forty players back
+   * to back is still 280 requests as fast as the loop can issue them,
+   * and the logs showed match-stats returning "429 Too Many Requests"
+   * after three attempts. The result was 377 cached players of whom only
+   * 205 had serve and career figures — 45% missing half their data,
+   * which the brief then presents as absence rather than failure.
+   *
+   * A pause between players costs nothing that matters: this is a
+   * background job, and forty players at 400ms apart is sixteen seconds
+   * inside a ten-minute cycle. */
+  const gapMs = Number(process.env.PLAYER_STAT_GAP_MS || 400);
 
   let warmed = 0, failed = 0;
   for (const p of due.slice(0, limit)) {
@@ -183,6 +216,7 @@ async function warmPlayerStats({ limit = 40 } = {}) {
       failed++;
       console.error(`[playerStats] ${p.name || p.id}: ${err.message}`);
     }
+    await new Promise((r) => setTimeout(r, gapMs));
   }
 
   console.log(`[playerStats] ${warmed} warmed of ${due.length} due (${players.length} on the board)`

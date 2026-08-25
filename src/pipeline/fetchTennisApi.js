@@ -42,6 +42,37 @@ function assertConfigured() {
  * One request. Throws on a body-level error even when the transport said
  * 200 — see the gateway note above.
  */
+/* Call, retry, and return null rather than throwing.
+ *
+ * This module used safe() sixty-one times and never defined it — the
+ * helper lives in tennisFactors.js and I copied the calling pattern here
+ * without bringing it across. Every fetcher that used it threw
+ * "safe is not defined" on first call, which surfaced as
+ * "factor brief failed" and an empty brief.
+ *
+ * Retries matter here specifically: the provider returns HTML 429 pages
+ * under load, and a single attempt turns a throttled request into
+ * "this player has no data" — which is how 45% of cached players ended
+ * up missing half their statistics.
+ */
+async function safe(fn, { attempts = 3, label = '' } = {}) {
+  let lastErr = null;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      const throttled = /429|too many requests/i.test(err?.message || '');
+      // Back off harder on an explicit 429 than on a generic failure:
+      // retrying into a rate limit immediately just burns the attempt.
+      const wait = throttled ? 1200 * Math.pow(2, i) : 150 * Math.pow(3, i);
+      if (i < attempts - 1) await new Promise((r) => setTimeout(r, wait));
+    }
+  }
+  console.warn(`[tennisApi] gave up after ${attempts} attempts${label ? ` on ${label}` : ''}: ${(lastErr?.message || '').slice(0, 120)}`);
+  return null;
+}
+
 async function apiGet(path, { timeoutMs = 12000 } = {}) {
   assertConfigured();
   const url = `${BASE}/${String(path).replace(/^\/+/, '')}`;
