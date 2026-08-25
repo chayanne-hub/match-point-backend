@@ -67,17 +67,38 @@ async function playersOnTheBoard() {
 
 /** Fetch everything about one player and upsert it. */
 async function warmOne({ id, tour, name }) {
-  const [status, careerSr, bp, titles, byYear, trend, style] = await Promise.all([
-    fetchPlayerStatus(name).catch(() => null),
-    fetchCareerServeReturn(tour, id).catch(() => null),
-    fetchBreakPoints(tour, id).catch(() => null),
-    fetchTitlesByTier(tour, id).catch(() => null),
+  /* SEQUENTIAL, NOT PARALLEL.
+   *
+   * These seven fired at once per player. The provider refuses some of a
+   * burst that size, and because failures were swallowed silently the
+   * result looked like missing data rather than a throttled call — a
+   * numbers table where one player had career stats and no break points
+   * and the other had the exact reverse, on a match where both endpoints
+   * return full data when called individually.
+   *
+   * Running them in sequence is slower per player and strictly more
+   * reliable, which is the correct trade for a background job: nobody is
+   * waiting on it, and a gap in the cache costs a whole factor. */
+  const results = [];
+  for (const [label, fn] of [
+    ['status', () => fetchPlayerStatus(name)],
+    ['careerSr', () => fetchCareerServeReturn(tour, id)],
+    ['breakPoints', () => fetchBreakPoints(tour, id)],
+    ['titles', () => fetchTitlesByTier(tour, id)],
     // Surface is per-match, so cache the whole year-by-year table and let
     // the brief scope it at read time.
-    fetchSurfaceByYear(tour, id, null).catch(() => null),
-    fetchRankingTrend(tour, id).catch(() => null),
-    fetchStyle(tour, name).catch(() => null),
-  ]);
+    ['surfaceByYear', () => fetchSurfaceByYear(tour, id, null)],
+    ['rankingTrend', () => fetchRankingTrend(tour, id)],
+    ['style', () => fetchStyle(tour, name)],
+  ]) {
+    try {
+      results.push(await fn());
+    } catch (err) {
+      console.warn(`[playerStats] ${name || id}: ${label} failed — ${err.message}`);
+      results.push(null);
+    }
+  }
+  const [status, careerSr, bp, titles, byYear, trend, style] = results;
 
   // Nothing came back at all — do not write an empty row that would then
   // be treated as a cache hit and suppress a real fetch later.
@@ -98,9 +119,11 @@ async function warmOne({ id, tour, name }) {
     careerMatches: careerSr?.matches ?? null,
     careerLosses: (careerSr?.matches != null && careerSr?.won != null)
       ? careerSr.matches - careerSr.won : null,
-    firstServeIn: careerSr?.firstServeIn ?? null,
-    wonOnFirst: careerSr?.wonOnFirst ?? null,
-    wonOnSecond: careerSr?.wonOnSecond ?? null,
+    // Falls back to the serve numbers inside match-stats when the
+    // career serve/return call failed — same measures, second source.
+    firstServeIn: careerSr?.firstServeIn ?? bp?.serveFallback?.firstServeIn ?? null,
+    wonOnFirst: careerSr?.wonOnFirst ?? bp?.serveFallback?.wonOnFirst ?? null,
+    wonOnSecond: careerSr?.wonOnSecond ?? bp?.serveFallback?.wonOnSecond ?? null,
     returnPtsWon: bp?.returnPtsWon ?? careerSr?.returnPtsWon ?? null,
     bpSaved: bp?.bpSaved ?? null,
     bpConverted: bp?.bpConverted ?? null,

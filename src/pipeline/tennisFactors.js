@@ -20,8 +20,34 @@ const COURTS = { 1: 'Hard', 2: 'Clay', 3: 'Indoor Hard', 5: 'Grass' };
 /** Every fetch is best-effort: a missing factor must degrade to "No data"
  *  rather than fail the whole analysis. A match analysed on eleven
  *  factors is far better than one not analysed at all. */
-async function safe(fn) {
-  try { return await fn(); } catch { return null; }
+/* RETRY BEFORE GIVING UP, AND SAY SO WHEN GIVING UP.
+ *
+ * This swallowed every failure into null with no retry and no log, so a
+ * transient rate-limit or timeout was indistinguishable from "the
+ * provider has nothing for this player".
+ *
+ * That is exactly what produced a half-empty numbers table: Shick lost
+ * his break-point call and Tabur lost his career-stats call, on a match
+ * where BOTH endpoints return full data when called directly. Seven
+ * requests fire per player at once, some get refused, and the result
+ * reads as missing data rather than a failed fetch.
+ *
+ * Two retries with backoff, and a warning when it still fails — a
+ * silent null is the thing that made this invisible for a day. */
+async function safe(fn, { attempts = 3, label = '' } = {}) {
+  let lastErr = null;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      // 150ms, then 450ms. Enough to clear a burst without stalling a
+      // brief that a member is waiting on.
+      if (i < attempts - 1) await new Promise((r) => setTimeout(r, 150 * Math.pow(3, i)));
+    }
+  }
+  console.warn(`[tennisFactors] gave up after ${attempts} attempts${label ? ` on ${label}` : ''}: ${lastErr?.message || 'unknown'}`);
+  return null;
 }
 
 /**
@@ -714,6 +740,25 @@ async function fetchBreakPoints(tour, playerId) {
     return (Number.isFinite(x) && Number.isFinite(y) && y > 0) ? Math.round((x / y) * 100) : null;
   };
 
+  /* SERVE NUMBERS ARE HERE TOO — use them when vs-all-stats is missing.
+   *
+   * serviceStats carries firstServe, winningOnFirstServe and
+   * winningOnSecondServe, the same measures fetchCareerServeReturn reads
+   * from a different endpoint. We were ignoring them, so when
+   * vs-all-stats failed for a player the serve rows went blank even
+   * though this response had them all along.
+   *
+   * Two endpoints covering the same ground is redundancy worth using,
+   * not duplication to pick one of. */
+  const svc = d.serviceStats || {};
+  const serveFallback = {
+    firstServeIn: pct(svc.firstServeGm, svc.firstServeOfGm),
+    wonOnFirst: pct(svc.winningOnFirstServeGm, svc.winningOnFirstServeOfGm),
+    wonOnSecond: pct(svc.winningOnSecondServeGm, svc.winningOnSecondServeOfGm),
+    aces: Number(svc.acesGm) || null,
+    doubleFaults: Number(svc.doubleFaultsGm) || null,
+  };
+
   const bpS = d.breakPointsServeStats || {};
   const bpR = d.breakPointsRtnStats || {};
   const rtn = d.rtnStats || {};
@@ -744,6 +789,8 @@ async function fetchBreakPoints(tour, playerId) {
     bpConverted: won,
     bpConvertedOf: Number(bpR.breakPointChanceGm) || 0,
     returnPtsWon: pct(rptWon, rptOf),
+    // Used only when the career serve/return call came back empty.
+    serveFallback,
   };
 }
 
