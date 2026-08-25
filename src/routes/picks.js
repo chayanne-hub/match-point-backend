@@ -13,7 +13,7 @@ const { isAdminEmail } = require('./auth');
 const { fetchBasketballPlayerProps } = require('../pipeline/fetchPlayerProps');
 const { analyzePlayerProps } = require('../pipeline/propsAnalyst');
 const { fetchEspnLiveScores, matchEspnEvent } = require('../pipeline/fetchEspn');
-const { fetchLatestRankings, fetchPlayerProfile, fetchH2HFull } = require('../pipeline/fetchTennisApi');
+const { fetchLatestRankings, fetchPlayerProfile, fetchH2HFull, fetchCurrentMatchStats } = require('../pipeline/fetchTennisApi');
 const { analyzeStartSit } = require('../pipeline/fantasyAnalyst');
 const { triggerManualRun, triggerManualRunTomorrow } = require('../pipeline/cron');
 
@@ -1314,6 +1314,22 @@ router.get('/h2h/:tour/:id1/:id2', async (req, res) => {
       return res.status(400).json({ error: 'tour must be atp or wta' });
     }
     const data = await fetchH2HFull(tour, req.params.id1, req.params.id2);
+
+    /* Stats for the match being played right now.
+     *
+     * The drawer showed a live score and nothing about how it was being
+     * won — a set lead built on one break with a shaky serve looks
+     * identical to one built on 80% behind the first serve.
+     *
+     * ?tournamentId= comes from the row the drawer already holds, so no
+     * extra lookup is needed. Only attempted when the caller supplies it,
+     * which means an upcoming match costs nothing. */
+    const tid = req.query.tournamentId;
+    if (data && tid) {
+      const current = await fetchCurrentMatchStats(tour, tid, req.params.id1, req.params.id2)
+        .catch(() => null);
+      if (current) data.currentMatch = current;
+    }
     if (!data) return res.status(404).json({ error: 'h2h unavailable' });
     res.json(data);
   } catch (err) {
@@ -2385,6 +2401,8 @@ router.get('/:id', async (req, res) => {
     surface: pick.match.surface || null,
     rankA: pick.match.rankA ?? null,
     rankB: pick.match.rankB ?? null,
+    // Needed by the drawer to request stats for THIS match.
+    tournamentId: pick.match.tournamentId ?? null,
     /* The player statistics the model reasoned from.
      *
      * The drawer showed a rationale and a set of factor cards, but not

@@ -571,6 +571,64 @@ async function fetchPbpByEvent(eventId, set, game) {
   return _payload(await safe(() => apiGet(`extend/api/event/pbp/${eventId}/${set}/${game}`)));
 }
 
+/* STATS FOR THE MATCH BEING PLAYED RIGHT NOW.
+ *
+ * The drawer showed a live score — "6-4 2-1" — and nothing about how it
+ * was being won. A set lead built on one break with a wobbling serve is
+ * a different match from a set lead built on 80% behind the first serve,
+ * and the scoreline cannot tell them apart.
+ *
+ * Same endpoint as the last-meeting detail, pointed at THIS tournament
+ * rather than a previous one. The row already stores tournamentId and
+ * both player ids, so nothing extra is needed to locate it.
+ */
+async function fetchCurrentMatchStats(tour, tournamentId, p1, p2) {
+  if (!tournamentId || !p1 || !p2) return null;
+
+  const body = await safe(() => apiGet(
+    `${tour}/h2h/match-stats/${encodeURIComponent(tournamentId)}/${encodeURIComponent(p1)}/${encodeURIComponent(p2)}`),
+    { label: `current match stats ${p1}/${p2}` });
+
+  const d = body?.data;
+  if (!d) return null;
+
+  const pct = (a, b) => {
+    const x = Number(a), y = Number(b);
+    return (Number.isFinite(x) && Number.isFinite(y) && y > 0) ? Math.round((x / y) * 100) : null;
+  };
+
+  const side = (st) => {
+    if (!st) return null;
+    const out = {
+      aces: Number(st.aces) || 0,
+      doubleFaults: Number(st.doubleFaults) || 0,
+      firstServeIn: pct(st.firstServe, st.firstServeOf),
+      wonOnFirst: pct(st.winningOnFirstServe, st.winningOnFirstServeOf),
+      wonOnSecond: pct(st.winningOnSecondServe, st.winningOnSecondServeOf),
+      bpFaced: Number(st.breakPointFacedGm) || 0,
+      bpSaved: Number(st.breakPointSavedGm) || 0,
+      bpChances: Number(st.breakPointChanceGm) || 0,
+      bpWon: Number(st.breakPointWonGm) || 0,
+      winners: st.winners == null ? null : Number(st.winners),
+      unforced: st.unforcedErrors == null ? null : Number(st.unforcedErrors),
+      netWon: st.netApproaches == null ? null : Number(st.netApproaches),
+      netOf: st.netApproachesOf == null ? null : Number(st.netApproachesOf),
+      totalPoints: st.totalPointsWon == null ? null : Number(st.totalPointsWon),
+    };
+    // A stat block of all zeros means the match has produced no data yet
+    // — a match that has just started. Reporting that as real would show
+    // "0 aces, 0% behind first serve", which reads as poor play rather
+    // than as no play.
+    const meaningful = out.totalPoints || out.aces || out.bpFaced || out.bpChances || out.firstServeIn;
+    return meaningful ? out : null;
+  };
+
+  const a = side(d.player1Stats), b = side(d.player2Stats);
+  if (!a && !b) return null;
+
+  return { a, b, playersSwapped: String(d.player1Stats?.player1Id ?? '') !== String(p1) };
+}
+
 async function fetchPlayerStatus(name) {
   if (!name) return null;
   const body = await safe(() => apiGet(`profile/${encodeURIComponent(name)}/player-status`));
@@ -1778,6 +1836,7 @@ async function discoverOddsPath(sampleEventId) {
 }
 
 module.exports = {
+  fetchCurrentMatchStats,
   fetchAllFixtures,
   fetchFixturesH2H,
   fetchH2HInfo,
