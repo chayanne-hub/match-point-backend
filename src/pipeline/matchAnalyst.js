@@ -644,6 +644,16 @@ Use the tags precisely — they are what the weighting model learns from:
     No data says you couldn't look. Those are different, and only one of
     them should ever influence confidence.
 
+WHEN SOURCES DISAGREE, SAY SO IN THE BODY. If the supplied figures and
+something you found in search point different ways — a player listed as
+active who is reported injured, a form line that does not match recent
+results, a surface record that contradicts a report — state both in the
+body and explain which you weighted and why. Do not quietly pick one.
+A member who knows two sources disagree is better informed than one
+handed a false certainty, and a disagreement is often the most
+informative thing on the card: it is where the market may be wrong, and
+it is also where WE may be wrong.
+
 CONVICTION — classify your own call honestly. This is the single most
 important field. It separates calls worth acting on from calls you were
 forced to make, and it is judged on the QUALITY OF INFORMATION you found,
@@ -703,7 +713,27 @@ ${JSON_VALIDITY_REMINDER}
 The TOURNAMENT, SURFACE and DATE given above are authoritative. If a search
 result describes these players at a different event, that is a different match
 — do not substitute it. Reason about the event named here, and if the surface
-or venue is not given, say so rather than inferring one from search. Use search only for the two things the data above cannot cover: court speed at this venue, and motivation (what each player has to play for). Everything else \u2014 head to head, surface, form, ranking, venue record, workload, travel, home advantage, recent retirements, playing style and the serve/return match-up \u2014 is in the data above when known. Where a line is absent, that fact is simply unavailable: do not search for it and do not assume a value.` : '');
+or venue is not given, say so rather than inferring one from search. RESEARCH THIS MATCH PROPERLY. The figures above are a starting point, not the
+whole picture, and a pick built only from them is a pick anyone with the same
+feed could make.
+
+Search for what the data cannot contain: injury and fitness news, illness,
+coaching or equipment changes, personal circumstances, what either player has
+said about their own form or this event, court conditions and speed at this
+specific venue, weather where it is relevant, and what each player has to play
+for — ranking points, qualification, a title defence, a first main draw.
+
+Use search to VERIFY as well as to add. If something you find contradicts a
+figure above, say so explicitly rather than silently choosing one: a
+disagreement between the provider's numbers and a credible report is itself
+information, and a member is better served knowing the two sources disagree
+than being handed a false certainty.
+
+The one hard rule: the TOURNAMENT, SURFACE and DATE given above are the match
+you are analysing. If a search result describes these players at a different
+event, that is a different match — do not reason about it as though it were
+this one. Where a figure above is absent, treat it as unavailable rather than
+inventing a value, but you may still search for the underlying fact.` : '');
 
   // Real research with web search can legitimately take a while, but a
   // single hung request must never be allowed to block the entire
