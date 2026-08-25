@@ -1264,6 +1264,46 @@ async function fetchH2HFull(tour, id1, id2) {
       // Newest first from the feed; reversed so the display reads
       // oldest-to-newest like the rest of the form strip.
       form: form.reverse(),
+
+      /* THE MATCHES THEMSELVES, not just the tally.
+       *
+       * These games were already fetched to count the records and then
+       * thrown away. A win-loss strip says a player is 7-3; it does not
+       * say they beat two top-50 opponents and lost a tight three-setter,
+       * which is what "who is playing better" actually means.
+       *
+       * Kept to five, with the stat line each match carries — enough to
+       * judge form without turning the panel into a scroll. */
+      matches: games.slice(0, 5).map((g) => {
+        const st = g.stat || {};
+        const isP1 = String(g.player1Id) === String(payload.id ?? '');
+        const oppName = isP1 ? g.player2?.name : g.player1?.name;
+        const sfx = String(st.player1Id) === String(g.player1Id) ? '1' : '2';
+        const mine = isP1 ? sfx : (sfx === '1' ? '2' : '1');
+        const n = (k) => { const v = Number(st[`${k}${mine}`]); return Number.isFinite(v) ? v : null; };
+        const pct = (a, b) => (a != null && b ? Math.round((a / b) * 100) : null);
+
+        // "0000-00-00 01:38:47" -> 98 minutes.
+        let minutes = null;
+        const mt = String(st.mt || '');
+        const hm = mt.match(/(\d{2}):(\d{2}):(\d{2})$/);
+        if (hm) minutes = Number(hm[1]) * 60 + Number(hm[2]);
+
+        return {
+          date: g.date || null,
+          opponent: oppName || null,
+          opponentRank: (isP1 ? g.player2?.currentRank : g.player1?.currentRank) ?? null,
+          result: g.result || null,
+          won: typeof g.isWin === 'boolean' ? g.isWin : null,
+          event: g.tournament?.name || null,
+          surface: g.tournament?.courtId ?? null,
+          aces: n('aces'),
+          doubleFaults: n('doubleFaults'),
+          firstServePct: pct(n('firstServe'), n('firstServeOf')),
+          wonOnFirstPct: pct(n('winningOnFirstServe'), n('winningOnFirstServeOf')),
+          minutes,
+        };
+      }).filter((m) => m.opponent || m.result),
     };
   };
 
@@ -1331,6 +1371,7 @@ async function fetchH2HFull(tour, id1, id2) {
       // Oldest-first in the payload; reversed so the most recent match
       // reads left-to-right like every other form guide.
       form: counted?.form?.length ? counted.form : (Array.isArray(pl.recentGames) ? [...pl.recentGames].reverse() : []),
+      matches: counted?.matches || [],
     };
   };
 
