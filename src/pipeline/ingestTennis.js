@@ -403,8 +403,24 @@ async function ingestTennisFixtures() {
    * match can only ever move scheduled -> live here. A final match is
    * untouched no matter what the feed reports. */
   if (liveSourceIds.length) {
+    /* Only promote matches whose start time has actually arrived.
+     *
+     * The feed's live flag was trusted on its own, and it is not always
+     * right: Parry vs Vekic was promoted to live while still two and a
+     * half hours from starting. That is worse than cosmetic — the
+     * live-evidence guard then refuses to publish a price-only pick on a
+     * "live" match with no score, so a match that had not begun got no
+     * pick at all and its pre-match window elapsed.
+     *
+     * A 30-minute grace allows for genuinely early starts, which are
+     * common when a previous match is short. */
+    const promoteFrom = new Date(Date.now() + 30 * 60 * 1000);
     const promoted = await db.match.updateMany({
-      where: { externalId: { in: liveSourceIds }, status: 'scheduled' },
+      where: {
+        externalId: { in: liveSourceIds },
+        status: 'scheduled',
+        startTime: { lte: promoteFrom },
+      },
       data: { status: 'live' },
     }).catch((e) => { console.error(`[tennisIngest] promote: ${e.message}`); return { count: 0 }; });
     if (promoted.count) console.log(`[tennisIngest] promoted ${promoted.count} match(es) to live from the fixture feed`);

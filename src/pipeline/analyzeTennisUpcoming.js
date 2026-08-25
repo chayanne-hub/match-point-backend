@@ -216,7 +216,31 @@ async function analyzeTennisUpcoming({ analyze, blend, reassessLiveMatch, limit 
       || (/(^|[^A-Za-z])W\d{2,3}([^0-9]|$)/.test(match.league || '') ? 'wta' : null)
       || 'atp';
 
-    let isLive = match.status === 'live' || untilStart < 0;
+    /* A `live` STATUS IS NOT PROOF A MATCH IS LIVE.
+     *
+     * Rows get promoted to live by several paths — the socket matching on
+     * names, the provider's status, and the time-based fallback — and any
+     * of them can be wrong. Parry vs Vekic sat at status `live` with a
+     * start time two and a half hours in the FUTURE and no score.
+     *
+     * That combination is destructive: the live-evidence guard correctly
+     * refuses to publish a price-only pick on a live match with no score,
+     * so a match that had not started got no pick at all, and the
+     * pre-match window passed while it sat there.
+     *
+     * So live now requires corroboration — a score, or a start time that
+     * has actually passed. A status alone, contradicted by the clock, is
+     * treated as the error it is. */
+    const hasLiveScore = Boolean(match.liveScore || match.setScore);
+    const claimsLive = match.status === 'live';
+    const startPassed = untilStart <= 0;
+
+    let isLive = (claimsLive && (hasLiveScore || startPassed)) || startPassed;
+
+    if (claimsLive && !isLive) {
+      console.warn(`[tennisUpcoming] ${match.competitorA} vs ${match.competitorB}: status says live but it starts in `
+        + `${Math.round(untilStart / 60000)}m with no score — treating as pre-match.`);
+    }
     let hasLiveOdds = isLive
       && typeof match.liveOddsA === 'number' && typeof match.liveOddsB === 'number';
 
