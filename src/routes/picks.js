@@ -238,6 +238,34 @@ async function playerStatFor(tour, playerId) {
   };
 }
 
+/* PUBLISHED RECORD START DATE.
+ *
+ * RECORD_SINCE=2026-08-26 makes every published figure count only picks
+ * made from that date onward.
+ *
+ * The point is a clean read after a configuration change. The record
+ * before the 17th (287 main-tour picks, 74%, +433) and after it (163,
+ * 62%, -1189) describe two different systems, and averaging them
+ * describes neither — a member seeing 70% would get something else
+ * entirely.
+ *
+ * Nothing is deleted. The history stays queryable, which matters because
+ * comparing eras is exactly how the problem was found. This only governs
+ * what the site SHOWS.
+ */
+function recordSince() {
+  const raw = process.env.RECORD_SINCE;
+  if (!raw) return null;
+  const d = new Date(raw);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+/** Prisma filter for the published record window, or {} when unset. */
+function recordWindow() {
+  const since = recordSince();
+  return since ? { createdAt: { gte: since } } : {};
+}
+
 function tierFilter() {
   const tiers = excludedTiers();
   if (!tiers.length) return {};
@@ -895,6 +923,8 @@ router.get('/stats', async (req, res) => {
         // the same day's results were counted differently in two places on
         // one screen. Widened to a genuine corruption bound.
         odds: { gte: -100000, lte: 100000 },
+        // Published record window — see recordSince().
+        ...recordWindow(),
         ...(sport ? { match: { sport: { slug: sport }, ...tierFilter() } } : { match: tierFilter() }),
       },
     },
@@ -964,7 +994,10 @@ router.get('/stats', async (req, res) => {
   // since the FIRST pick was created — a genuine all-time daily pace,
   // not diluted by a fixed window.
   const allPicks = await db.pick.findMany({
-    where: sport ? { match: { sport: { slug: sport }, ...tierFilter() } } : { match: tierFilter() },
+    where: {
+      ...recordWindow(),
+      ...(sport ? { match: { sport: { slug: sport }, ...tierFilter() } } : { match: tierFilter() }),
+    },
     distinct: ['matchId'],
     select: { matchId: true, createdAt: true },
     orderBy: { createdAt: 'asc' },
@@ -2473,6 +2506,13 @@ router.get('/archive/results', async (req, res) => {
         // entirely, which is exactly why the Activity feed and the Win
         // Rate Tracker reported different totals for the same day.
         odds: { gte: -100000, lte: 100000 },
+        /* Published record window.
+         *
+         * Must match /stats exactly. The tracker reads this route and the
+         * headline reads /stats, so a window applied to one and not the
+         * other puts two different records on the same screen — which has
+         * already happened twice with other filters. */
+        ...recordWindow(),
         /* Disabled sports stay out of the record too.
          *
          * Hiding them from the board was not enough: the tracker reads
